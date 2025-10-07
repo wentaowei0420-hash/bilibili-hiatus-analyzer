@@ -49,7 +49,7 @@ SPACE_VIDEO_API = "https://api.bilibili.com/x/space/arc/search"
 OUTPUT_CSV = "bilibili_hiatus_ranking.csv"
 
 # 请求延时（秒）- 遵守君子协议
-REQUEST_DELAY = 15
+REQUEST_DELAY = 5
 
 
 # ===========================
