@@ -1,0 +1,49 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+        body: |
+          ## 更新内容
+          
+          请查看 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) 了解详细更新内容。
+          
+          ## 安装方法
+          
+          ```bash
+          # 克隆仓库
+          git clone https://github.com/${{ github.repository }}.git
+          cd bilibili-hiatus-analyzer
+          
+          # 安装依赖
+          pip install -r requirements.txt
+          
+          # 配置Cookie后运行
+          python bilibili_hiatus_analyzer.py
+          ```
+          
+          ## 注意事项
+          
+          - 请确保Python版本 >= 3.7
+          - 需要正确配置B站Cookie
+          - 详细使用说明请查看 [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+
