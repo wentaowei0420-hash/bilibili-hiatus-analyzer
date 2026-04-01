@@ -1,0 +1,146 @@
+import json
+import time
+from datetime import datetime
+
+from .logging_utils import smart_print as print
+from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date, UNKNOWN_DATE
+
+
+class CacheStore:
+    def __init__(self, config):
+        self.config = config
+
+    def load_precise_progress(self):
+        try:
+            with self.config.progress_json.open("r", encoding="utf-8") as progress_file:
+                data = json.load(progress_file)
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            print(f"⚠️  读取进度文件失败，将从头开始: {exc}")
+            return {}
+
+        raw_results = data.get("results_by_mid", {})
+        if not isinstance(raw_results, dict):
+            return {}
+
+        results = {}
+        for mid, result in raw_results.items():
+            if not isinstance(result, dict):
+                continue
+            if result.get("data_source") == "video_api" and result.get("upload_date") == UNKNOWN_DATE:
+                continue
+            results[mid] = result
+        return results
+
+    def save_precise_progress(self, results_by_mid):
+        self._write_json(
+            self.config.progress_json,
+            {"saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "results_by_mid": results_by_mid},
+            "保存进度文件失败",
+        )
+
+    def load_video_duration_progress(self):
+        try:
+            with self.config.video_duration_progress_json.open("r", encoding="utf-8") as progress_file:
+                data = json.load(progress_file)
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            print(f"⚠️  读取视频时长分析进度失败，将重新抓取: {exc}")
+            return {}
+
+        ups = data.get("ups", {})
+        if not isinstance(ups, dict):
+            return {}
+        return ups
+
+    def save_video_duration_progress(self, progress):
+        self._write_json(
+            self.config.video_duration_progress_json,
+            {"saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ups": progress},
+            "保存视频时长分析进度失败",
+        )
+
+    def is_cache_expired(self, cached_at, max_age_hours):
+        cached_timestamp = normalize_timestamp(cached_at)
+        if not cached_timestamp:
+            return True
+        return time.time() - cached_timestamp >= max_age_hours * 3600
+
+    def should_refresh_precise_cache(self, following, cached_result):
+        if not isinstance(cached_result, dict):
+            return True
+
+        data_source = cached_result.get("data_source")
+        if data_source not in ("video_api", "no_video"):
+            return True
+
+        if self.is_cache_expired(cached_result.get("cached_at"), self.config.precise_cache_max_age_hours):
+            return True
+
+        following_mtime = normalize_timestamp(following.get("mtime"))
+        if not following_mtime:
+            return False
+
+        if data_source == "video_api":
+            cached_upload_timestamp = normalize_timestamp(cached_result.get("upload_timestamp"))
+            if not cached_upload_timestamp:
+                return True
+            return following_mtime > cached_upload_timestamp
+
+        cached_at = normalize_timestamp(cached_result.get("cached_at"))
+        if not cached_at:
+            return True
+        return following_mtime > cached_at
+
+    def should_refresh_video_duration_cache(self, following, progress_entry):
+        if not isinstance(progress_entry, dict):
+            return True
+
+        summary = progress_entry.get("summary", {})
+        if not isinstance(summary, dict) or not summary:
+            return True
+
+        if self.is_cache_expired(
+            progress_entry.get("cached_at"), self.config.video_duration_cache_max_age_hours
+        ):
+            return True
+
+        following_mtime = normalize_timestamp(following.get("mtime"))
+        if not following_mtime:
+            return False
+
+        latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
+        if not latest_publish_timestamp:
+            return True
+        return following_mtime > latest_publish_timestamp
+
+    def refresh_result_runtime_fields(self, result):
+        if not isinstance(result, dict):
+            return result
+
+        data_source = result.get("data_source")
+        if data_source == "video_api":
+            upload_timestamp = normalize_timestamp(result.get("upload_timestamp"))
+            if upload_timestamp:
+                result["upload_date"] = timestamp_to_date(upload_timestamp)
+                days_since = calculate_days_since(upload_timestamp)
+                result["days_since_update"] = days_since
+                result["days_since_last_video"] = days_since
+        elif data_source == "followings_mtime":
+            activity_timestamp = normalize_timestamp(result.get("activity_timestamp"))
+            if activity_timestamp:
+                result["upload_date"] = timestamp_to_date(activity_timestamp)
+                days_since = calculate_days_since(activity_timestamp)
+                result["days_since_update"] = days_since
+                result["days_since_last_video"] = days_since
+
+        return result
+
+    def _write_json(self, path, payload, error_message):
+        try:
+            with path.open("w", encoding="utf-8") as progress_file:
+                json.dump(payload, progress_file, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"⚠️  {error_message}: {exc}")

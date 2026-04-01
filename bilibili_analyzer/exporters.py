@@ -1,0 +1,180 @@
+import csv
+from datetime import datetime
+
+from .logging_utils import smart_print as print
+from .utils import format_ratio
+
+
+def save_to_csv(config, results):
+    fieldnames = [
+        "uploader_name",
+        "uploader_id",
+        "uploader_homepage",
+        "following_group_ids",
+        "following_group_names",
+        "published_video_count",
+        "latest_video_title",
+        "upload_date",
+        "days_since_update",
+        "days_since_last_video",
+        "view_count",
+        "video_url",
+        "data_source",
+    ]
+    chinese_headers = {
+        "uploader_name": "UP主姓名",
+        "uploader_id": "UP主UID",
+        "uploader_homepage": "UP主主页链接",
+        "following_group_ids": "关注分组ID",
+        "following_group_names": "关注分组名称",
+        "published_video_count": "发布视频数量",
+        "latest_video_title": "最新视频标题",
+        "upload_date": "最后活跃/发布日期",
+        "days_since_update": "未更新天数",
+        "days_since_last_video": "距离最后一个视频发布(天)",
+        "view_count": "最新视频播放量",
+        "video_url": "视频链接",
+        "data_source": "数据来源",
+    }
+    _write_csv(config.output_csv, fieldnames, chinese_headers, results, "保存CSV文件失败")
+    print("=" * 60)
+    print(f"✅ 排行榜已保存到文件: {config.output_csv.name}")
+    print(f"📊 共分析了 {len(results)} 位UP主")
+    print("=" * 60)
+
+
+def save_all_videos_to_csv(config, video_rows):
+    fieldnames = [
+        "uploader_name",
+        "uploader_id",
+        "video_title",
+        "bvid",
+        "publish_date",
+        "publish_timestamp",
+        "duration_text",
+        "duration_seconds",
+        "duration_category",
+        "view_count",
+        "video_url",
+    ]
+    chinese_headers = {
+        "uploader_name": "UP主姓名",
+        "uploader_id": "UP主UID",
+        "video_title": "视频标题",
+        "bvid": "BVID",
+        "publish_date": "发布日期",
+        "publish_timestamp": "发布时间戳",
+        "duration_text": "视频时长",
+        "duration_seconds": "视频时长(秒)",
+        "duration_category": "时长分类",
+        "view_count": "播放量",
+        "video_url": "视频链接",
+    }
+    _write_csv(
+        config.all_videos_csv,
+        fieldnames,
+        chinese_headers,
+        video_rows,
+        "保存视频明细CSV失败",
+    )
+
+
+def save_video_duration_analysis_to_csv(config, summary_rows):
+    fieldnames = [
+        "uploader_name",
+        "uploader_id",
+        "total_videos",
+        "total_duration_seconds",
+        "average_duration_seconds",
+        "average_duration_text",
+        "short_video_count",
+        "short_video_ratio",
+        "medium_video_count",
+        "medium_video_ratio",
+        "medium_long_video_count",
+        "medium_long_video_ratio",
+        "long_video_count",
+        "long_video_ratio",
+    ]
+    chinese_headers = {
+        "uploader_name": "UP主姓名",
+        "uploader_id": "UP主UID",
+        "total_videos": "视频总数",
+        "total_duration_seconds": "总时长(秒)",
+        "average_duration_seconds": "平均时长(秒)",
+        "average_duration_text": "平均时长",
+        "short_video_count": "短视频数量(0~30s)",
+        "short_video_ratio": "短视频占比",
+        "medium_video_count": "中视频数量(30~60s)",
+        "medium_video_ratio": "中视频占比",
+        "medium_long_video_count": "中长视频数量(60~240s)",
+        "medium_long_video_ratio": "中长视频占比",
+        "long_video_count": "长视频数量(240s+)",
+        "long_video_ratio": "长视频占比",
+    }
+    _write_csv(
+        config.video_duration_analysis_csv,
+        fieldnames,
+        chinese_headers,
+        summary_rows,
+        "保存视频时长分析CSV失败",
+    )
+
+
+def save_video_duration_report(config, summary_rows, total_video_count):
+    try:
+        total_up_count = len(summary_rows)
+        short_total = sum(row["short_video_count"] for row in summary_rows)
+        medium_total = sum(row["medium_video_count"] for row in summary_rows)
+        medium_long_total = sum(row["medium_long_video_count"] for row in summary_rows)
+        long_total = sum(row["long_video_count"] for row in summary_rows)
+
+        report_lines = [
+            "# B站关注UP视频时长分析报告",
+            "",
+            f"- 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- 分析UP主数量: {total_up_count}",
+            f"- 分析视频总数: {total_video_count}",
+            "",
+            "## 全局视频类型占比",
+            "",
+            f"- 短视频(0~30s): {short_total} ({format_ratio(short_total, total_video_count)})",
+            f"- 中视频(30~60s): {medium_total} ({format_ratio(medium_total, total_video_count)})",
+            f"- 中长视频(60~240s): {medium_long_total} ({format_ratio(medium_long_total, total_video_count)})",
+            f"- 长视频(240s+): {long_total} ({format_ratio(long_total, total_video_count)})",
+            "",
+            "## 长视频占比 Top 20",
+            "",
+            "| 排名 | UP主 | 视频总数 | 长视频数量 | 长视频占比 | 平均时长 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+
+        sorted_rows = sorted(
+            summary_rows,
+            key=lambda row: (
+                float(str(row["long_video_ratio"]).rstrip("%") or "0"),
+                row["total_videos"],
+            ),
+            reverse=True,
+        )
+
+        for index, row in enumerate(sorted_rows[:20], 1):
+            report_lines.append(
+                f"| {index} | {row['uploader_name']} | {row['total_videos']} | "
+                f"{row['long_video_count']} | {row['long_video_ratio']} | {row['average_duration_text']} |"
+            )
+
+        with config.video_duration_report_md.open("w", encoding="utf-8") as report_file:
+            report_file.write("\n".join(report_lines))
+    except Exception as exc:
+        print(f"❌ 保存视频时长分析报告失败: {exc}")
+
+
+def _write_csv(path, fieldnames, chinese_headers, rows, error_message):
+    try:
+        with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writerow(chinese_headers)
+            writer.writerows(rows)
+    except Exception as exc:
+        print(f"❌ {error_message}: {exc}")
