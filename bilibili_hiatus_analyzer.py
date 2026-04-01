@@ -1,8 +1,3 @@
-"""
-B站催更分析器 - 找出你关注的UP主中的"鸽王"
-作者: AI Assistant
-功能: 自动获取B站关注列表，分析UP主更新频率，生成"鸽王"排行榜
-"""
 import subprocess
 import os
 import requests
@@ -16,43 +11,43 @@ import hashlib
 import re
 from urllib.parse import urlencode
 from dotenv import load_dotenv
-
+from loguru import logger
 load_dotenv()
-_ORIGINAL_PRINT = print
+# ===========================
+# 🚀 工业级日志系统配置 (Loguru)
+# ===========================
+# 1. 移除默认的控制台输出格式
+logger.remove()
 
-def safe_print(*args, **kwargs):
-    """
-    在Windows GBK终端下安全输出，避免emoji导致UnicodeEncodeError
-    """
-    file = kwargs.get('file', sys.stdout)
-    sep = kwargs.get('sep', ' ')
-    end = kwargs.get('end', '\n')
-    flush = kwargs.get('flush', False)
+# 2. 添加带颜色的标准控制台输出
+logger.add(sys.stdout, colorize=True,
+           format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
 
-    if file in (sys.stdout, sys.stderr):
-        encoding = getattr(file, 'encoding', None) or 'utf-8'
-        text = sep.join(str(arg) for arg in args)
-        safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
-        _ORIGINAL_PRINT(safe_text, end=end, file=file, flush=flush)
+# 3. 添加文件输出：每天零点自动切割生成新文件，最多保留 30 天
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+logger.add("logs/bilibili_app_{time:YYYY-MM-DD}.log", rotation="00:00", retention="30 days", encoding="utf-8", level="INFO")
+
+
+def smart_print(*args, **kwargs):
+    """智能日志分发器：劫持旧的 print，并根据文本自动分配严重级别"""
+    text = kwargs.get('sep', ' ').join(str(arg) for arg in args)
+    if not text.strip():  # 忽略纯换行的空打印
         return
 
-    _ORIGINAL_PRINT(*args, **kwargs)
+    # 依靠你原本精心设计的 Emoji 自动判断日志级别！
+    if "❌" in text or "错误" in text or "失败" in text:
+        logger.error(text)
+    elif "⚠️" in text or "异常" in text or "风控" in text or "重试队列" in text:
+        logger.warning(text)
+    elif "✅" in text or "成功" in text or "🎉" in text or "🏆" in text:
+        logger.success(text)
+    else:
+        logger.info(text)
 
+# 魔法劫持：将全局的 print 函数替换为我们的智能日志器
+print = smart_print
 
-print = safe_print
-
-# ===========================
-# 配置区域 - 请在这里填入你的信息
-# ===========================
-
-# Cookie配置
-# 请从浏览器中复制完整的Cookie字符串粘贴到下方引号中
-# 获取方法：
-# 1. 登录B站 (www.bilibili.com)
-# 2. 打开浏览器开发者工具 (F12)
-# 3. 切换到 Network (网络) 标签
-# 4. 刷新页面，点击任意请求
-# 5. 在 Headers 中找到 Cookie，复制完整内容
 COOKIE = os.getenv("BILIBILI_COOKIE", "")
 # 请求头配置 - 模拟真实浏览器
 HEADERS = {
