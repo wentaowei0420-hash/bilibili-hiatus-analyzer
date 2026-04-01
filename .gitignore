@@ -158,3 +158,12 @@ $RECYCLE.BIN/
 *.bak
 *.backup
 
+# Runtime outputs
+bilibili_hiatus_progress.json
+bilibili_video_duration_progress.json
+bilibili_video_duration_report.md
+bilibili_all_videos.csv
+bilibili_video_duration_analysis.csv
+
+# 忽略环境变量配置和本地敏感数据
+.env
