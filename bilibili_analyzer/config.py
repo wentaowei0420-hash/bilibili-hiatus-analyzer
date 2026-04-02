@@ -34,6 +34,7 @@ class AnalyzerConfig:
     analysis_mode: str
     enable_video_duration_analysis: bool
     max_workers: int
+    video_analysis_workers: int
     request_delay: int
     max_request_delay: int
     network_retry_limit: int
@@ -77,6 +78,8 @@ class FeishuConfig:
     app_id: str
     app_secret: str
     spreadsheet_token: str
+    sheet_title: str
+    sheet_index: int
     file_hiatus: Path
     file_duration: Path
     file_merged_output: Path
@@ -107,6 +110,7 @@ def load_analyzer_config() -> AnalyzerConfig:
         analysis_mode=os.getenv("ANALYSIS_MODE", "precise"),
         enable_video_duration_analysis=_get_bool("ENABLE_VIDEO_DURATION_ANALYSIS", True),
         max_workers=int(os.getenv("MAX_WORKERS", "3")),
+        video_analysis_workers=int(os.getenv("VIDEO_ANALYSIS_WORKERS", "1")),
         request_delay=int(os.getenv("REQUEST_DELAY", "2")),
         max_request_delay=int(os.getenv("MAX_REQUEST_DELAY", "20")),
         network_retry_limit=int(os.getenv("NETWORK_RETRY_LIMIT", "3")),
@@ -139,6 +143,8 @@ def load_feishu_config() -> FeishuConfig:
         app_id=os.getenv("FEISHU_APP_ID", ""),
         app_secret=os.getenv("FEISHU_APP_SECRET", ""),
         spreadsheet_token=os.getenv("FEISHU_SPREADSHEET_TOKEN", ""),
+        sheet_title=os.getenv("FEISHU_BILIBILI_SHEET_TITLE", "B站数据表"),
+        sheet_index=int(os.getenv("FEISHU_BILIBILI_SHEET_INDEX", "0")),
         file_hiatus=Path(
             os.getenv("FILE_HIATUS_PATH", str(root_dir / "bilibili_hiatus_ranking.csv"))
         ),

@@ -1,7 +1,8 @@
 import csv
 from datetime import datetime
 
-from .logging_utils import smart_print as print
+from bilibili_analyzer.logging_utils import smart_print as print
+
 from .utils import format_ratio
 
 
@@ -10,7 +11,6 @@ def save_to_csv(config, results):
         "uploader_name",
         "uploader_id",
         "uploader_homepage",
-        "following_group_ids",
         "following_group_names",
         "published_video_count",
         "average_update_interval_days",
@@ -26,7 +26,6 @@ def save_to_csv(config, results):
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "uploader_homepage": "UP主主页链接",
-        "following_group_ids": "关注分组ID",
         "following_group_names": "关注分组名称",
         "published_video_count": "发布视频数量",
         "average_update_interval_days": "平均几天一更",
@@ -38,11 +37,7 @@ def save_to_csv(config, results):
         "video_url": "视频链接",
         "data_source": "数据来源",
     }
-    _write_csv(config.output_csv, fieldnames, chinese_headers, results, "保存CSV文件失败")
-    print("=" * 60)
-    print(f"✅ 排行榜已保存到文件: {config.output_csv.name}")
-    print(f"📊 共分析了 {len(results)} 位UP主")
-    print("=" * 60)
+    _write_csv(config.output_csv, fieldnames, chinese_headers, results, "保存抖音排行CSV失败")
 
 
 def save_all_videos_to_csv(config, video_rows):
@@ -50,7 +45,7 @@ def save_all_videos_to_csv(config, video_rows):
         "uploader_name",
         "uploader_id",
         "video_title",
-        "bvid",
+        "aweme_id",
         "publish_date",
         "publish_timestamp",
         "duration_text",
@@ -63,7 +58,7 @@ def save_all_videos_to_csv(config, video_rows):
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "video_title": "视频标题",
-        "bvid": "BVID",
+        "aweme_id": "视频ID",
         "publish_date": "发布日期",
         "publish_timestamp": "发布时间戳",
         "duration_text": "视频时长",
@@ -77,7 +72,7 @@ def save_all_videos_to_csv(config, video_rows):
         fieldnames,
         chinese_headers,
         video_rows,
-        "保存视频明细CSV失败",
+        "保存抖音视频明细CSV失败",
     )
 
 
@@ -121,7 +116,7 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
         fieldnames,
         chinese_headers,
         summary_rows,
-        "保存视频时长分析CSV失败",
+        "保存抖音视频时长分析CSV失败",
     )
 
 
@@ -134,10 +129,10 @@ def save_video_duration_report(config, summary_rows, total_video_count):
         long_total = sum(row["long_video_count"] for row in summary_rows)
 
         report_lines = [
-            "# B站关注UP视频时长分析报告",
+            "# 抖音关注博主视频时长分析报告",
             "",
             f"- 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"- 分析UP主数量: {total_up_count}",
+            f"- 分析博主数量: {total_up_count}",
             f"- 分析视频总数: {total_video_count}",
             "",
             "## 全局视频类型占比",
@@ -173,7 +168,7 @@ def save_video_duration_report(config, summary_rows, total_video_count):
         with config.video_duration_report_md.open("w", encoding="utf-8") as report_file:
             report_file.write("\n".join(report_lines))
     except Exception as exc:
-        print(f"❌ 保存视频时长分析报告失败: {exc}")
+        print(f"❌ 保存抖音视频时长报告失败: {exc}")
 
 
 def _write_csv(path, fieldnames, chinese_headers, rows, error_message):

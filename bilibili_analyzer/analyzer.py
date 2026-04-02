@@ -20,6 +20,7 @@ from .utils import (
     SHORT_VIDEO_LABEL,
     UNKNOWN_DATE,
     build_homepage_url,
+    calculate_average_update_interval_days,
     calculate_days_since,
     format_ratio,
     normalize_timestamp,
@@ -43,6 +44,7 @@ class BilibiliHiatusAnalyzer:
             "following_group_ids": "",
             "following_group_names": "",
             "published_video_count": 0,
+            "average_update_interval_days": None,
             "latest_video_title": video_info["video_title"],
             "upload_timestamp": normalize_timestamp(video_info["upload_timestamp"]),
             "upload_date": timestamp_to_date(video_info["upload_timestamp"]),
@@ -63,6 +65,7 @@ class BilibiliHiatusAnalyzer:
             "following_group_ids": following.get("group_id_text", ""),
             "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
             "published_video_count": 0,
+            "average_update_interval_days": None,
             "latest_video_title": "未抓取视频详情（回退模式，基于关注列表活跃时间）",
             "activity_timestamp": normalize_timestamp(activity_timestamp),
             "upload_date": timestamp_to_date(activity_timestamp),
@@ -81,6 +84,7 @@ class BilibiliHiatusAnalyzer:
             "following_group_ids": following.get("group_id_text", ""),
             "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
             "published_video_count": 0,
+            "average_update_interval_days": None,
             "latest_video_title": "暂无公开视频",
             "upload_date": UNKNOWN_DATE,
             "days_since_update": 0,
@@ -100,6 +104,9 @@ class BilibiliHiatusAnalyzer:
         long_count = sum(1 for video in videos if video["duration_category"] == LONG_VIDEO_LABEL)
         total_duration_seconds = sum(video["duration_seconds"] for video in videos)
         average_duration_seconds = int(total_duration_seconds / total_videos) if total_videos else 0
+        average_update_interval_days = calculate_average_update_interval_days(
+            video.get("publish_timestamp") for video in videos
+        )
         latest_publish_timestamp = max(
             (normalize_timestamp(video.get("publish_timestamp")) for video in videos),
             default=0,
@@ -113,6 +120,7 @@ class BilibiliHiatusAnalyzer:
             "total_duration_seconds": total_duration_seconds,
             "average_duration_seconds": average_duration_seconds,
             "average_duration_text": seconds_to_duration_text(average_duration_seconds),
+            "average_update_interval_days": average_update_interval_days,
             "short_video_count": short_count,
             "short_video_ratio": format_ratio(short_count, total_videos),
             "medium_video_count": medium_count,
@@ -122,6 +130,17 @@ class BilibiliHiatusAnalyzer:
             "long_video_count": long_count,
             "long_video_ratio": format_ratio(long_count, total_videos),
         }
+
+    def populate_duration_summary_defaults(self, summary, videos):
+        completed_summary = dict(summary or {})
+        completed_summary.setdefault("total_videos", len(videos or []))
+        completed_summary.setdefault(
+            "average_update_interval_days",
+            calculate_average_update_interval_days(
+                video.get("publish_timestamp") for video in (videos or [])
+            ),
+        )
+        return completed_summary
 
     def enrich_results_with_profile_and_counts(self, results, duration_progress=None, followings=None):
         progress = duration_progress or {}
@@ -139,13 +158,22 @@ class BilibiliHiatusAnalyzer:
                 result["following_group_ids"] = result.get("following_group_ids") or "0"
                 result["following_group_names"] = result.get("following_group_names") or DEFAULT_GROUP_NAME
 
-            summary = progress.get(str(uploader_id), {}).get("summary", {})
+            entry = progress.get(str(uploader_id), {})
+            summary = self.populate_duration_summary_defaults(
+                entry.get("summary", {}),
+                entry.get("videos", []),
+            )
             if summary:
                 result["published_video_count"] = summary.get(
                     "total_videos", result.get("published_video_count", 0)
                 )
+                result["average_update_interval_days"] = summary.get(
+                    "average_update_interval_days",
+                    result.get("average_update_interval_days"),
+                )
             else:
                 result.setdefault("published_video_count", 0)
+                result.setdefault("average_update_interval_days", None)
 
         return results
 
@@ -225,6 +253,7 @@ class BilibiliHiatusAnalyzer:
         print("=" * 60)
         print("📊 正在分析所有关注UP主的全部视频时长...")
         print("=" * 60)
+        print(f"   当前视频时长分析并发数: {self.config.video_analysis_workers}")
 
         duration_progress = self.cache_store.load_video_duration_progress()
         if duration_progress:
@@ -256,7 +285,7 @@ class BilibiliHiatusAnalyzer:
 
         for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
             batch = pending_followings[start:start + self.config.video_analysis_batch_size]
-            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            with ThreadPoolExecutor(max_workers=self.config.video_analysis_workers) as executor:
                 futures = {
                     executor.submit(process_duration, following, start + index + 1): following
                     for index, following in enumerate(batch)
@@ -298,7 +327,12 @@ class BilibiliHiatusAnalyzer:
             if not entry:
                 continue
             all_video_rows.extend(entry.get("videos", []))
-            summary_rows.append(entry.get("summary", {}))
+            summary = self.populate_duration_summary_defaults(
+                entry.get("summary", {}),
+                entry.get("videos", []),
+            )
+            entry["summary"] = summary
+            summary_rows.append(summary)
 
         if not summary_rows:
             print("⚠️  未生成任何视频时长分析结果。")
@@ -331,6 +365,13 @@ class BilibiliHiatusAnalyzer:
             print(f"   🏠 主页: {result.get('uploader_homepage', '暂无')}")
             print(f"   🏷️  分组: {result.get('following_group_names', DEFAULT_GROUP_NAME)}")
             print(f"   🎞️  发布视频数量: {result.get('published_video_count', 0)}")
+            average_update_interval_days = result.get("average_update_interval_days")
+            average_update_text = (
+                f"{average_update_interval_days} 天"
+                if average_update_interval_days is not None
+                else "暂无数据"
+            )
+            print(f"   📐 平均几天一更: {average_update_text}")
             print(f"   📺 最新视频: {result['latest_video_title']}")
             print(f"   📅 发布日期: {result['upload_date']}")
             print(f"   👁️  播放量: {result['view_count']:,}")

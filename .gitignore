@@ -167,3 +167,5 @@ bilibili_video_duration_analysis.csv
 
 # 忽略环境变量配置和本地敏感数据
 .env
+# 忽略 DrissionPage 浏览器缓存数据
+chrome_data/

@@ -28,19 +28,27 @@ class BilibiliHttpClient:
         self.delay_lock = threading.Lock()
         self.wbi_lock = threading.Lock()
         self.session_lock = threading.Lock()
+        self.thread_local = threading.local()
         self.current_request_delay = config.request_delay
         self.wbi_mixin_key = None
-        self.session = self._build_session()
 
     def _build_session(self):
         session = requests.Session()
         session.headers.update(self.config.headers)
+        pool_size = max(self.config.max_workers, self.config.video_analysis_workers) * 2
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=self.config.max_workers * 2,
-            pool_maxsize=self.config.max_workers * 2,
+            pool_connections=pool_size,
+            pool_maxsize=pool_size,
         )
         session.mount("http://", adapter)
         session.mount("https://", adapter)
+        return session
+
+    def _get_session(self):
+        session = getattr(self.thread_local, "session", None)
+        if session is None:
+            session = self._build_session()
+            self.thread_local.session = session
         return session
 
     def is_rate_limit_error(self, code, message):
@@ -65,10 +73,32 @@ class BilibiliHttpClient:
     def reset_session(self):
         with self.session_lock:
             try:
-                self.session.close()
+                session = getattr(self.thread_local, "session", None)
+                if session is not None:
+                    session.close()
             except Exception:
                 pass
-            self.session = self._build_session()
+            self.thread_local.session = self._build_session()
+
+    def _handle_rate_limit_retry(self, request_name, retry_count):
+        self.increase_request_delay()
+        if retry_count > self.config.max_rate_limit_retries:
+            raise RateLimitExceededError(f"{request_name} 连续触发频率限制")
+
+        if retry_count % self.config.rate_limit_retry_before_long_cooldown == 0:
+            wait_seconds = self.config.long_rate_limit_cooldown + random.uniform(0, 10)
+            print(
+                f"⚠️  {request_name} - 连续触发频率限制，进入冷却 "
+                f"{wait_seconds:.0f} 秒后再试..."
+            )
+        else:
+            wait_seconds = self.get_request_delay() + retry_count * 5
+
+        print(
+            f"⚠️  {request_name} - 请求过于频繁，第 {retry_count} 次重试，"
+            f"等待 {wait_seconds:.0f} 秒后继续..."
+        )
+        time.sleep(wait_seconds)
 
     def get_json_with_retry(self, url, params=None, request_name="请求"):
         network_retry_count = 0
@@ -76,9 +106,45 @@ class BilibiliHttpClient:
 
         while True:
             try:
-                response = self.session.get(url, params=params, timeout=(10, 20))
+                response = self._get_session().get(url, params=params, timeout=(10, 20))
                 response.raise_for_status()
                 data = response.json()
+            except requests.exceptions.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                response_message = ""
+                response_code = None
+
+                if exc.response is not None:
+                    try:
+                        response_data = exc.response.json()
+                        response_code = response_data.get("code")
+                        response_message = response_data.get("message", "")
+                    except ValueError:
+                        response_message = (exc.response.text or "").strip()[:120]
+
+                if status_code in (403, 412, 418, 429) or self.is_rate_limit_error(
+                    response_code, response_message
+                ):
+                    rate_limit_retry_count += 1
+                    print(
+                        f"⚠️  {request_name} - 触发接口限制(HTTP {status_code})，"
+                        f"第 {rate_limit_retry_count} 次重试..."
+                    )
+                    self._handle_rate_limit_retry(request_name, rate_limit_retry_count)
+                    continue
+
+                network_retry_count += 1
+                if network_retry_count > self.config.network_retry_limit:
+                    raise
+
+                self.reset_session()
+                wait_seconds = max(3, self.get_request_delay()) * network_retry_count
+                print(
+                    f"⚠️  {request_name} - HTTP异常(HTTP {status_code})，"
+                    f"第 {network_retry_count} 次重试，{wait_seconds:.0f} 秒后继续..."
+                )
+                time.sleep(wait_seconds)
+                continue
             except requests.exceptions.SSLError:
                 network_retry_count += 1
                 if network_retry_count > self.config.network_retry_limit:
@@ -115,28 +181,7 @@ class BilibiliHttpClient:
 
             if self.is_rate_limit_error(code, message):
                 rate_limit_retry_count += 1
-                self.increase_request_delay()
-                if rate_limit_retry_count > self.config.max_rate_limit_retries:
-                    raise RateLimitExceededError(f"{request_name} 连续触发频率限制")
-
-                if (
-                    rate_limit_retry_count
-                    % self.config.rate_limit_retry_before_long_cooldown
-                    == 0
-                ):
-                    wait_seconds = self.config.long_rate_limit_cooldown + random.uniform(0, 10)
-                    print(
-                        f"⚠️  {request_name} - 连续触发频率限制，进入冷却 "
-                        f"{wait_seconds:.0f} 秒后再试..."
-                    )
-                else:
-                    wait_seconds = self.get_request_delay() + rate_limit_retry_count * 5
-
-                print(
-                    f"⚠️  {request_name} - 请求过于频繁，第 {rate_limit_retry_count} 次重试，"
-                    f"等待 {wait_seconds:.0f} 秒后继续..."
-                )
-                time.sleep(wait_seconds)
+                self._handle_rate_limit_retry(request_name, rate_limit_retry_count)
                 continue
 
             return data

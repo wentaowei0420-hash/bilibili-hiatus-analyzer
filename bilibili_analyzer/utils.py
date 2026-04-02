@@ -134,3 +134,24 @@ def calculate_days_since(timestamp):
         return (datetime.now() - datetime.fromtimestamp(normalized)).days
     except Exception:
         return 0
+
+
+def calculate_average_update_interval_days(timestamps):
+    normalized_timestamps = sorted(
+        {
+            normalized
+            for normalized in (normalize_timestamp(timestamp) for timestamp in timestamps)
+            if normalized > 0
+        },
+        reverse=True,
+    )
+    if len(normalized_timestamps) < 2:
+        return None
+
+    interval_days = [
+        (normalized_timestamps[index] - normalized_timestamps[index + 1]) / 86400
+        for index in range(len(normalized_timestamps) - 1)
+    ]
+    if not interval_days:
+        return None
+    return round(sum(interval_days) / len(interval_days), 2)
