@@ -12,7 +12,9 @@ def save_to_csv(config, results):
         "uploader_homepage",
         "following_group_ids",
         "following_group_names",
+        "follower_count",
         "published_video_count",
+        "average_like_count",
         "average_update_interval_days",
         "latest_video_title",
         "upload_date",
@@ -28,7 +30,9 @@ def save_to_csv(config, results):
         "uploader_homepage": "UP主主页链接",
         "following_group_ids": "关注分组ID",
         "following_group_names": "关注分组名称",
+        "follower_count": "粉丝数",
         "published_video_count": "发布视频数量",
+        "average_like_count": "平均点赞数",
         "average_update_interval_days": "平均几天一更",
         "latest_video_title": "最新视频标题",
         "upload_date": "最后活跃/发布日期",
@@ -56,6 +60,7 @@ def save_all_videos_to_csv(config, video_rows):
         "duration_text",
         "duration_seconds",
         "duration_category",
+        "like_count",
         "view_count",
         "video_url",
     ]
@@ -69,6 +74,7 @@ def save_all_videos_to_csv(config, video_rows):
         "duration_text": "视频时长",
         "duration_seconds": "视频时长(秒)",
         "duration_category": "时长分类",
+        "like_count": "点赞数",
         "view_count": "播放量",
         "video_url": "视频链接",
     }
@@ -85,10 +91,12 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
     fieldnames = [
         "uploader_name",
         "uploader_id",
+        "follower_count",
         "total_videos",
         "total_duration_seconds",
         "average_duration_seconds",
         "average_duration_text",
+        "average_like_count",
         "average_update_interval_days",
         "short_video_count",
         "short_video_ratio",
@@ -102,10 +110,12 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
     chinese_headers = {
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
+        "follower_count": "粉丝数",
         "total_videos": "视频总数",
         "total_duration_seconds": "总时长(秒)",
         "average_duration_seconds": "平均时长(秒)",
         "average_duration_text": "平均时长",
+        "average_like_count": "平均点赞数",
         "average_update_interval_days": "平均几天一更",
         "short_video_count": "短视频数量(0~30s)",
         "short_video_ratio": "短视频占比",
@@ -149,8 +159,8 @@ def save_video_duration_report(config, summary_rows, total_video_count):
             "",
             "## 长视频占比 Top 20",
             "",
-            "| 排名 | UP主 | 视频总数 | 长视频数量 | 长视频占比 | 平均时长 | 平均几天一更 |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| 排名 | UP主 | 粉丝数 | 视频总数 | 长视频数量 | 长视频占比 | 平均时长 | 平均点赞数 | 平均几天一更 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
 
         sorted_rows = sorted(
@@ -165,8 +175,9 @@ def save_video_duration_report(config, summary_rows, total_video_count):
         for index, row in enumerate(sorted_rows[:20], 1):
             average_update_interval_days = row.get("average_update_interval_days")
             report_lines.append(
-                f"| {index} | {row['uploader_name']} | {row['total_videos']} | "
+                f"| {index} | {row['uploader_name']} | {row.get('follower_count') or '暂无数据'} | {row['total_videos']} | "
                 f"{row['long_video_count']} | {row['long_video_ratio']} | {row['average_duration_text']} | "
+                f"{row.get('average_like_count', 0)} | "
                 f"{average_update_interval_days if average_update_interval_days is not None else '暂无数据'} |"
             )
 

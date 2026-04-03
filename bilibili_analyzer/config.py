@@ -21,9 +21,11 @@ class AnalyzerConfig:
     log_dir: Path
     cookie: str
     followings_api: str
+    relation_stat_api: str
     following_tags_api: str
     space_dynamic_api: str
     space_wbi_arc_search_api: str
+    video_view_api: str
     nav_api: str
     output_csv: Path
     progress_json: Path
@@ -33,8 +35,15 @@ class AnalyzerConfig:
     video_duration_progress_json: Path
     analysis_mode: str
     enable_video_duration_analysis: bool
+    enable_real_video_like_fetch: bool
+    enable_cached_video_like_backfill: bool
     max_workers: int
     video_analysis_workers: int
+    video_stat_workers: int
+    video_stat_recent_limit: int
+    video_stat_batch_size: int
+    video_stat_batch_cooldown: int
+    video_stat_max_requests_per_run: int
     request_delay: int
     max_request_delay: int
     network_retry_limit: int
@@ -84,6 +93,7 @@ class FeishuConfig:
     file_duration: Path
     file_merged_output: Path
     db_path: Path
+    upload_state_json: Path
 
 
 def _root_dir() -> Path:
@@ -97,9 +107,11 @@ def load_analyzer_config() -> AnalyzerConfig:
         log_dir=root_dir / "logs",
         cookie=os.getenv("BILIBILI_COOKIE", ""),
         followings_api="https://api.bilibili.com/x/relation/followings",
+        relation_stat_api="https://api.bilibili.com/x/relation/stat",
         following_tags_api="https://api.bilibili.com/x/relation/tags",
         space_dynamic_api="https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
         space_wbi_arc_search_api="https://api.bilibili.com/x/space/wbi/arc/search",
+        video_view_api="https://api.bilibili.com/x/web-interface/view",
         nav_api="https://api.bilibili.com/x/web-interface/nav",
         output_csv=root_dir / "bilibili_hiatus_ranking.csv",
         progress_json=root_dir / "bilibili_hiatus_progress.json",
@@ -109,14 +121,21 @@ def load_analyzer_config() -> AnalyzerConfig:
         video_duration_progress_json=root_dir / "bilibili_video_duration_progress.json",
         analysis_mode=os.getenv("ANALYSIS_MODE", "precise"),
         enable_video_duration_analysis=_get_bool("ENABLE_VIDEO_DURATION_ANALYSIS", True),
+        enable_real_video_like_fetch=_get_bool("ENABLE_REAL_VIDEO_LIKE_FETCH", True),
+        enable_cached_video_like_backfill=_get_bool("ENABLE_CACHED_VIDEO_LIKE_BACKFILL", False),
         max_workers=int(os.getenv("MAX_WORKERS", "3")),
         video_analysis_workers=int(os.getenv("VIDEO_ANALYSIS_WORKERS", "1")),
+        video_stat_workers=int(os.getenv("VIDEO_STAT_WORKERS", "2")),
+        video_stat_recent_limit=int(os.getenv("VIDEO_STAT_RECENT_LIMIT", "20")),
+        video_stat_batch_size=int(os.getenv("VIDEO_STAT_BATCH_SIZE", "4")),
+        video_stat_batch_cooldown=int(os.getenv("VIDEO_STAT_BATCH_COOLDOWN", "8")),
+        video_stat_max_requests_per_run=int(os.getenv("VIDEO_STAT_MAX_REQUESTS_PER_RUN", "80")),
         request_delay=int(os.getenv("REQUEST_DELAY", "2")),
         max_request_delay=int(os.getenv("MAX_REQUEST_DELAY", "20")),
         network_retry_limit=int(os.getenv("NETWORK_RETRY_LIMIT", "3")),
-        precise_cache_max_age_hours=int(os.getenv("PRECISE_CACHE_MAX_AGE_HOURS", "12")),
+        precise_cache_max_age_hours=int(os.getenv("PRECISE_CACHE_MAX_AGE_HOURS", "72")),
         video_duration_cache_max_age_hours=int(
-            os.getenv("VIDEO_DURATION_CACHE_MAX_AGE_HOURS", "24")
+            os.getenv("VIDEO_DURATION_CACHE_MAX_AGE_HOURS", "72")
         ),
         video_analysis_start_delay=int(os.getenv("VIDEO_ANALYSIS_START_DELAY", "8")),
         batch_size=int(os.getenv("BATCH_SIZE", "25")),
@@ -158,4 +177,10 @@ def load_feishu_config() -> FeishuConfig:
             os.getenv("FILE_MERGED_OUTPUT_PATH", str(root_dir / "merged_bilibili_data.csv"))
         ),
         db_path=Path(os.getenv("DB_PATH", str(root_dir / "bilibili_history.db"))),
+        upload_state_json=Path(
+            os.getenv(
+                "FEISHU_UPLOAD_STATE_PATH",
+                str(root_dir / "bilibili_feishu_upload_state.json"),
+            )
+        ),
     )

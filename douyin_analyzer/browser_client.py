@@ -1,5 +1,7 @@
+import json
 import random
 import time
+from urllib.parse import urlparse
 
 from DrissionPage import ChromiumOptions, ChromiumPage
 
@@ -15,10 +17,23 @@ from .utils import (
 )
 
 
+class DouyinServiceError(RuntimeError):
+    pass
+
+
 class DouyinBrowserClient:
     def __init__(self, config):
         self.config = config
         self.page = None
+        self.service_error_streak = 0
+
+    def _minimize_window_if_possible(self):
+        if self.page is None:
+            return
+        try:
+            self.page.set.window.mini()
+        except Exception:
+            pass
 
     def start(self):
         if self.page is not None:
@@ -27,6 +42,7 @@ class DouyinBrowserClient:
         co = ChromiumOptions()
         co.set_user_data_path(str(self.config.browser_user_data_path))
         self.page = ChromiumPage(co)
+        self._minimize_window_if_possible()
         return self.page
 
     def close(self):
@@ -36,6 +52,14 @@ class DouyinBrowserClient:
             except Exception:
                 pass
             self.page = None
+
+    def restart(self, wait_seconds=0):
+        self.close()
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        page = self.start()
+        self._minimize_window_if_possible()
+        return page
 
     def ensure_login(self):
         page = self.start()
@@ -48,7 +72,7 @@ class DouyinBrowserClient:
 
     def get_followings(self):
         page = self.start()
-        print("📥 正在抓取抖音关注列表...")
+        print("📜 正在抓取抖音关注列表...")
         page.listen.start(self.config.following_api_pattern)
         page.get(self.config.self_user_url)
         time.sleep(self.config.page_load_delay)
@@ -84,8 +108,12 @@ class DouyinBrowserClient:
                 followings.append(
                     {
                         "nickname": user.get("nickname", "未知UP主"),
+                        "remark_name": self._extract_remark_name(user) or "",
                         "sec_uid": sec_uid,
                         "homepage": f"https://www.douyin.com/user/{sec_uid}",
+                        "follower_count": self._extract_follower_count(user),
+                        "aweme_count": self._extract_aweme_count(user),
+                        "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
                     }
                 )
 
@@ -98,43 +126,78 @@ class DouyinBrowserClient:
         return followings
 
     def get_all_videos_for_user(self, user):
+        return self._collect_videos_for_user(user, limit=None)
+
+    def get_recent_videos_for_user(self, user, limit):
+        return self._collect_videos_for_user(user, limit=max(1, int(limit or 1)))
+
+    def _collect_videos_for_user(self, user, limit=None):
         page = self.start()
-        page.listen.start(self.config.post_api_pattern)
-        page.get(user["homepage"])
-        time.sleep(self.config.page_load_delay)
+        for attempt in range(1, self.config.video_page_retry_count + 1):
+            videos_by_id = {}
+            empty_rounds = 0
+            page.listen.start(self.config.post_api_pattern)
+            try:
+                page.get(user["homepage"])
+                time.sleep(self.config.video_page_load_delay)
+                if self._page_has_service_error():
+                    raise RuntimeError("service_error")
 
-        videos_by_id = {}
-        empty_rounds = 0
+                while True:
+                    self._scroll_video_page_fast()
+                    packet = page.listen.wait(timeout=self.config.video_packet_timeout)
+                    if packet:
+                        empty_rounds = 0
+                        data = self._extract_packet_body(packet)
+                        if self._packet_has_service_error(data):
+                            raise RuntimeError("service_error")
+                        self._update_user_profile_from_packet(user, data)
+                        for aweme in data.get("aweme_list") or []:
+                            video = self._build_video_row(user, aweme)
+                            if video:
+                                videos_by_id[video["aweme_id"]] = video
+                        if limit and len(videos_by_id) >= limit:
+                            break
+                        if data.get("has_more") in (0, False):
+                            break
+                    else:
+                        if self._page_has_service_error():
+                            raise RuntimeError("service_error")
+                        empty_rounds += 1
+                        if empty_rounds >= self.config.video_empty_round_limit:
+                            break
 
-        while True:
-            packet = page.listen.wait(timeout=self.config.packet_timeout)
-            if packet:
-                empty_rounds = 0
-                data = self._extract_packet_body(packet)
-                for aweme in data.get("aweme_list") or []:
-                    video = self._build_video_row(user, aweme)
-                    if video:
-                        videos_by_id[video["aweme_id"]] = video
-                if data.get("has_more") in (0, False):
-                    break
-            else:
-                empty_rounds += 1
-                if empty_rounds >= self.config.empty_round_limit:
-                    break
+                videos = sorted(
+                    videos_by_id.values(),
+                    key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
+                    reverse=True,
+                )
+                if limit:
+                    videos = videos[:limit]
+                self.service_error_streak = 0
+                time.sleep(self.config.user_request_interval + random.uniform(0, 0.2))
+                print(f"   ✅ 共获取 {user['nickname']} 的 {len(videos)} 个视频")
+                return videos
+            except RuntimeError as exc:
+                if str(exc) != "service_error":
+                    raise
+                self.service_error_streak += 1
+                if attempt >= self.config.video_page_retry_count:
+                    raise DouyinServiceError("页面出现服务异常，重试后仍无法恢复")
 
-            self._scroll_active_containers()
-            time.sleep(self.config.scroll_pause + random.uniform(0, 0.5))
-
-        page.listen.stop()
-        time.sleep(self.config.user_request_interval + random.uniform(0, 0.5))
-
-        videos = sorted(
-            videos_by_id.values(),
-            key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
-            reverse=True,
-        )
-        print(f"   ✅ 共获取 {user['nickname']} 的 {len(videos)} 个视频")
-        return videos
+                wait_seconds = self.config.service_error_retry_wait * attempt
+                if self.service_error_streak >= 3:
+                    wait_seconds += self.config.service_error_long_cooldown
+                print(
+                    f"   ⚠️  {user['nickname']} 页面出现服务异常，"
+                    f"第 {attempt} 次恢复，等待 {wait_seconds:.0f} 秒后重试..."
+                )
+                self._recover_from_service_error(user, wait_seconds)
+            finally:
+                try:
+                    page.listen.stop()
+                except Exception:
+                    pass
 
     def _extract_packet_body(self, packet):
         try:
@@ -144,6 +207,36 @@ class DouyinBrowserClient:
         except Exception:
             pass
         return {}
+
+    def _page_has_service_error(self):
+        try:
+            body_text = self.start().run_js("return document.body ? document.body.innerText : '';") or ""
+        except Exception:
+            return False
+        return "服务异常" in body_text and "拉取数据" in body_text
+
+    @staticmethod
+    def _packet_has_service_error(data):
+        if not isinstance(data, dict):
+            return False
+        text = str(data)
+        return "服务异常" in text and "拉取数据" in text
+
+    def _recover_from_service_error(self, user, wait_seconds):
+        if self.service_error_streak >= 2:
+            page = self.restart(wait_seconds)
+        else:
+            time.sleep(wait_seconds)
+            page = self.start()
+        try:
+            page.refresh()
+            time.sleep(self.config.video_page_load_delay + 1)
+            if self._page_has_service_error():
+                page.get(user["homepage"])
+                time.sleep(self.config.video_page_load_delay + 1)
+        except Exception:
+            page.get(user["homepage"])
+            time.sleep(self.config.video_page_load_delay + 1)
 
     def _scroll_active_containers(self):
         self.start().run_js(
@@ -156,6 +249,21 @@ class DouyinBrowserClient:
             window.scrollBy(0, 1600);
             """
         )
+
+    def _scroll_video_page_fast(self):
+        for _ in range(self.config.video_scroll_steps_per_round):
+            self.start().run_js(
+                f"""
+                let distance = {self.config.video_scroll_distance};
+                let scrollables = Array.from(document.querySelectorAll('*')).filter(
+                    el => el.scrollHeight > el.clientHeight && el.clientHeight > 150 &&
+                          getComputedStyle(el).overflowY !== 'hidden'
+                );
+                scrollables.forEach(el => el.scrollTop += distance);
+                window.scrollBy(0, distance);
+                """
+            )
+            time.sleep(self.config.video_scroll_pause + random.uniform(0, 0.05))
 
     def _build_video_row(self, user, aweme):
         aweme_id = aweme.get("aweme_id") or ""
@@ -181,6 +289,328 @@ class DouyinBrowserClient:
             "duration_text": seconds_to_duration_text(duration_seconds),
             "duration_seconds": duration_seconds,
             "duration_category": categorize_duration(duration_seconds),
+            "like_count": parse_view_count(statistics.get("digg_count")),
             "view_count": parse_view_count(statistics.get("play_count")),
             "video_url": f"https://www.douyin.com/video/{aweme_id}",
         }
+
+    def _update_user_profile_from_packet(self, user, data):
+        follower_count = self._extract_follower_count(data)
+        if follower_count:
+            user["follower_count"] = follower_count
+
+        aweme_count = self._extract_aweme_count(data)
+        if aweme_count is not None:
+            user["aweme_count"] = aweme_count
+
+        latest_publish_timestamp = self._extract_latest_publish_timestamp(data)
+        if latest_publish_timestamp:
+            user["latest_publish_timestamp"] = latest_publish_timestamp
+
+        remark_name = self._extract_remark_name(data)
+        if remark_name:
+            user["remark_name"] = remark_name
+
+    def _extract_follower_count(self, data):
+        if not isinstance(data, dict):
+            return None
+        return self._find_numeric_value(
+            data,
+            {
+                "follower_count",
+                "fans_count",
+                "fans",
+                "mplatform_followers_count",
+                "followerCount",
+            },
+        )
+
+    def _extract_aweme_count(self, data):
+        if not isinstance(data, dict):
+            return None
+        return self._find_numeric_value(
+            data,
+            {
+                "aweme_count",
+                "awemeCount",
+                "media_count",
+                "mediaCount",
+                "video_count",
+                "videoCount",
+            },
+        )
+
+    def _extract_latest_publish_timestamp(self, data):
+        if not isinstance(data, dict):
+            return 0
+        timestamp = self._find_timestamp_value(
+            data,
+            {
+                "latest_aweme_time",
+                "latestAwemeTime",
+                "last_aweme_time",
+                "lastAwemeTime",
+                "latest_publish_time",
+                "latestPublishTime",
+                "publish_time",
+                "publishTime",
+                "aweme_create_time",
+                "awemeCreateTime",
+                "item_create_time",
+                "itemCreateTime",
+                "create_time",
+            },
+        )
+        return normalize_timestamp(timestamp)
+
+    def _extract_remark_name(self, data):
+        if not isinstance(data, dict):
+            return ""
+        return self._find_text_value(
+            data,
+            {
+                "remark_name",
+                "remarkName",
+                "remark",
+                "mark_name",
+                "markName",
+                "note",
+                "note_name",
+                "noteName",
+                "follow_remark_name",
+                "followRemarkName",
+            },
+        )
+
+    def _find_numeric_value(self, data, key_candidates):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key in key_candidates:
+                    parsed = parse_view_count(value)
+                    if parsed:
+                        return parsed
+            for value in data.values():
+                found = self._find_numeric_value(value, key_candidates)
+                if found is not None:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._find_numeric_value(item, key_candidates)
+                if found is not None:
+                    return found
+        return None
+
+    def _find_timestamp_value(self, data, key_candidates):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key in key_candidates:
+                    normalized = normalize_timestamp(value)
+                    if normalized:
+                        return normalized
+            for value in data.values():
+                found = self._find_timestamp_value(value, key_candidates)
+                if found:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._find_timestamp_value(item, key_candidates)
+                if found:
+                    return found
+        return 0
+
+    def _find_text_value(self, data, key_candidates):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key in key_candidates and isinstance(value, str):
+                    text = value.strip()
+                    if text:
+                        return text
+            for value in data.values():
+                found = self._find_text_value(value, key_candidates)
+                if found:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._find_text_value(item, key_candidates)
+                if found:
+                    return found
+        return ""
+
+    def unfollow_users_by_homepages(self, homepages, on_unfollowed=None):
+        normalized_homepages = []
+        seen_homepages = set()
+        for homepage in homepages:
+            normalized = self.normalize_homepage_url(homepage)
+            if not normalized or normalized in seen_homepages:
+                continue
+            seen_homepages.add(normalized)
+            normalized_homepages.append(normalized)
+
+        results = []
+        consecutive_failures = 0
+        for index, homepage in enumerate(normalized_homepages, 1):
+            print(f"[{index}/{len(normalized_homepages)}] 正在处理取消关注: {homepage}")
+            try:
+                result = self.unfollow_user_by_homepage(homepage)
+            except Exception as exc:
+                result = {
+                    "homepage": homepage,
+                    "status": "failed",
+                    "message": str(exc),
+                }
+            results.append(result)
+            if result.get("status") == "unfollowed" and callable(on_unfollowed):
+                try:
+                    on_unfollowed(homepage)
+                except Exception as exc:
+                    print(f"   ⚠️  已取消关注，但更新名单文件失败: {exc}")
+
+            status = result.get("status")
+            if status in {"failed", "unknown"}:
+                consecutive_failures += 1
+                cooldown = self.config.unfollow_failure_cooldown
+                print(
+                    f"   ⏸️  检测到异常结果: {result.get('message', '未知原因')}，"
+                    f"冷却 {cooldown:.0f} 秒后再继续..."
+                )
+                time.sleep(cooldown)
+            else:
+                consecutive_failures = 0
+                base_interval = max(
+                    self.config.unfollow_interval_seconds,
+                    self.config.user_request_interval,
+                    1.0,
+                )
+                time.sleep(base_interval + random.uniform(0.2, 0.8))
+
+            if (
+                self.config.unfollow_batch_size > 0
+                and index % self.config.unfollow_batch_size == 0
+                and index < len(normalized_homepages)
+            ):
+                cooldown = self.config.unfollow_batch_cooldown
+                print(f"   ⏸️  已处理 {index} 个取消关注目标，批次冷却 {cooldown:.0f} 秒...")
+                time.sleep(cooldown)
+
+            if (
+                self.config.unfollow_restart_interval > 0
+                and index % self.config.unfollow_restart_interval == 0
+                and index < len(normalized_homepages)
+            ):
+                print("   🔄 为降低风控概率，正在重启浏览器会话...")
+                self.restart(5)
+
+            if consecutive_failures >= 2:
+                extra_cooldown = self.config.unfollow_failure_cooldown
+                print(f"   ⏸️  连续异常较多，额外冷却 {extra_cooldown:.0f} 秒并重启会话...")
+                self.restart(extra_cooldown)
+                consecutive_failures = 0
+        return results
+
+    def unfollow_user_by_homepage(self, homepage):
+        page = self.start()
+        homepage = self.normalize_homepage_url(homepage)
+        if not homepage:
+            return {"homepage": homepage, "status": "invalid", "message": "主页链接无效"}
+
+        page.get(homepage)
+        time.sleep(self.config.page_load_delay + 1)
+
+        status = self._detect_profile_follow_status()
+        if status == "not_following":
+            print("   ℹ️  当前未关注，跳过。")
+            return {"homepage": homepage, "status": "skipped", "message": "当前未关注"}
+
+        if status != "following":
+            print("   ⚠️  未能稳定识别关注状态，跳过该博主。")
+            return {"homepage": homepage, "status": "unknown", "message": "未能识别关注状态"}
+
+        if not self._click_profile_action_button(["已关注", "互相关注", "相互关注"]):
+            return {"homepage": homepage, "status": "failed", "message": "未找到已关注按钮"}
+
+        time.sleep(2)
+
+        final_status = self._detect_profile_follow_status()
+        if final_status == "not_following":
+            print("   ✅ 已成功取消关注。")
+            return {"homepage": homepage, "status": "unfollowed", "message": "已取消关注"}
+
+        print("   ⚠️  点击后仍然显示已关注，可能未触发取消。")
+        return {"homepage": homepage, "status": "failed", "message": "取消后状态未变化"}
+
+    @staticmethod
+    def normalize_homepage_url(homepage):
+        homepage = (homepage or "").strip()
+        if not homepage:
+            return ""
+        if not homepage.startswith(("http://", "https://")):
+            return homepage
+
+        parsed = urlparse(homepage)
+        if not parsed.netloc:
+            return ""
+        normalized_path = parsed.path.rstrip("/")
+        if not normalized_path:
+            return ""
+        return f"https://{parsed.netloc}{normalized_path}"
+
+    def _detect_profile_follow_status(self):
+        page = self.start()
+        result = page.run_js(
+            """
+            const candidates = Array.from(document.querySelectorAll('button, div, span, a'));
+            const items = candidates
+              .map(el => {
+                const text = (el.innerText || el.textContent || '').trim();
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return { text, rect, display: style.display, visibility: style.visibility };
+              })
+              .filter(item =>
+                item.text &&
+                item.display !== 'none' &&
+                item.visibility !== 'hidden' &&
+                item.rect.width > 48 &&
+                item.rect.height > 24 &&
+                item.rect.top >= 0 &&
+                item.rect.top < 420 &&
+                item.rect.left > window.innerWidth * 0.5
+              );
+
+            const texts = items.map(item => item.text);
+            if (texts.some(text => ['已关注', '互相关注', '相互关注'].includes(text))) {
+              return 'following';
+            }
+            if (texts.some(text => text === '关注')) {
+              return 'not_following';
+            }
+            return 'unknown';
+            """
+        )
+        return result if isinstance(result, str) else "unknown"
+
+    def _click_profile_action_button(self, text_candidates):
+        page = self.start()
+        encoded_candidates = json.dumps(list(text_candidates), ensure_ascii=False)
+        script = """
+            const texts = __TEXTS__;
+            const candidates = Array.from(document.querySelectorAll('button, div, span, a'));
+            const target = candidates.find(el => {
+              const text = (el.innerText || el.textContent || '').trim();
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              return texts.includes(text) &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                rect.width > 48 &&
+                rect.height > 24 &&
+                rect.top >= 0 &&
+                rect.top < 420 &&
+                rect.left > window.innerWidth * 0.5;
+            });
+            if (!target) return false;
+            target.click();
+            return true;
+            """
+        result = page.run_js(script.replace("__TEXTS__", encoded_candidates))
+        return bool(result)

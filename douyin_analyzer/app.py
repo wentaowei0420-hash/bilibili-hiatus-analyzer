@@ -1,4 +1,5 @@
 import traceback
+from pathlib import Path
 
 from bilibili_analyzer.feishu_uploader import FeishuUploader
 from bilibili_analyzer.logging_utils import setup_logging, smart_print as print
@@ -9,13 +10,69 @@ from .cache import CacheStore
 from .config import load_analyzer_config, load_feishu_config
 
 
-def run_analysis(trigger_upload=True):
-    config = load_analyzer_config()
+def load_unfollow_targets(list_path):
+    path = Path(list_path)
+    if not path.exists():
+        print(f"⚠️  未找到取消关注名单文件: {path}")
+        return []
+
+    targets = []
+    with path.open("r", encoding="utf-8") as unfollow_file:
+        for line in unfollow_file:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            targets.append(text)
+    return targets
+
+
+def remove_unfollow_target(list_path, homepage):
+    path = Path(list_path)
+    if not path.exists():
+        return
+
+    normalized_homepage = DouyinBrowserClient.normalize_homepage_url(homepage)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+
+    updated_lines = []
+    removed = False
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            updated_lines.append(line)
+            continue
+
+        normalized_line = DouyinBrowserClient.normalize_homepage_url(raw)
+        if not removed and normalized_line == normalized_homepage:
+            removed = True
+            continue
+        updated_lines.append(line)
+
+    if removed:
+        path.write_text("\n".join(updated_lines) + ("\n" if updated_lines else ""), encoding="utf-8")
+        print(f"-> 已从取消关注名单中移除: {homepage}")
+
+
+def run_partial_feishu_upload(processed_count):
+    print(f"-> 正在执行抖音阶段性飞书上传，当前已处理 {processed_count} 位博主...")
+    run_feishu_upload()
+
+
+def run_analysis(trigger_upload=True, fetch_mode_override=None):
+    config = load_analyzer_config(fetch_mode_override=fetch_mode_override)
     setup_logging(config.log_dir, "douyin_app")
 
     browser_client = DouyinBrowserClient(config)
     cache_store = CacheStore(config)
-    analyzer = DouyinHiatusAnalyzer(config, browser_client, cache_store)
+    analyzer = DouyinHiatusAnalyzer(
+        config,
+        browser_client,
+        cache_store,
+        upload_callback=run_partial_feishu_upload if trigger_upload else None,
+    )
 
     try:
         results = analyzer.analyze_hiatus()
@@ -38,9 +95,42 @@ def run_feishu_upload():
     uploader.run()
 
 
-def main():
+def run_unfollow(list_path):
+    config = load_analyzer_config(fetch_mode_override="counts")
+    setup_logging(config.log_dir, "douyin_unfollow")
+
+    targets = load_unfollow_targets(list_path)
+    if not targets:
+        print("ℹ️  取消关注名单为空，本次不执行任何操作。")
+        return []
+
+    browser_client = DouyinBrowserClient(config)
     try:
-        run_analysis(trigger_upload=True)
+        browser_client.ensure_login()
+        results = browser_client.unfollow_users_by_homepages(
+            targets,
+            on_unfollowed=lambda homepage: remove_unfollow_target(list_path, homepage),
+        )
+    finally:
+        browser_client.close()
+
+    unfollowed = sum(1 for item in results if item.get("status") == "unfollowed")
+    skipped = sum(1 for item in results if item.get("status") == "skipped")
+    failed = sum(1 for item in results if item.get("status") not in {"unfollowed", "skipped"})
+
+    print("\n" + "=" * 60)
+    print("抖音取消关注执行完成")
+    print("=" * 60)
+    print(f"总目标数: {len(results)}")
+    print(f"成功取消关注: {unfollowed}")
+    print(f"原本未关注/已跳过: {skipped}")
+    print(f"失败或未识别: {failed}")
+    return results
+
+
+def main(fetch_mode_override=None):
+    try:
+        run_analysis(trigger_upload=True, fetch_mode_override=fetch_mode_override)
     except KeyboardInterrupt:
         print("\n\n⚠️  程序被用户中断")
     except Exception as exc:

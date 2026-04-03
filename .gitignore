@@ -164,7 +164,7 @@ bilibili_video_duration_progress.json
 bilibili_video_duration_report.md
 bilibili_all_videos.csv
 bilibili_video_duration_analysis.csv
-
+douyin_history.db
 # 忽略环境变量配置和本地敏感数据
 .env
 # 忽略 DrissionPage 浏览器缓存数据

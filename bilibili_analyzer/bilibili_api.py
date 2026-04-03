@@ -1,4 +1,6 @@
+import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -22,8 +24,8 @@ class BilibiliApi:
         self.client = client
 
     def check_cookie(self):
-        if self.config.cookie == "在这里粘贴你的Cookie" or not self.config.cookie.strip():
-            print("❌ 错误: 请先配置Cookie!")
+        if not self.config.cookie.strip() or self.config.cookie == "在这里粘贴你的Cookie":
+            print("错误: 请先配置 BILIBILI_COOKIE。")
             raise SystemExit(1)
 
     def get_user_mid(self):
@@ -31,10 +33,10 @@ class BilibiliApi:
             data = self.client.get_json_with_retry(self.config.nav_api, request_name="获取当前用户信息")
             if data.get("code") == 0:
                 return data.get("data", {}).get("mid")
-            print(f"❌ 获取用户信息失败: {data.get('message')}")
+            print(f"获取用户信息失败: {data.get('message', '未知错误')}")
             return None
         except Exception as exc:
-            print(f"❌ 获取用户信息出错: {exc}")
+            print(f"获取用户信息出错: {exc}")
             return None
 
     def get_following_tag_map(self):
@@ -44,7 +46,7 @@ class BilibiliApi:
                 request_name="获取关注分组列表",
             )
             if data.get("code") != 0:
-                print(f"⚠️  获取关注分组失败: {data.get('message', '未知错误')}")
+                print(f"获取关注分组失败: {data.get('message', '未知错误')}")
                 return {}
 
             tag_map = {}
@@ -56,7 +58,7 @@ class BilibiliApi:
                 tag_map[int(tag_id)] = name
             return tag_map
         except Exception as exc:
-            print(f"⚠️  获取关注分组出错: {exc}")
+            print(f"获取关注分组出错: {exc}")
             return {}
 
     def get_followings_list(self):
@@ -71,18 +73,16 @@ class BilibiliApi:
 
         while True:
             try:
-                params = {"vmid": user_mid, "pn": page, "ps": 50, "order": "desc"}
                 data = self.client.get_json_with_retry(
                     self.config.followings_api,
-                    params=params,
+                    params={"vmid": user_mid, "pn": page, "ps": 50, "order": "desc"},
                     request_name=f"获取关注列表第 {page} 页",
                 )
-
                 if data.get("code") != 0:
-                    print(f"❌ API返回错误: {data.get('message', '未知错误')}")
+                    print(f"获取关注列表失败: {data.get('message', '未知错误')}")
                     return None
 
-                followings = data.get("data", {}).get("list", [])
+                followings = data.get("data", {}).get("list", []) or []
                 if not followings:
                     break
 
@@ -93,28 +93,50 @@ class BilibiliApi:
                     following["group_name_text"] = format_group_names(group_ids, tag_name_map)
 
                 all_followings.extend(followings)
-                print(f"   已获取 {len(all_followings)} 位UP主...")
+                print(f"已获取 {len(all_followings)} 位UP主...")
 
-                total = data.get("data", {}).get("total", 0)
-                if len(all_followings) >= total:
+                total = (data.get("data") or {}).get("total", 0)
+                if total and len(all_followings) >= total:
                     break
 
                 page += 1
                 time.sleep(self.client.get_request_delay())
             except Exception as exc:
-                print(f"❌ 获取关注列表失败: {exc}")
+                print(f"获取关注列表出错: {exc}")
                 return None
 
-        print(f"✅ 成功获取 {len(all_followings)} 位关注的UP主\n")
+        print(f"✅ 成功获取 {len(all_followings)} 位关注的UP主")
         return all_followings
+
+    def get_uploader_relation_stat(self, mid, uname="UP主"):
+        try:
+            data = self.client.get_json_with_retry(
+                self.config.relation_stat_api,
+                params={"vmid": mid},
+                request_name=f"获取 {uname} 的粉丝统计",
+            )
+            if data.get("code") != 0:
+                print(f"   ⚠️  {uname} - 获取粉丝统计失败: {data.get('message', '未知错误')}")
+                return {}
+
+            payload = data.get("data", {}) or {}
+            return {
+                "follower_count": parse_view_count(payload.get("follower", 0)),
+                "following_count": parse_view_count(payload.get("following", 0)),
+            }
+        except Exception as exc:
+            print(f"   ⚠️  {uname} - 获取粉丝统计出错: {exc}")
+            return {}
 
     def extract_video_info_from_dynamic_item(self, item, uname, mid):
         if item.get("type") != "DYNAMIC_TYPE_AV":
             return None
 
-        modules = item.get("modules", {})
+        modules = item.get("modules", {}) or {}
         module_author = modules.get("module_author", {}) or {}
-        archive = (modules.get("module_dynamic", {}) or {}).get("major", {}).get("archive", {}) or {}
+        archive = (
+            (modules.get("module_dynamic", {}) or {}).get("major", {}) or {}
+        ).get("archive", {}) or {}
         if not archive:
             return None
 
@@ -122,14 +144,136 @@ class BilibiliApi:
         if jump_url.startswith("//"):
             jump_url = f"https:{jump_url}"
 
+        like_count, like_count_fetched = self.extract_video_like_info(archive)
         return {
             "uploader_name": uname,
             "uploader_id": mid,
             "video_title": archive.get("title", "未知标题"),
             "bvid": archive.get("bvid", ""),
             "upload_timestamp": normalize_timestamp(module_author.get("pub_ts")),
+            "like_count": like_count,
+            "like_count_fetched": like_count_fetched,
             "view_count": parse_view_count((archive.get("stat") or {}).get("play", 0)),
             "video_url": jump_url,
+        }
+
+    def extract_video_like_info(self, video):
+        stat = (video.get("stat") or {}) if isinstance(video, dict) else {}
+        candidates = [
+            (video, "like"),
+            (video, "like_count"),
+            (video, "favorites"),
+            (video, "favorite"),
+            (video, "fav"),
+            (stat, "like"),
+            (stat, "favorite"),
+            (stat, "favorites"),
+        ]
+        for container, key in candidates:
+            if isinstance(container, dict) and key in container and container.get(key) is not None:
+                return parse_view_count(container.get(key)), True
+        return 0, False
+
+    def extract_video_like_count(self, video):
+        like_count, _ = self.extract_video_like_info(video)
+        return like_count
+
+    def get_video_detail_stat(self, bvid, video_title="视频"):
+        try:
+            data = self.client.get_json_with_retry(
+                self.config.video_view_api,
+                params={"bvid": bvid},
+                request_name=f"获取 {video_title} 的视频统计",
+            )
+            if data.get("code") != 0:
+                print(f"   ⚠️  {video_title} - 获取视频统计失败: {data.get('message', '未知错误')}")
+                return {}
+
+            stat = ((data.get("data") or {}).get("stat") or {})
+            return {
+                "like_count": parse_view_count(stat.get("like", 0)),
+                "view_count": parse_view_count(stat.get("view", 0)),
+            }
+        except RateLimitExceededError:
+            raise
+        except Exception as exc:
+            print(f"   ⚠️  {video_title} - 获取视频统计出错: {exc}")
+            return {}
+
+    def enrich_videos_with_detail_stats(self, videos, uname, max_videos=None):
+        pending_indexes = [
+            index
+            for index, video in enumerate(videos)
+            if video.get("bvid") and not video.get("like_count_fetched", False)
+        ]
+        if not pending_indexes:
+            return {"attempted": 0, "completed": 0, "rate_limit_hit": False}
+
+        if max_videos is not None and max_videos >= 0:
+            pending_indexes.sort(
+                key=lambda index: normalize_timestamp(
+                    videos[index].get("publish_timestamp") or videos[index].get("upload_timestamp")
+                ),
+                reverse=True,
+            )
+            pending_indexes = pending_indexes[:max_videos]
+
+        if not pending_indexes:
+            return {"attempted": 0, "completed": 0, "rate_limit_hit": False}
+
+        print(f"   🔡  {uname} - 正在补抓 {len(pending_indexes)} 个视频的真实点赞数...")
+
+        def fetch_single(index):
+            video = videos[index]
+            time.sleep(random.uniform(0, 0.3))
+            stats = self.get_video_detail_stat(
+                video.get("bvid", ""),
+                video.get("video_title", video.get("bvid", "视频")),
+            )
+            return index, stats
+
+        completed = 0
+        rate_limit_hit = False
+        batch_size = max(1, self.config.video_stat_batch_size)
+
+        for start in range(0, len(pending_indexes), batch_size):
+            batch_indexes = pending_indexes[start:start + batch_size]
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=max(1, min(self.config.video_stat_workers, len(batch_indexes)))
+                ) as executor:
+                    futures = [executor.submit(fetch_single, index) for index in batch_indexes]
+                    for future in as_completed(futures):
+                        index, stats = future.result()
+                        if not stats:
+                            continue
+                        videos[index]["like_count"] = stats.get(
+                            "like_count", videos[index].get("like_count", 0)
+                        )
+                        videos[index]["view_count"] = stats.get(
+                            "view_count", videos[index].get("view_count", 0)
+                        )
+                        videos[index]["like_count_fetched"] = True
+                        completed += 1
+            except RateLimitExceededError:
+                rate_limit_hit = True
+                break
+
+            if start + batch_size < len(pending_indexes):
+                cooldown = self.config.video_stat_batch_cooldown + random.uniform(0, 3)
+                print(
+                    f"   ⏸️  {uname} - 点赞补抓已完成 {start + len(batch_indexes)} 个视频，"
+                    f"冷却 {cooldown:.0f} 秒后继续..."
+                )
+                time.sleep(cooldown)
+
+        if rate_limit_hit:
+            print(f"   ⚠️  {uname} - 点赞补抓触发频率限制，本轮先暂停，下次再继续补抓。")
+
+        return {
+            "attempted": len(pending_indexes),
+            "completed": completed,
+            "rate_limit_hit": rate_limit_hit,
         }
 
     def get_latest_video(self, mid, uname):
@@ -141,22 +285,21 @@ class BilibiliApi:
                     params={"host_mid": mid, "offset": offset},
                     request_name=f"获取 {uname} 的视频动态第 {page_no} 页",
                 )
-
                 if data.get("code") != 0:
                     print(f"   ⚠️  {uname} - API返回错误: {data.get('message', '未知错误')}")
                     return None
 
                 payload = data.get("data", {}) or {}
                 items = payload.get("items", []) or []
-                page_video_candidates = [
+                candidates = [
                     video
                     for video in (
                         self.extract_video_info_from_dynamic_item(item, uname, mid) for item in items
                     )
                     if video
                 ]
-                if page_video_candidates:
-                    return max(page_video_candidates, key=lambda x: x.get("upload_timestamp", 0))
+                if candidates:
+                    return max(candidates, key=lambda item: item.get("upload_timestamp", 0))
 
                 offset = payload.get("offset", "")
                 if not payload.get("has_more") or not offset:
@@ -164,7 +307,7 @@ class BilibiliApi:
 
                 time.sleep(self.client.get_request_delay())
 
-            print(f"   📭 {uname} - 最近动态中未找到视频")
+            print(f"   📥 {uname} - 最近动态中未找到视频")
             return False
         except RateLimitExceededError:
             raise
@@ -191,7 +334,6 @@ class BilibiliApi:
                 },
                 request_name=f"获取 {uname} 的全部视频第 {page_no} 页",
             )
-
             if data.get("code") != 0:
                 print(f"   ⚠️  {uname} - 获取全部视频失败: {data.get('message', '未知错误')}")
                 return None
@@ -205,6 +347,8 @@ class BilibiliApi:
             for video in video_list:
                 duration_text = video.get("length", "")
                 duration_seconds = parse_duration_to_seconds(duration_text)
+                like_count, like_count_fetched = self.extract_video_like_info(video)
+
                 jump_url = video.get("jump_url") or ""
                 if jump_url.startswith("//"):
                     jump_url = f"https:{jump_url}"
@@ -222,6 +366,8 @@ class BilibiliApi:
                         "duration_text": duration_text,
                         "duration_seconds": duration_seconds,
                         "duration_category": categorize_duration(duration_seconds),
+                        "like_count": like_count,
+                        "like_count_fetched": like_count_fetched,
                         "view_count": parse_view_count(video.get("play", 0)),
                         "video_url": jump_url,
                     }
