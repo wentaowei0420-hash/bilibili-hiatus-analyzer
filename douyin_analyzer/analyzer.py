@@ -1,10 +1,18 @@
 import time
 
-from bilibili_analyzer.logging_utils import create_progress, create_table, get_console, smart_print as print
+from bilibili_analyzer.logging_utils import (
+    create_progress,
+    create_summary_panel,
+    create_table,
+    get_console,
+    smart_print as print,
+    wait_with_progress,
+)
 
-from .browser_client import DouyinServiceError
+from .browser_client import DouyinRateLimitError, DouyinServiceError
 from .exporters import (
     save_all_videos_to_csv,
+    save_cache_inventory_to_csv,
     save_to_csv,
     save_video_duration_analysis_to_csv,
     save_video_duration_report,
@@ -196,6 +204,7 @@ class DouyinHiatusAnalyzer:
             "medium_long_video_ratio": "0.00%",
             "long_video_count": 0,
             "long_video_ratio": "0.00%",
+            "summary_scope": "empty",
         }
 
     def build_counts_only_summary(self, user):
@@ -218,7 +227,117 @@ class DouyinHiatusAnalyzer:
             "medium_long_video_ratio": "",
             "long_video_count": "",
             "long_video_ratio": "",
+            "summary_scope": "counts",
         }
+
+    def build_partial_summary(self, user, latest_video=None):
+        latest_publish_timestamp = 0
+        if isinstance(latest_video, dict):
+            latest_publish_timestamp = normalize_timestamp(latest_video.get("publish_timestamp"))
+
+        return {
+            "uploader_name": user["nickname"],
+            "uploader_id": user["sec_uid"],
+            "follower_count": user.get("follower_count", ""),
+            "total_videos": user.get("aweme_count", ""),
+            "latest_publish_timestamp": latest_publish_timestamp,
+            "total_duration_seconds": "",
+            "average_duration_seconds": "",
+            "average_duration_text": "",
+            "average_like_count": "",
+            "average_update_interval_days": "",
+            "short_video_count": "",
+            "short_video_ratio": "",
+            "medium_video_count": "",
+            "medium_video_ratio": "",
+            "medium_long_video_count": "",
+            "medium_long_video_ratio": "",
+            "long_video_count": "",
+            "long_video_ratio": "",
+            "summary_scope": "partial",
+        }
+
+    @staticmethod
+    def has_complete_video_sample(user, videos):
+        if not isinstance(videos, list) or not videos:
+            return False
+
+        aweme_count = 0
+        if isinstance(user, dict):
+            aweme_count = user.get("aweme_count") or 0
+
+        try:
+            aweme_count = int(aweme_count)
+        except (TypeError, ValueError):
+            aweme_count = 0
+
+        return aweme_count > 0 and len(videos) >= aweme_count
+
+    @staticmethod
+    def summary_has_complete_statistics(summary):
+        if not isinstance(summary, dict):
+            return False
+
+        summary_scope = str(summary.get("summary_scope") or "").strip().lower()
+        if summary_scope in {"full", "preserved_full"}:
+            return True
+
+        numeric_keys = [
+            "total_duration_seconds",
+            "average_duration_seconds",
+            "average_like_count",
+            "short_video_count",
+            "medium_video_count",
+            "medium_long_video_count",
+            "long_video_count",
+        ]
+        for key in numeric_keys:
+            value = summary.get(key)
+            try:
+                if value is not None and value != "" and float(value) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+
+        average_update_interval_days = summary.get("average_update_interval_days")
+        if average_update_interval_days not in (None, ""):
+            return True
+
+        average_duration_text = str(summary.get("average_duration_text") or "").strip()
+        if average_duration_text and average_duration_text != "00:00":
+            return True
+
+        return False
+
+    def build_preserved_full_summary(self, user, summary, latest_video=None):
+        preserved = self.build_partial_summary(user, latest_video)
+        for key in [
+            "total_duration_seconds",
+            "average_duration_seconds",
+            "average_duration_text",
+            "average_like_count",
+            "average_update_interval_days",
+            "short_video_count",
+            "short_video_ratio",
+            "medium_video_count",
+            "medium_video_ratio",
+            "medium_long_video_count",
+            "medium_long_video_ratio",
+            "long_video_count",
+            "long_video_ratio",
+        ]:
+            preserved[key] = summary.get(key, preserved.get(key))
+        preserved["summary_scope"] = "preserved_full"
+        return preserved
+
+    def normalize_summary_for_mode(self, user, summary, videos, latest_video):
+        if self.get_fetch_mode() == "full":
+            return summary
+        if self.has_complete_video_sample(user, videos):
+            return summary
+        if self.summary_has_complete_statistics(summary):
+            return self.build_preserved_full_summary(user, summary, latest_video)
+        return self.build_partial_summary(user, latest_video)
 
     def build_video_duration_summary(self, user, videos):
         if not videos:
@@ -260,11 +379,194 @@ class DouyinHiatusAnalyzer:
             "medium_long_video_ratio": format_ratio(medium_long_count, total_videos),
             "long_video_count": long_count,
             "long_video_ratio": format_ratio(long_count, total_videos),
+            "summary_scope": "full",
         }
 
     @staticmethod
     def _format_output_summary(paths):
         return "、".join(path.name for path in paths if path)
+
+    @staticmethod
+    def _sort_days_since_value(item):
+        try:
+            return int(item.get("days_since_update") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _format_cached_at(cached_at):
+        normalized = normalize_timestamp(cached_at)
+        if not normalized:
+            return ""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(normalized))
+
+    def infer_cache_modes(self, entry, has_followings_cache=False):
+        modes = set()
+        if has_followings_cache:
+            modes.add("counts")
+        if not isinstance(entry, dict):
+            return modes
+
+        explicit_modes = entry.get("cache_modes")
+        if isinstance(explicit_modes, list):
+            for mode in explicit_modes:
+                if isinstance(mode, str) and mode.strip():
+                    modes.add(mode.strip().lower())
+
+        last_fetch_mode = entry.get("last_fetch_mode")
+        if isinstance(last_fetch_mode, str) and last_fetch_mode.strip():
+            modes.add(last_fetch_mode.strip().lower())
+
+        if entry.get("latest_video") or entry.get("videos"):
+            modes.add("monitor")
+
+        summary = entry.get("summary")
+        if self.summary_has_complete_statistics(summary):
+            modes.add("full")
+
+        return {mode for mode in modes if mode in {"counts", "monitor", "delta", "full"}}
+
+    def build_cached_user(self, followings_by_uid, progress, uid):
+        following_user = dict(followings_by_uid.get(uid) or {})
+        progress_entry = progress.get(uid) if isinstance(progress, dict) else None
+        cached_user = {}
+        if isinstance(progress_entry, dict) and isinstance(progress_entry.get("user"), dict):
+            cached_user = dict(progress_entry.get("user") or {})
+
+        user = {}
+        user.update(cached_user)
+        user.update({key: value for key, value in following_user.items() if value not in (None, "")})
+        user.setdefault("sec_uid", uid)
+        user.setdefault("nickname", cached_user.get("nickname") or following_user.get("nickname") or uid)
+        user.setdefault("homepage", cached_user.get("homepage") or following_user.get("homepage") or f"https://www.douyin.com/user/{uid}")
+        user.setdefault("remark_name", following_user.get("remark_name", cached_user.get("remark_name", "")))
+        user.setdefault("follower_count", following_user.get("follower_count", cached_user.get("follower_count")))
+        user.setdefault("aweme_count", following_user.get("aweme_count", cached_user.get("aweme_count")))
+        user.setdefault(
+            "latest_publish_timestamp",
+            following_user.get("latest_publish_timestamp", cached_user.get("latest_publish_timestamp")),
+        )
+        return user
+
+    def build_cache_inventory_rows(self, followings_payload, progress):
+        followings = []
+        followings_cached_at = ""
+        if isinstance(followings_payload, dict):
+            followings = followings_payload.get("followings", []) or []
+            followings_cached_at = self._format_cached_at(followings_payload.get("cached_at"))
+
+        followings_by_uid = {
+            user.get("sec_uid"): user
+            for user in followings
+            if isinstance(user, dict) and user.get("sec_uid")
+        }
+        all_uids = sorted(set(followings_by_uid) | set(progress.keys()))
+        rows = []
+
+        for uid in all_uids:
+            entry = progress.get(uid) if isinstance(progress, dict) else None
+            user = self.build_cached_user(followings_by_uid, progress, uid)
+            latest_video = self.get_latest_video_from_entry(entry)
+            summary = entry.get("summary", {}) if isinstance(entry, dict) else {}
+            cache_modes = sorted(self.infer_cache_modes(entry, has_followings_cache=uid in followings_by_uid))
+
+            rows.append(
+                {
+                    "uploader_name": user.get("nickname", uid),
+                    "following_remark": user.get("remark_name", ""),
+                    "uploader_id": uid,
+                    "uploader_homepage": user.get("homepage", ""),
+                    "follower_count": user.get("follower_count", ""),
+                    "published_video_count": user.get("aweme_count", ""),
+                    "cache_modes": ",".join(cache_modes),
+                    "last_fetch_mode": (entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "",
+                    "has_counts_cache": "是" if uid in followings_by_uid else "",
+                    "has_monitor_cache": "是" if "monitor" in cache_modes else "",
+                    "has_delta_cache": "是" if "delta" in cache_modes else "",
+                    "has_full_cache": "是" if "full" in cache_modes else "",
+                    "has_followings_cache": "是" if uid in followings_by_uid else "",
+                    "followings_cache_saved_at": followings_cached_at if uid in followings_by_uid else "",
+                    "has_progress_cache": "是" if isinstance(entry, dict) else "",
+                    "progress_cached_at": self._format_cached_at(entry.get("cached_at")) if isinstance(entry, dict) else "",
+                    "summary_scope": (summary.get("summary_scope") if isinstance(summary, dict) else "") or "",
+                    "cached_video_count": len(entry.get("videos", []) or []) if isinstance(entry, dict) else 0,
+                    "has_latest_video_cache": "是" if latest_video else "",
+                    "latest_video_title": latest_video.get("video_title", "") if latest_video else "",
+                    "latest_publish_date": latest_video.get("publish_date", "") if latest_video else "",
+                    "latest_publish_timestamp": normalize_timestamp(latest_video.get("publish_timestamp")) if latest_video else "",
+                }
+            )
+
+        return rows
+
+    def build_cached_snapshot(self):
+        followings_payload = self.cache_store.load_followings_cache_payload()
+        progress = self.cache_store.load_progress()
+        followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
+        followings_by_uid = {
+            user.get("sec_uid"): user
+            for user in followings
+            if isinstance(user, dict) and user.get("sec_uid")
+        }
+        all_uids = set(followings_by_uid) | set(progress.keys())
+        if not all_uids:
+            return [], [], []
+
+        merged_users = [
+            self.build_cached_user(followings_by_uid, progress, uid)
+            for uid in all_uids
+        ]
+        ordered_users = self.sort_followings_by_follower_count(merged_users)
+
+        results = []
+        summary_rows = []
+        for user in ordered_users:
+            uid = user.get("sec_uid")
+            entry = progress.get(uid)
+            latest_video = self.get_latest_video_from_entry(entry)
+            if isinstance(entry, dict):
+                videos = entry.get("videos", []) or []
+                summary = entry.get("summary", self.build_empty_summary(user))
+                if not isinstance(summary, dict):
+                    summary = self.build_empty_summary(user)
+                summary = dict(summary)
+                summary["uploader_name"] = user["nickname"]
+                summary["uploader_id"] = user["sec_uid"]
+                summary["follower_count"] = user.get("follower_count")
+                if user.get("aweme_count") not in (None, ""):
+                    summary["total_videos"] = user.get("aweme_count")
+                summary = self.normalize_summary_for_mode(user, summary, videos, latest_video)
+                if latest_video:
+                    result = self.build_result_item(user, summary, latest_video)
+                else:
+                    result = self.build_counts_only_result_item(user)
+            else:
+                summary = self.build_counts_only_summary(user)
+                result = self.build_counts_only_result_item(user)
+
+            self.cache_store.refresh_result_runtime_fields(result)
+            results.append(result)
+            if self.should_export_summary_analysis():
+                summary_rows.append(summary)
+
+        cache_rows = self.build_cache_inventory_rows(followings_payload, progress)
+        return results, summary_rows, cache_rows
+
+    def export_cached_snapshot(self):
+        results, summary_rows, cache_rows = self.build_cached_snapshot()
+        if not results and not cache_rows:
+            return False
+
+        results = sorted(
+            [dict(item) for item in results],
+            key=self._sort_days_since_value,
+            reverse=True,
+        )
+        save_to_csv(self.config, results)
+        if self.should_export_summary_analysis():
+            save_video_duration_analysis_to_csv(self.config, summary_rows)
+        save_cache_inventory_to_csv(self.config, cache_rows)
+        return bool(results)
 
     def display_top_results(self, results):
         table = create_table(
@@ -359,9 +661,15 @@ class DouyinHiatusAnalyzer:
                 exported.append(self.config.video_duration_analysis_csv)
             if self.should_export_duration_analysis():
                 exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
-            print(
-                f"☁️  阶段同步：已处理 {processed_count} 位博主，"
-                f"准备上传 {self._format_output_summary(exported)}"
+            get_console().print(
+                create_summary_panel(
+                    "☁️ 抖音阶段同步",
+                    [
+                        f"已处理博主: {processed_count}",
+                        f"待上传文件: {self._format_output_summary(exported)}",
+                    ],
+                    border_style="cyan",
+                )
             )
             try:
                 self.upload_callback(processed_count)
@@ -424,6 +732,14 @@ class DouyinHiatusAnalyzer:
         summary_rows = []
         pending_progress_saves = 0
         refreshed_user_count = 0
+        cache_hit_count = 0
+        refresh_reason_counts = {
+            "missing_entry": 0,
+            "expired": 0,
+            "missing_summary": 0,
+            "aweme_count_changed": 0,
+            "latest_publish_timestamp_newer": 0,
+        }
 
         if fetch_mode == "counts":
             with create_progress() as progress_bar:
@@ -455,8 +771,15 @@ class DouyinHiatusAnalyzer:
             save_to_csv(self.config, results)
             if self.should_export_summary_analysis():
                 save_video_duration_analysis_to_csv(self.config, summary_rows)
+            save_cache_inventory_to_csv(
+                self.config,
+                self.build_cache_inventory_rows(
+                    self.cache_store.load_followings_cache_payload(),
+                    self.cache_store.load_progress(),
+                ),
+            )
 
-            exported = [self.config.output_csv]
+            exported = [self.config.output_csv, self.config.cache_inventory_csv]
             if self.should_export_summary_analysis():
                 exported.append(self.config.video_duration_analysis_csv)
             print(
@@ -475,7 +798,14 @@ class DouyinHiatusAnalyzer:
                     user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
 
                 latest_video = self.get_latest_video_from_entry(entry)
-                if self.cache_store.should_refresh_cache(user, entry):
+                refresh_needed, refresh_reason = self.cache_store.should_refresh_cache(
+                    user,
+                    entry,
+                    return_reason=True,
+                )
+                if refresh_needed:
+                    if refresh_reason in refresh_reason_counts:
+                        refresh_reason_counts[refresh_reason] += 1
                     try:
                         if fetch_mode == "full":
                             videos = self.browser_client.get_all_videos_for_user(user)
@@ -492,11 +822,18 @@ class DouyinHiatusAnalyzer:
                                 videos = entry.get("videos", [])
                             else:
                                 videos = recent_videos
+                    except DouyinRateLimitError as exc:
+                        print(f"⚠️  {user['nickname']} 触发页面级速率限制: {exc}")
+                        self.browser_client.restart(self.config.rate_limit_global_cooldown)
+                        if entry:
+                            videos = entry.get("videos", [])
+                            latest_video = self.get_latest_video_from_entry(entry)
+                        else:
+                            results.append(self.build_fetch_failed_result_item(user))
+                            progress_bar.advance(task_id)
+                            continue
                     except DouyinServiceError as exc:
-                        print(
-                            f"⚠️  {user['nickname']} 触发页面级限制: {exc}，"
-                            f"全局冷却 {self.config.service_error_global_cooldown:.0f} 秒后继续..."
-                        )
+                        print(f"⚠️  {user['nickname']} 触发页面级限制: {exc}")
                         self.browser_client.restart(self.config.service_error_global_cooldown)
                         if entry:
                             videos = entry.get("videos", [])
@@ -531,12 +868,25 @@ class DouyinHiatusAnalyzer:
                     else:
                         summary = self.build_video_duration_summary(user, videos)
 
+                    summary = self.normalize_summary_for_mode(user, summary, videos, latest_video)
+                    existing_modes = set()
+                    if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
+                        existing_modes = {
+                            str(mode).strip().lower()
+                            for mode in entry.get("cache_modes", [])
+                            if str(mode).strip()
+                        }
+                    if fetch_mode in {"monitor", "delta", "full"}:
+                        existing_modes.add(fetch_mode)
+
                     progress[user["sec_uid"]] = {
                         "cached_at": int(time.time()),
                         "user": user,
                         "videos": videos,
                         "summary": summary,
                         "latest_video": latest_video,
+                        "last_fetch_mode": fetch_mode,
+                        "cache_modes": sorted(existing_modes),
                     }
                     refreshed_user_count += 1
                     pending_progress_saves += 1
@@ -554,7 +904,7 @@ class DouyinHiatusAnalyzer:
                             f"⏸️  已连续刷新 {refreshed_user_count} 位博主，"
                             f"批次冷却 {cooldown:.0f} 秒后继续..."
                         )
-                        time.sleep(cooldown)
+                        wait_with_progress(cooldown, "抖音抓取批次冷却中")
 
                     if (
                         self.config.browser_restart_interval_users > 0
@@ -565,12 +915,14 @@ class DouyinHiatusAnalyzer:
                         )
                         self.browser_client.restart(5)
                 else:
+                    cache_hit_count += 1
                     videos = entry.get("videos", []) if entry else []
                     summary = (
                         entry.get("summary", self.build_empty_summary(user))
                         if entry
                         else self.build_empty_summary(user)
                     )
+                    summary = self.normalize_summary_for_mode(user, summary, videos, latest_video)
 
                 if latest_video is None and videos:
                     latest_video = self.get_latest_video_from_videos(videos)
@@ -608,23 +960,55 @@ class DouyinHiatusAnalyzer:
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
 
+        if fetch_mode != "full":
+            refreshed_total = sum(refresh_reason_counts.values())
+            get_console().print(
+                create_summary_panel(
+                    "📦 抖音缓存命中摘要",
+                    [
+                        f"复用缓存: {cache_hit_count}",
+                        f"重新抓取: {refreshed_total}",
+                        f"无缓存: {refresh_reason_counts['missing_entry']}",
+                        f"缓存过期: {refresh_reason_counts['expired']}",
+                        f"摘要缺失: {refresh_reason_counts['missing_summary']}",
+                        f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
+                        f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
+                    ],
+                    border_style="blue",
+                )
+            )
+
         results.sort(key=lambda item: item.get("days_since_update", 0), reverse=True)
         self.display_top_results(results)
         save_to_csv(self.config, results)
 
         if self.should_export_summary_analysis():
             save_video_duration_analysis_to_csv(self.config, summary_rows)
+        save_cache_inventory_to_csv(
+            self.config,
+            self.build_cache_inventory_rows(
+                self.cache_store.load_followings_cache_payload(),
+                progress,
+            ),
+        )
         if export_duration_analysis:
             save_all_videos_to_csv(self.config, all_video_rows)
             save_video_duration_report(self.config, summary_rows, len(all_video_rows))
 
-        exported = [self.config.output_csv]
+        exported = [self.config.output_csv, self.config.cache_inventory_csv]
         if self.should_export_summary_analysis():
             exported.append(self.config.video_duration_analysis_csv)
         if export_duration_analysis:
             exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
-        print(
-            f"🗂️  抖音 {fetch_mode} 模式已输出 {len(exported)} 份文件："
-            f"{self._format_output_summary(exported)}"
+        get_console().print(
+            create_summary_panel(
+                f"🗂️ 抖音 {fetch_mode} 模式输出",
+                [
+                    f"输出文件数: {len(exported)}",
+                    f"文件列表: {self._format_output_summary(exported)}",
+                    f"结果数: {len(results)} 位博主",
+                ],
+                border_style="green",
+            )
         )
         return results

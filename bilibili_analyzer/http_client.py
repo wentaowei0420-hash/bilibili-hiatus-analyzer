@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from .logging_utils import smart_print as print
+from .logging_utils import smart_print as print, wait_with_progress
 
 
 WBI_MIXIN_KEY_ENC_TAB = [
@@ -98,7 +98,7 @@ class BilibiliHttpClient:
             f"⚠️  {request_name} - 请求过于频繁，第 {retry_count} 次重试，"
             f"等待 {wait_seconds:.0f} 秒后继续..."
         )
-        time.sleep(wait_seconds)
+        wait_with_progress(wait_seconds, f"请求冷却中：{request_name}")
 
     def get_json_with_retry(self, url, params=None, request_name="请求"):
         network_retry_count = 0
@@ -143,7 +143,7 @@ class BilibiliHttpClient:
                     f"⚠️  {request_name} - HTTP异常(HTTP {status_code})，"
                     f"第 {network_retry_count} 次重试，{wait_seconds:.0f} 秒后继续..."
                 )
-                time.sleep(wait_seconds)
+                wait_with_progress(wait_seconds, f"HTTP异常重试等待：{request_name}")
                 continue
             except requests.exceptions.SSLError:
                 network_retry_count += 1
@@ -156,7 +156,7 @@ class BilibiliHttpClient:
                     f"⚠️  {request_name} - SSL连接异常，第 {network_retry_count} 次重试，"
                     f"{wait_seconds:.0f} 秒后继续..."
                 )
-                time.sleep(wait_seconds)
+                wait_with_progress(wait_seconds, f"SSL重试等待：{request_name}")
                 continue
             except requests.exceptions.RequestException:
                 network_retry_count += 1
@@ -169,7 +169,7 @@ class BilibiliHttpClient:
                     f"⚠️  {request_name} - 网络波动，第 {network_retry_count} 次重试，"
                     f"{wait_seconds:.0f} 秒后继续..."
                 )
-                time.sleep(wait_seconds)
+                wait_with_progress(wait_seconds, f"网络重试等待：{request_name}")
                 continue
 
             code = data.get("code")

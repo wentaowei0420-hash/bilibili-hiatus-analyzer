@@ -185,6 +185,64 @@ def save_video_duration_report(config, summary_rows, total_video_count):
         print(f"❌ 保存抖音视频时长报告失败: {exc}")
 
 
+def save_cache_inventory_to_csv(config, cache_rows):
+    fieldnames = [
+        "uploader_name",
+        "following_remark",
+        "uploader_id",
+        "uploader_homepage",
+        "follower_count",
+        "published_video_count",
+        "cache_modes",
+        "last_fetch_mode",
+        "has_counts_cache",
+        "has_monitor_cache",
+        "has_delta_cache",
+        "has_full_cache",
+        "has_followings_cache",
+        "followings_cache_saved_at",
+        "has_progress_cache",
+        "progress_cached_at",
+        "summary_scope",
+        "cached_video_count",
+        "has_latest_video_cache",
+        "latest_video_title",
+        "latest_publish_date",
+        "latest_publish_timestamp",
+    ]
+    chinese_headers = {
+        "uploader_name": "UP主姓名",
+        "following_remark": "备注",
+        "uploader_id": "UP主UID",
+        "uploader_homepage": "UP主主页链接",
+        "follower_count": "粉丝数",
+        "published_video_count": "发布视频数量",
+        "cache_modes": "已缓存模式",
+        "last_fetch_mode": "最近抓取模式",
+        "has_counts_cache": "有counts缓存",
+        "has_monitor_cache": "有monitor缓存",
+        "has_delta_cache": "有delta缓存",
+        "has_full_cache": "有full缓存",
+        "has_followings_cache": "有关注列表缓存",
+        "followings_cache_saved_at": "关注列表缓存时间",
+        "has_progress_cache": "有进度缓存",
+        "progress_cached_at": "进度缓存时间",
+        "summary_scope": "统计范围",
+        "cached_video_count": "缓存视频数",
+        "has_latest_video_cache": "有最新视频缓存",
+        "latest_video_title": "缓存的最新视频标题",
+        "latest_publish_date": "缓存的最新发布时间",
+        "latest_publish_timestamp": "缓存的最新发布时间戳",
+    }
+    _write_csv(
+        config.cache_inventory_csv,
+        fieldnames,
+        chinese_headers,
+        cache_rows,
+        "保存抖音缓存清单CSV失败",
+    )
+
+
 def _write_csv(path, fieldnames, chinese_headers, rows, error_message):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

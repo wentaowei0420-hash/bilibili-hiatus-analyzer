@@ -15,6 +15,19 @@ def _get_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_path_env(name: str, default_path: Path, *, must_exist: bool = False) -> Path:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default_path
+
+    candidate = Path(raw_value)
+    if must_exist:
+        return candidate if candidate.exists() else default_path
+    if candidate.exists() or candidate.parent.exists():
+        return candidate
+    return default_path
+
+
 @dataclass(frozen=True)
 class AnalyzerConfig:
     root_dir: Path
@@ -178,19 +191,21 @@ def load_feishu_config() -> FeishuConfig:
         spreadsheet_token=os.getenv("FEISHU_SPREADSHEET_TOKEN", ""),
         sheet_title=os.getenv("FEISHU_BILIBILI_SHEET_TITLE", "B站数据表"),
         sheet_index=int(os.getenv("FEISHU_BILIBILI_SHEET_INDEX", "0")),
-        file_hiatus=Path(
-            os.getenv("FILE_HIATUS_PATH", str(output_dir / "bilibili_hiatus_ranking.csv"))
+        file_hiatus=_resolve_path_env(
+            "FILE_HIATUS_PATH",
+            output_dir / "bilibili_hiatus_ranking.csv",
+            must_exist=True,
         ),
-        file_duration=Path(
-            os.getenv(
-                "FILE_DURATION_PATH",
-                str(output_dir / "bilibili_video_duration_analysis.csv"),
-            )
+        file_duration=_resolve_path_env(
+            "FILE_DURATION_PATH",
+            output_dir / "bilibili_video_duration_analysis.csv",
+            must_exist=True,
         ),
-        file_merged_output=Path(
-            os.getenv("FILE_MERGED_OUTPUT_PATH", str(output_dir / "merged_bilibili_data.csv"))
+        file_merged_output=_resolve_path_env(
+            "FILE_MERGED_OUTPUT_PATH",
+            output_dir / "merged_bilibili_data.csv",
         ),
-        db_path=Path(os.getenv("DB_PATH", str(history_dir / "bilibili_history.db"))),
+        db_path=_resolve_path_env("DB_PATH", history_dir / "bilibili_history.db"),
         upload_state_json=Path(
             os.getenv(
                 "FEISHU_UPLOAD_STATE_PATH",

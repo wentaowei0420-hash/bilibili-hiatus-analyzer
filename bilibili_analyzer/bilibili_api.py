@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from .http_client import RateLimitExceededError
-from .logging_utils import smart_print as print
+from .logging_utils import create_progress, smart_print as print
 from .utils import (
     categorize_duration,
     format_group_ids,
@@ -71,39 +71,56 @@ class BilibiliApi:
         all_followings = []
         page = 1
 
-        while True:
-            try:
-                data = self.client.get_json_with_retry(
-                    self.config.followings_api,
-                    params={"vmid": user_mid, "pn": page, "ps": 50, "order": "desc"},
-                    request_name=f"获取关注列表第 {page} 页",
-                )
-                if data.get("code") != 0:
-                    print(f"获取关注列表失败: {data.get('message', '未知错误')}")
+        with create_progress(transient=True) as progress:
+            task_id = progress.add_task("获取B站关注列表", total=None)
+            while True:
+                try:
+                    data = self.client.get_json_with_retry(
+                        self.config.followings_api,
+                        params={"vmid": user_mid, "pn": page, "ps": 50, "order": "desc"},
+                        request_name=f"获取关注列表第 {page} 页",
+                    )
+                    if data.get("code") != 0:
+                        print(f"获取关注列表失败: {data.get('message', '未知错误')}")
+                        return None
+
+                    followings = data.get("data", {}).get("list", []) or []
+                    if not followings:
+                        break
+
+                    for following in followings:
+                        group_ids = normalize_group_ids(following.get("tag"))
+                        following["group_ids"] = group_ids
+                        following["group_id_text"] = format_group_ids(group_ids)
+                        following["group_name_text"] = format_group_names(group_ids, tag_name_map)
+
+                    all_followings.extend(followings)
+
+                    total = (data.get("data") or {}).get("total", 0)
+                    if total:
+                        progress.update(
+                            task_id,
+                            total=total,
+                            completed=len(all_followings),
+                            description=f"获取B站关注列表 ({len(all_followings)}/{total})",
+                        )
+                    else:
+                        dynamic_total = max(len(all_followings) + 50, 50)
+                        progress.update(
+                            task_id,
+                            total=dynamic_total,
+                            completed=len(all_followings),
+                            description=f"获取B站关注列表 ({len(all_followings)})",
+                        )
+
+                    if total and len(all_followings) >= total:
+                        break
+
+                    page += 1
+                    time.sleep(self.client.get_request_delay())
+                except Exception as exc:
+                    print(f"获取关注列表出错: {exc}")
                     return None
-
-                followings = data.get("data", {}).get("list", []) or []
-                if not followings:
-                    break
-
-                for following in followings:
-                    group_ids = normalize_group_ids(following.get("tag"))
-                    following["group_ids"] = group_ids
-                    following["group_id_text"] = format_group_ids(group_ids)
-                    following["group_name_text"] = format_group_names(group_ids, tag_name_map)
-
-                all_followings.extend(followings)
-                print(f"已获取 {len(all_followings)} 位UP主...")
-
-                total = (data.get("data") or {}).get("total", 0)
-                if total and len(all_followings) >= total:
-                    break
-
-                page += 1
-                time.sleep(self.client.get_request_delay())
-            except Exception as exc:
-                print(f"获取关注列表出错: {exc}")
-                return None
 
         print(f"✅ 成功获取 {len(all_followings)} 位关注的UP主")
         return all_followings

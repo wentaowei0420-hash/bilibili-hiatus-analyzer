@@ -15,6 +15,19 @@ def _get_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_path_env(name: str, default_path: Path, *, must_exist: bool = False) -> Path:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default_path
+
+    candidate = Path(raw_value)
+    if must_exist:
+        return candidate if candidate.exists() else default_path
+    if candidate.exists() or candidate.parent.exists():
+        return candidate
+    return default_path
+
+
 @dataclass(frozen=True)
 class DouyinAnalyzerConfig:
     root_dir: Path
@@ -28,7 +41,9 @@ class DouyinAnalyzerConfig:
     all_videos_csv: Path
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
+    cache_inventory_csv: Path
     followings_cache_json: Path
+    followings_cache_dir: Path
     progress_json: Path
     progress_dir: Path
     fetch_mode: str
@@ -51,6 +66,9 @@ class DouyinAnalyzerConfig:
     service_error_retry_wait: float
     service_error_long_cooldown: float
     service_error_global_cooldown: float
+    rate_limit_retry_wait: float
+    rate_limit_long_cooldown: float
+    rate_limit_global_cooldown: float
     progress_save_interval_users: int
     intermediate_upload_interval_users: int
     followings_cache_max_age_hours: int
@@ -110,7 +128,9 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
         all_videos_csv=output_dir / "douyin_all_videos.csv",
         video_duration_analysis_csv=output_dir / "douyin_video_duration_analysis.csv",
         video_duration_report_md=output_dir / "douyin_video_duration_report.md",
+        cache_inventory_csv=output_dir / "douyin_cache_inventory.csv",
         followings_cache_json=state_dir / "douyin_followings_cache.json",
+        followings_cache_dir=state_dir / "cache" / "followings",
         progress_json=state_dir / "douyin_progress.json",
         progress_dir=state_dir / "cache" / "progress",
         fetch_mode=fetch_mode,
@@ -140,6 +160,13 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
         ),
         service_error_global_cooldown=float(
             os.getenv("DOUYIN_SERVICE_ERROR_GLOBAL_COOLDOWN", "90")
+        ),
+        rate_limit_retry_wait=float(os.getenv("DOUYIN_RATE_LIMIT_RETRY_WAIT", "20")),
+        rate_limit_long_cooldown=float(
+            os.getenv("DOUYIN_RATE_LIMIT_LONG_COOLDOWN", "90")
+        ),
+        rate_limit_global_cooldown=float(
+            os.getenv("DOUYIN_RATE_LIMIT_GLOBAL_COOLDOWN", "180")
         ),
         progress_save_interval_users=int(
             os.getenv("DOUYIN_PROGRESS_SAVE_INTERVAL_USERS", "20")
@@ -186,19 +213,21 @@ def load_feishu_config() -> DouyinFeishuConfig:
         ),
         sheet_title=os.getenv("DOUYIN_FEISHU_SHEET_TITLE", "抖音数据表"),
         sheet_index=int(os.getenv("DOUYIN_FEISHU_SHEET_INDEX", "1")),
-        file_hiatus=Path(
-            os.getenv("DOUYIN_FILE_HIATUS_PATH", str(output_dir / "douyin_hiatus_ranking.csv"))
+        file_hiatus=_resolve_path_env(
+            "DOUYIN_FILE_HIATUS_PATH",
+            output_dir / "douyin_hiatus_ranking.csv",
+            must_exist=True,
         ),
-        file_duration=Path(
-            os.getenv(
-                "DOUYIN_FILE_DURATION_PATH",
-                str(output_dir / "douyin_video_duration_analysis.csv"),
-            )
+        file_duration=_resolve_path_env(
+            "DOUYIN_FILE_DURATION_PATH",
+            output_dir / "douyin_video_duration_analysis.csv",
+            must_exist=True,
         ),
-        file_merged_output=Path(
-            os.getenv("DOUYIN_FILE_MERGED_OUTPUT_PATH", str(output_dir / "merged_douyin_data.csv"))
+        file_merged_output=_resolve_path_env(
+            "DOUYIN_FILE_MERGED_OUTPUT_PATH",
+            output_dir / "merged_douyin_data.csv",
         ),
-        db_path=Path(os.getenv("DOUYIN_DB_PATH", str(history_dir / "douyin_history.db"))),
+        db_path=_resolve_path_env("DOUYIN_DB_PATH", history_dir / "douyin_history.db"),
         upload_state_json=Path(
             os.getenv(
                 "DOUYIN_FEISHU_UPLOAD_STATE_PATH",

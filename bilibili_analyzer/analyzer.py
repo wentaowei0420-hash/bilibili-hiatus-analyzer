@@ -11,7 +11,14 @@ from .exporters import (
     save_video_duration_report,
 )
 from .http_client import RateLimitExceededError
-from .logging_utils import create_progress, create_table, get_console, smart_print as print
+from .logging_utils import (
+    create_progress,
+    create_summary_panel,
+    create_table,
+    get_console,
+    smart_print as print,
+    wait_with_progress,
+)
 from .utils import (
     DEFAULT_GROUP_NAME,
     LONG_VIDEO_LABEL,
@@ -363,9 +370,17 @@ class BilibiliHiatusAnalyzer:
                     ):
                         remaining_followings.append(following)
 
-        print(
-            f"📌 批次 {label} 完成：成功 {success_count}，"
-            f"无公开视频 {no_video_count}，待重试 {len(remaining_followings)}"
+        get_console().print(
+            create_summary_panel(
+                f"📌 精确抓取批次 {label}",
+                [
+                    f"成功抓取: {success_count}",
+                    f"无公开视频: {no_video_count}",
+                    f"待补抓: {len(remaining_followings)}",
+                    f"异常/失败: {error_count}",
+                ],
+                border_style="blue",
+            )
         )
         return remaining_followings
 
@@ -468,7 +483,7 @@ class BilibiliHiatusAnalyzer:
                         f"⏸️  视频分析已完成 {start + len(batch)} 位UP主，"
                         f"批次冷却 {cooldown:.0f} 秒后继续..."
                     )
-                    time.sleep(cooldown)
+                    wait_with_progress(cooldown, "B站视频分析批次冷却中")
 
         all_video_rows = []
         summary_rows = []
@@ -492,12 +507,18 @@ class BilibiliHiatusAnalyzer:
         save_video_duration_analysis_to_csv(self.config, summary_rows)
         save_video_duration_report(self.config, summary_rows, len(all_video_rows))
 
-        print(
-            f"🗂️  视频分析阶段已输出 3 份文件："
-            f"{self._format_output_summary([self.config.all_videos_csv, self.config.video_duration_analysis_csv, self.config.video_duration_report_md])}"
+        get_console().print(
+            create_summary_panel(
+                "🗂️ B站视频分析输出",
+                [
+                    f"输出文件: {self._format_output_summary([self.config.all_videos_csv, self.config.video_duration_analysis_csv, self.config.video_duration_report_md])}",
+                    f"视频明细: {len(all_video_rows)} 条",
+                    f"UP 汇总: {len(summary_rows)} 位",
+                    f"待下轮补抓: {len(failed_followings)} 位" if failed_followings else "待下轮补抓: 0 位",
+                ],
+                border_style="magenta",
+            )
         )
-        if failed_followings:
-            print(f"⚠️  仍有 {len(failed_followings)} 位UP主未完成全量视频分析，下次运行会继续补抓。")
         return duration_progress
 
     def display_top_results(self, results):
@@ -587,7 +608,10 @@ class BilibiliHiatusAnalyzer:
                 f"⏸️  先冷却 {self.config.video_analysis_start_delay} 秒，"
                 "降低进入视频动态接口时立刻触发风控的概率..."
             )
-            time.sleep(self.config.video_analysis_start_delay)
+            wait_with_progress(
+                self.config.video_analysis_start_delay,
+                "B站视频分析启动冷却中",
+            )
 
             for start in range(0, len(pending_followings), self.config.batch_size):
                 batch = pending_followings[start:start + self.config.batch_size]
@@ -606,7 +630,7 @@ class BilibiliHiatusAnalyzer:
                         f"⏸️  已完成 {start + len(batch)} 位UP主，"
                         f"批次冷却 {cooldown:.0f} 秒后继续..."
                     )
-                    time.sleep(cooldown)
+                    wait_with_progress(cooldown, "B站精确抓取批次冷却中")
 
         for retry_round in range(1, self.config.max_failed_retry_rounds + 1):
             if not failed_followings:
@@ -615,7 +639,7 @@ class BilibiliHiatusAnalyzer:
             cooldown = self.config.failed_retry_cooldown * retry_round + random.uniform(0, 10)
             print()
             print(f"🔁  第 {retry_round} 轮补抓开始，先冷却 {cooldown:.0f} 秒...")
-            time.sleep(cooldown)
+            wait_with_progress(cooldown, f"B站补抓第 {retry_round} 轮冷却中")
             failed_followings = self.run_precise_fetch_round(
                 failed_followings,
                 f"补抓第{retry_round}轮",
@@ -647,15 +671,31 @@ class BilibiliHiatusAnalyzer:
         results.sort(key=lambda item: item["days_since_update"], reverse=True)
         self.display_top_results(results)
         save_to_csv(self.config, results)
-        print(
-            f"🗂️  B站主榜阶段已输出：{self.config.output_csv.name}，"
-            f"共 {len(results)} 位UP主"
+        get_console().print(
+            create_summary_panel(
+                "🗂️ B站主榜输出",
+                [
+                    f"文件: {self.config.output_csv.name}",
+                    f"结果数: {len(results)} 位UP主",
+                    f"未完成精确抓取: {len(failed_followings)} 位" if failed_followings else "未完成精确抓取: 0 位",
+                ],
+                border_style="green",
+            )
         )
 
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
             self.enrich_results_with_profile_and_counts(results, duration_progress, followings)
             save_to_csv(self.config, results)
-            print(f"🔄 已用视频分析结果回填主榜：{self.config.output_csv.name}")
+            get_console().print(
+                create_summary_panel(
+                    "🔄 B站主榜回填完成",
+                    [
+                        f"已回填文件: {self.config.output_csv.name}",
+                        f"视频分析缓存: {len(duration_progress)} 条",
+                    ],
+                    border_style="yellow",
+                )
+            )
 
         return results

@@ -60,6 +60,24 @@ def run_partial_feishu_upload(processed_count):
     run_feishu_upload(prune_missing=False)
 
 
+def run_cached_feishu_preupload(fetch_mode_override=None):
+    config = load_analyzer_config(fetch_mode_override=fetch_mode_override)
+    cache_store = CacheStore(config)
+    analyzer = DouyinHiatusAnalyzer(
+        config,
+        browser_client=None,
+        cache_store=cache_store,
+        upload_callback=None,
+    )
+    if not analyzer.export_cached_snapshot():
+        print("ℹ️  当前没有可用于预上传的抖音缓存数据。")
+        return False
+
+    print("☁️  已先导出本地抖音缓存快照，准备优先同步到飞书...")
+    run_feishu_upload(prune_missing=False)
+    return True
+
+
 def run_analysis(trigger_upload=True, fetch_mode_override=None):
     config = load_analyzer_config(fetch_mode_override=fetch_mode_override)
     setup_logging(config.log_dir, "douyin_app")
@@ -72,6 +90,12 @@ def run_analysis(trigger_upload=True, fetch_mode_override=None):
         cache_store,
         upload_callback=run_partial_feishu_upload if trigger_upload else None,
     )
+
+    if trigger_upload:
+        try:
+            run_cached_feishu_preupload(fetch_mode_override=fetch_mode_override)
+        except Exception as exc:
+            print(f"⚠️  启动前缓存快照上传失败，本轮分析仍会继续: {exc}")
 
     try:
         results = analyzer.analyze_hiatus()

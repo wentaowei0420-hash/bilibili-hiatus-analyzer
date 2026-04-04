@@ -53,119 +53,111 @@ coverage.xml
 *.mo
 *.pot
 
-# Django stuff:
-*.log
+# Django / Flask / Scrapy / docs
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-
-# Flask stuff:
 instance/
 .webassets-cache
-
-# Scrapy stuff:
 .scrapy
-
-# Sphinx documentation
 docs/_build/
-
-# PyBuilder
 target/
+/site
 
-# Jupyter Notebook
+# Jupyter / IPython
 .ipynb_checkpoints
-
-# IPython
 profile_default/
 ipython_config.py
 
-# pyenv
+# Python envs / tooling
 .python-version
-
-# pipenv
 Pipfile.lock
-
-# PEP 582
 __pypackages__/
-
-# Celery stuff
 celerybeat-schedule
 celerybeat.pid
-
-# SageMath parsed files
 *.sage.py
-
-# Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
-# Pyre type checker
 .pyre/
 
-# Project specific
-# ================
-# 输出的CSV文件（包含个人数据，不应提交）
-bilibili_hiatus_ranking.csv
-*.csv
-# 但保留示例文件
-!examples/example_output.csv
-
-# Cookie配置文件（包含敏感信息，绝对不能提交！）
-*_cookie.txt
-cookie.txt
-config.ini
-
-# IDE配置
+# IDE / editor
 .vscode/
 .idea/
+.spyderproject
+.spyproject
+.ropeproject
 *.swp
 *.swo
 *~
 
-# macOS
+# OS files
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# 临时文件
+# Temporary files
 *.tmp
 *.bak
 *.backup
 
-# Runtime outputs
+# Cookies / secrets / local auth
+*_cookie.txt
+cookie.txt
+cookies.txt
+config.ini
+config.local.ini
+config.*.ini
+*.pem
+*.key
+*.secret
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data For Account
+**/Web Data
+
+# SQLite / local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Project local runtime and browser profile
 runtime/
+runtime/logs/
+runtime/chrome_data/
+
+# Project local outputs / state / history
 data/bilibili/output/
 data/bilibili/state/
+data/bilibili/state/cache/
 data/douyin/output/
 data/douyin/state/
-data/douyin/ops/douyin_unfollow_list.txt
+data/douyin/state/cache/
+data/douyin/ops/
 data/history/
-# 忽略环境变量配置和本地敏感数据
-.env
-# 忽略 DrissionPage 浏览器缓存数据
+
+# Local upload/cache manifests
+*_upload_state.json
+*_progress.json
+*followings_cache*.json
+
+# CSV outputs may contain personal data
+bilibili_hiatus_ranking.csv
+*.csv
+!examples/example_output.csv

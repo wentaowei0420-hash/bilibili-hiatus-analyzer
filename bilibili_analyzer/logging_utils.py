@@ -11,7 +11,10 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.panel import Panel
+from rich.text import Text
 from rich.table import Table
+import time
 
 
 ERROR_MARKERS = ("❌", "失败", "错误", "出错")
@@ -88,3 +91,30 @@ def create_table(title: str, columns):
         else:
             table.add_column(str(column))
     return table
+
+
+def create_summary_panel(title: str, lines, border_style: str = "cyan", subtitle: str | None = None):
+    content = "\n".join(str(line) for line in lines if str(line).strip()) or "暂无数据"
+    return Panel(
+        Text.from_markup(content),
+        title=title,
+        border_style=border_style,
+        subtitle=subtitle,
+        expand=False,
+        padding=(0, 1),
+    )
+
+
+def wait_with_progress(seconds: float, description: str, transient: bool = True, step: float = 0.2):
+    total = max(float(seconds or 0), 0.0)
+    if total <= 0:
+        return
+
+    with create_progress(transient=transient) as progress:
+        task_id = progress.add_task(description, total=total)
+        remaining = total
+        while remaining > 0:
+            sleep_for = min(step, remaining)
+            time.sleep(sleep_for)
+            progress.advance(task_id, sleep_for)
+            remaining -= sleep_for

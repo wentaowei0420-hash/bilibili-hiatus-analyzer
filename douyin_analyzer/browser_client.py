@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-from bilibili_analyzer.logging_utils import smart_print as print
+from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
 from .utils import (
     categorize_duration,
@@ -21,11 +21,16 @@ class DouyinServiceError(RuntimeError):
     pass
 
 
+class DouyinRateLimitError(RuntimeError):
+    pass
+
+
 class DouyinBrowserClient:
     def __init__(self, config):
         self.config = config
         self.page = None
         self.service_error_streak = 0
+        self.rate_limit_streak = 0
 
     def _minimize_window_if_possible(self):
         if self.page is None:
@@ -56,7 +61,7 @@ class DouyinBrowserClient:
     def restart(self, wait_seconds=0):
         self.close()
         if wait_seconds > 0:
-            time.sleep(wait_seconds)
+            wait_with_progress(wait_seconds, "抖音浏览器会话重启冷却中")
         page = self.start()
         self._minimize_window_if_possible()
         return page
@@ -87,12 +92,18 @@ class DouyinBrowserClient:
         page.listen.start(self.config.following_api_pattern)
         page.get(self.config.self_user_url)
         time.sleep(self.config.page_load_delay)
+        if self._page_has_rate_limit():
+            raise DouyinRateLimitError("抖音关注列表页触发速率限制")
 
         try:
             tab = page.ele("text:关注", timeout=3)
             if tab:
                 tab.click()
                 time.sleep(1)
+                if self._page_has_rate_limit():
+                    raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+        except DouyinRateLimitError:
+            raise
         except Exception:
             pass
 
@@ -102,46 +113,62 @@ class DouyinBrowserClient:
         stagnant_rounds = 0
         has_more = True
 
-        while has_more and empty_rounds < self.config.empty_round_limit:
-            self._scroll_active_containers()
-            packets = self._drain_listen_packets(timeout=self.config.packet_timeout)
-            if not packets:
-                empty_rounds += 1
-                continue
+        with create_progress(transient=True) as progress:
+            task_id = progress.add_task("抓取抖音关注列表", total=50)
+            dynamic_total = 50
+            while has_more and empty_rounds < self.config.empty_round_limit:
+                if self._page_has_rate_limit():
+                    raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+                self._scroll_active_containers()
+                packets = self._drain_listen_packets(timeout=self.config.packet_timeout)
+                if not packets:
+                    if self._page_has_rate_limit():
+                        raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+                    empty_rounds += 1
+                    continue
 
-            empty_rounds = 0
-            new_users = 0
-            for packet in packets:
-                data = self._extract_packet_body(packet)
-                for user in data.get("followings") or []:
-                    sec_uid = user.get("sec_uid") or ""
-                    if not sec_uid or sec_uid in seen_sec_uids:
-                        continue
-                    seen_sec_uids.add(sec_uid)
-                    new_users += 1
-                    followings.append(
-                        {
-                            "nickname": user.get("nickname", "未知UP主"),
-                            "remark_name": self._extract_remark_name(user) or "",
-                            "sec_uid": sec_uid,
-                            "homepage": f"https://www.douyin.com/user/{sec_uid}",
-                            "follower_count": self._extract_follower_count(user),
-                            "aweme_count": self._extract_aweme_count(user),
-                            "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
-                        }
-                    )
+                empty_rounds = 0
+                new_users = 0
+                for packet in packets:
+                    data = self._extract_packet_body(packet)
+                    if self._packet_has_rate_limit(data):
+                        raise DouyinRateLimitError("抖音关注列表接口触发速率限制")
+                    for user in data.get("followings") or []:
+                        sec_uid = user.get("sec_uid") or ""
+                        if not sec_uid or sec_uid in seen_sec_uids:
+                            continue
+                        seen_sec_uids.add(sec_uid)
+                        new_users += 1
+                        followings.append(
+                            {
+                                "nickname": user.get("nickname", "未知UP主"),
+                                "remark_name": self._extract_remark_name(user) or "",
+                                "sec_uid": sec_uid,
+                                "homepage": f"https://www.douyin.com/user/{sec_uid}",
+                                "follower_count": self._extract_follower_count(user),
+                                "aweme_count": self._extract_aweme_count(user),
+                                "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
+                            }
+                        )
 
-                if data.get("has_more") in (0, False):
-                    has_more = False
+                    if data.get("has_more") in (0, False):
+                        has_more = False
 
-            print(f"   已发现 {len(followings)} 位抖音博主...")
-            if new_users == 0:
-                stagnant_rounds += 1
-            else:
-                stagnant_rounds = 0
+                if new_users == 0:
+                    stagnant_rounds += 1
+                else:
+                    stagnant_rounds = 0
 
-            if stagnant_rounds >= self.config.empty_round_limit:
-                break
+                dynamic_total = max(len(followings) + 50, dynamic_total)
+                progress.update(
+                    task_id,
+                    total=dynamic_total,
+                    completed=len(followings),
+                    description=f"抓取抖音关注列表 ({len(followings)})",
+                )
+
+                if stagnant_rounds >= self.config.empty_round_limit:
+                    break
 
         page.listen.stop()
         print(f"✅ 成功获取 {len(followings)} 位抖音关注博主")
@@ -163,10 +190,14 @@ class DouyinBrowserClient:
             try:
                 page.get(user["homepage"])
                 time.sleep(self.config.video_page_load_delay)
+                if self._page_has_rate_limit():
+                    raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
 
                 while empty_rounds < self.config.video_empty_round_limit:
+                    if self._page_has_rate_limit():
+                        raise RuntimeError("rate_limit")
                     self._scroll_video_page_fast()
                     packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
                     if packets:
@@ -175,6 +206,8 @@ class DouyinBrowserClient:
                         should_stop = False
                         for packet in packets:
                             data = self._extract_packet_body(packet)
+                            if self._packet_has_rate_limit(data):
+                                raise RuntimeError("rate_limit")
                             if self._packet_has_service_error(data):
                                 raise RuntimeError("service_error")
                             self._update_user_profile_from_packet(user, data)
@@ -200,6 +233,8 @@ class DouyinBrowserClient:
                         if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
                             break
                     else:
+                        if self._page_has_rate_limit():
+                            raise RuntimeError("rate_limit")
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
@@ -214,10 +249,22 @@ class DouyinBrowserClient:
                 if limit:
                     videos = videos[:limit]
                 self.service_error_streak = 0
+                self.rate_limit_streak = 0
                 time.sleep(self.config.user_request_interval + random.uniform(0, 0.2))
                 print(f"   ✅ 共获取 {user['nickname']} 的 {len(videos)} 个视频")
                 return videos
             except RuntimeError as exc:
+                if str(exc) == "rate_limit":
+                    self.rate_limit_streak += 1
+                    if attempt >= self.config.video_page_retry_count:
+                        raise DouyinRateLimitError("页面触发速率限制，重试后仍无法恢复")
+
+                    wait_seconds = self.config.rate_limit_retry_wait * attempt
+                    if self.rate_limit_streak >= 2:
+                        wait_seconds += self.config.rate_limit_long_cooldown
+                    self._recover_from_rate_limit(user, wait_seconds)
+                    continue
+
                 if str(exc) != "service_error":
                     raise
                 self.service_error_streak += 1
@@ -227,10 +274,6 @@ class DouyinBrowserClient:
                 wait_seconds = self.config.service_error_retry_wait * attempt
                 if self.service_error_streak >= 3:
                     wait_seconds += self.config.service_error_long_cooldown
-                print(
-                    f"   ⚠️  {user['nickname']} 页面出现服务异常，"
-                    f"第 {attempt} 次恢复，等待 {wait_seconds:.0f} 秒后重试..."
-                )
                 self._recover_from_service_error(user, wait_seconds)
             finally:
                 try:
@@ -254,6 +297,13 @@ class DouyinBrowserClient:
             return False
         return "服务异常" in body_text and "拉取数据" in body_text
 
+    def _page_has_rate_limit(self):
+        try:
+            body_text = self.start().run_js("return document.body ? document.body.innerText : '';") or ""
+        except Exception:
+            return False
+        return "触发速率限制" in body_text
+
     @staticmethod
     def _packet_has_service_error(data):
         if not isinstance(data, dict):
@@ -261,11 +311,18 @@ class DouyinBrowserClient:
         text = str(data)
         return "服务异常" in text and "拉取数据" in text
 
+    @staticmethod
+    def _packet_has_rate_limit(data):
+        if not isinstance(data, dict):
+            return False
+        text = str(data)
+        return "触发速率限制" in text
+
     def _recover_from_service_error(self, user, wait_seconds):
         if self.service_error_streak >= 2:
             page = self.restart(wait_seconds)
         else:
-            time.sleep(wait_seconds)
+            wait_with_progress(wait_seconds, f"抖音服务异常恢复冷却：{user['nickname']}")
             page = self.start()
         try:
             page.refresh()
@@ -276,6 +333,20 @@ class DouyinBrowserClient:
         except Exception:
             page.get(user["homepage"])
             time.sleep(self.config.video_page_load_delay + 1)
+
+    def _recover_from_rate_limit(self, user, wait_seconds):
+        if self.rate_limit_streak >= 2:
+            page = self.restart(wait_seconds)
+        else:
+            wait_with_progress(wait_seconds, f"抖音速率限制冷却：{user['nickname']}")
+            page = self.start()
+        try:
+            page.get(user["homepage"])
+            time.sleep(self.config.video_page_load_delay + 2)
+        except Exception:
+            page = self.restart(wait_seconds)
+            page.get(user["homepage"])
+            time.sleep(self.config.video_page_load_delay + 2)
 
     def _scroll_active_containers(self):
         self.start().run_js(
@@ -487,63 +558,66 @@ class DouyinBrowserClient:
 
         results = []
         consecutive_failures = 0
-        for index, homepage in enumerate(normalized_homepages, 1):
-            print(f"[{index}/{len(normalized_homepages)}] 正在处理取消关注: {homepage}")
-            try:
-                result = self.unfollow_user_by_homepage(homepage)
-            except Exception as exc:
-                result = {
-                    "homepage": homepage,
-                    "status": "failed",
-                    "message": str(exc),
-                }
-            results.append(result)
-            if result.get("status") == "unfollowed" and callable(on_unfollowed):
+        with create_progress(transient=True) as progress:
+            task_id = progress.add_task("执行抖音取消关注", total=len(normalized_homepages))
+            for index, homepage in enumerate(normalized_homepages, 1):
+                progress.update(
+                    task_id,
+                    description=f"执行抖音取消关注 ({index}/{len(normalized_homepages)})",
+                )
                 try:
-                    on_unfollowed(homepage)
+                    result = self.unfollow_user_by_homepage(homepage)
                 except Exception as exc:
-                    print(f"   ⚠️  已取消关注，但更新名单文件失败: {exc}")
+                    result = {
+                        "homepage": homepage,
+                        "status": "failed",
+                        "message": str(exc),
+                    }
+                results.append(result)
+                if result.get("status") == "unfollowed" and callable(on_unfollowed):
+                    try:
+                        on_unfollowed(homepage)
+                    except Exception as exc:
+                        print(f"   ⚠️  已取消关注，但更新名单文件失败: {exc}")
 
-            status = result.get("status")
-            if status in {"failed", "unknown"}:
-                consecutive_failures += 1
-                cooldown = self.config.unfollow_failure_cooldown
-                print(
-                    f"   ⏸️  检测到异常结果: {result.get('message', '未知原因')}，"
-                    f"冷却 {cooldown:.0f} 秒后再继续..."
-                )
-                time.sleep(cooldown)
-            else:
-                consecutive_failures = 0
-                base_interval = max(
-                    self.config.unfollow_interval_seconds,
-                    self.config.user_request_interval,
-                    1.0,
-                )
-                time.sleep(base_interval + random.uniform(0.2, 0.8))
+                status = result.get("status")
+                if status in {"failed", "unknown"}:
+                    consecutive_failures += 1
+                    cooldown = self.config.unfollow_failure_cooldown
+                    print(f"   ⚠️  检测到异常结果: {result.get('message', '未知原因')}")
+                    wait_with_progress(cooldown, "抖音取消关注异常冷却中")
+                else:
+                    consecutive_failures = 0
+                    base_interval = max(
+                        self.config.unfollow_interval_seconds,
+                        self.config.user_request_interval,
+                        1.0,
+                    )
+                    time.sleep(base_interval + random.uniform(0.2, 0.8))
 
-            if (
-                self.config.unfollow_batch_size > 0
-                and index % self.config.unfollow_batch_size == 0
-                and index < len(normalized_homepages)
-            ):
-                cooldown = self.config.unfollow_batch_cooldown
-                print(f"   ⏸️  已处理 {index} 个取消关注目标，批次冷却 {cooldown:.0f} 秒...")
-                time.sleep(cooldown)
+                if (
+                    self.config.unfollow_batch_size > 0
+                    and index % self.config.unfollow_batch_size == 0
+                    and index < len(normalized_homepages)
+                ):
+                    cooldown = self.config.unfollow_batch_cooldown
+                    wait_with_progress(cooldown, "抖音取消关注批次冷却中")
 
-            if (
-                self.config.unfollow_restart_interval > 0
-                and index % self.config.unfollow_restart_interval == 0
-                and index < len(normalized_homepages)
-            ):
-                print("   🔄 为降低风控概率，正在重启浏览器会话...")
-                self.restart(5)
+                if (
+                    self.config.unfollow_restart_interval > 0
+                    and index % self.config.unfollow_restart_interval == 0
+                    and index < len(normalized_homepages)
+                ):
+                    print("   🔄 为降低风控概率，正在重启浏览器会话...")
+                    self.restart(5)
 
-            if consecutive_failures >= 2:
-                extra_cooldown = self.config.unfollow_failure_cooldown
-                print(f"   ⏸️  连续异常较多，额外冷却 {extra_cooldown:.0f} 秒并重启会话...")
-                self.restart(extra_cooldown)
-                consecutive_failures = 0
+                if consecutive_failures >= 2:
+                    extra_cooldown = self.config.unfollow_failure_cooldown
+                    print("   ⚠️  连续异常较多，准备额外冷却并重启会话...")
+                    self.restart(extra_cooldown)
+                    consecutive_failures = 0
+
+                progress.advance(task_id)
         return results
 
     def unfollow_user_by_homepage(self, homepage):

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from .logging_utils import smart_print as print
+from .logging_utils import create_progress, smart_print as print
 
 
 class FeishuUploader:
@@ -341,26 +341,28 @@ class FeishuUploader:
             f"按 {padded_total_rows - 1} 行范围清理旧数据..."
         )
 
-        for index in range(0, len(padded_values), chunk_size):
-            chunk_data = padded_values[index:index + chunk_size]
-            start_row = index + 1
-            end_row = index + len(chunk_data)
-            url = (
-                "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/"
-                f"{self.config.spreadsheet_token}/values"
-            )
-            payload = {
-                "valueRange": {
-                    "range": f"{sheet_id}!A{start_row}:Z{end_row}",
-                    "values": chunk_data,
+        with create_progress(transient=True) as progress:
+            task_id = progress.add_task("覆盖写入飞书并清理旧数据", total=total_chunks)
+            for index in range(0, len(padded_values), chunk_size):
+                chunk_data = padded_values[index:index + chunk_size]
+                start_row = index + 1
+                end_row = index + len(chunk_data)
+                url = (
+                    "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/"
+                    f"{self.config.spreadsheet_token}/values"
+                )
+                payload = {
+                    "valueRange": {
+                        "range": f"{sheet_id}!A{start_row}:Z{end_row}",
+                        "values": chunk_data,
+                    }
                 }
-            }
-            response = requests.put(url, headers=headers, data=json.dumps(payload))
-            result = response.json()
-            if result.get("code") == 0:
-                print(f"  👉 批次 {index // chunk_size + 1}/{total_chunks} 覆盖写入并清理成功！")
-            else:
-                raise RuntimeError(f"批次 {index // chunk_size + 1} 写入失败: {result}")
+                response = requests.put(url, headers=headers, data=json.dumps(payload))
+                result = response.json()
+                if result.get("code") == 0:
+                    progress.advance(task_id)
+                else:
+                    raise RuntimeError(f"批次 {index // chunk_size + 1} 写入失败: {result}")
 
     def incremental_update_feishu_sheets(self, token, sheet_id, all_values, previous_row_count=0, prune_missing=True):
         header = all_values[0]
@@ -421,10 +423,19 @@ class FeishuUploader:
                 updates[existing_uid_to_row[uid]] = list(empty_row)
 
         grouped_updates = self._group_contiguous_rows(updates)
-        for start_row, grouped_rows in grouped_updates:
-            self._write_range(token, sheet_id, start_row, grouped_rows)
+        total_steps = len(grouped_updates) + (1 if append_rows else 0)
+        if total_steps:
+            with create_progress(transient=True) as progress:
+                task_id = progress.add_task("按 UID 增量同步飞书", total=total_steps)
+                for start_row, grouped_rows in grouped_updates:
+                    self._write_range(token, sheet_id, start_row, grouped_rows)
+                    progress.advance(task_id)
 
-        if append_rows:
+                if append_rows:
+                    append_start_row = current_row_count + 1
+                    self._write_range(token, sheet_id, append_start_row, append_rows)
+                    progress.advance(task_id)
+        elif append_rows:
             append_start_row = current_row_count + 1
             self._write_range(token, sheet_id, append_start_row, append_rows)
 
@@ -432,6 +443,16 @@ class FeishuUploader:
             f"✅ 飞书增量更新完成：更新 {len(updates) - len(stale_uids)} 行，"
             f"新增 {len(append_rows)} 行，清理 {len(stale_uids)} 行。"
         )
+
+        if prune_missing and stale_uids:
+            print("🧹 检测到飞书表中存在已清空旧行，正在执行紧凑整理以移除空行...")
+            compact_previous_row_count = max(previous_row_count, current_row_count)
+            self.overwrite_feishu_sheets(
+                token,
+                sheet_id,
+                all_values,
+                previous_row_count=compact_previous_row_count,
+            )
 
     def run(self, prune_missing=True):
         sheets_data = self.prepare_data_and_save_to_db()
