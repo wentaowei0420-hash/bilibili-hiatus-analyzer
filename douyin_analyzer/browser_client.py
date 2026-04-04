@@ -70,6 +70,17 @@ class DouyinBrowserClient:
             input("登录成功并刷新页面后，按回车继续...")
         print("✅ 抖音登录状态已确认。")
 
+    def _drain_listen_packets(self, timeout, gap=1):
+        packets = []
+        for step in self.start().listen.steps(timeout=timeout, gap=gap):
+            if step is False:
+                break
+            if isinstance(step, list):
+                packets.extend(item for item in step if item)
+            elif step:
+                packets.append(step)
+        return packets
+
     def get_followings(self):
         page = self.start()
         print("📜 正在抓取抖音关注列表...")
@@ -88,37 +99,48 @@ class DouyinBrowserClient:
         followings = []
         seen_sec_uids = set()
         empty_rounds = 0
+        stagnant_rounds = 0
+        has_more = True
 
-        while True:
+        while has_more and empty_rounds < self.config.empty_round_limit:
             self._scroll_active_containers()
-            packet = page.listen.wait(timeout=self.config.packet_timeout)
-            if not packet:
+            packets = self._drain_listen_packets(timeout=self.config.packet_timeout)
+            if not packets:
                 empty_rounds += 1
-                if empty_rounds >= self.config.empty_round_limit:
-                    break
                 continue
 
             empty_rounds = 0
-            data = self._extract_packet_body(packet)
-            for user in data.get("followings") or []:
-                sec_uid = user.get("sec_uid") or ""
-                if not sec_uid or sec_uid in seen_sec_uids:
-                    continue
-                seen_sec_uids.add(sec_uid)
-                followings.append(
-                    {
-                        "nickname": user.get("nickname", "未知UP主"),
-                        "remark_name": self._extract_remark_name(user) or "",
-                        "sec_uid": sec_uid,
-                        "homepage": f"https://www.douyin.com/user/{sec_uid}",
-                        "follower_count": self._extract_follower_count(user),
-                        "aweme_count": self._extract_aweme_count(user),
-                        "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
-                    }
-                )
+            new_users = 0
+            for packet in packets:
+                data = self._extract_packet_body(packet)
+                for user in data.get("followings") or []:
+                    sec_uid = user.get("sec_uid") or ""
+                    if not sec_uid or sec_uid in seen_sec_uids:
+                        continue
+                    seen_sec_uids.add(sec_uid)
+                    new_users += 1
+                    followings.append(
+                        {
+                            "nickname": user.get("nickname", "未知UP主"),
+                            "remark_name": self._extract_remark_name(user) or "",
+                            "sec_uid": sec_uid,
+                            "homepage": f"https://www.douyin.com/user/{sec_uid}",
+                            "follower_count": self._extract_follower_count(user),
+                            "aweme_count": self._extract_aweme_count(user),
+                            "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
+                        }
+                    )
+
+                if data.get("has_more") in (0, False):
+                    has_more = False
 
             print(f"   已发现 {len(followings)} 位抖音博主...")
-            if data.get("has_more") in (0, False):
+            if new_users == 0:
+                stagnant_rounds += 1
+            else:
+                stagnant_rounds = 0
+
+            if stagnant_rounds >= self.config.empty_round_limit:
                 break
 
         page.listen.stop()
@@ -136,6 +158,7 @@ class DouyinBrowserClient:
         for attempt in range(1, self.config.video_page_retry_count + 1):
             videos_by_id = {}
             empty_rounds = 0
+            stagnant_rounds = 0
             page.listen.start(self.config.post_api_pattern)
             try:
                 page.get(user["homepage"])
@@ -143,22 +166,38 @@ class DouyinBrowserClient:
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
 
-                while True:
+                while empty_rounds < self.config.video_empty_round_limit:
                     self._scroll_video_page_fast()
-                    packet = page.listen.wait(timeout=self.config.video_packet_timeout)
-                    if packet:
+                    packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
+                    if packets:
                         empty_rounds = 0
-                        data = self._extract_packet_body(packet)
-                        if self._packet_has_service_error(data):
-                            raise RuntimeError("service_error")
-                        self._update_user_profile_from_packet(user, data)
-                        for aweme in data.get("aweme_list") or []:
-                            video = self._build_video_row(user, aweme)
-                            if video:
-                                videos_by_id[video["aweme_id"]] = video
-                        if limit and len(videos_by_id) >= limit:
-                            break
-                        if data.get("has_more") in (0, False):
+                        new_videos = 0
+                        should_stop = False
+                        for packet in packets:
+                            data = self._extract_packet_body(packet)
+                            if self._packet_has_service_error(data):
+                                raise RuntimeError("service_error")
+                            self._update_user_profile_from_packet(user, data)
+                            for aweme in data.get("aweme_list") or []:
+                                video = self._build_video_row(user, aweme)
+                                if video and video["aweme_id"] not in videos_by_id:
+                                    new_videos += 1
+                                    videos_by_id[video["aweme_id"]] = video
+                                elif video:
+                                    videos_by_id[video["aweme_id"]] = video
+                            if limit and len(videos_by_id) >= limit:
+                                should_stop = True
+                                break
+                            if data.get("has_more") in (0, False):
+                                should_stop = True
+                                break
+
+                        if new_videos == 0:
+                            stagnant_rounds += 1
+                        else:
+                            stagnant_rounds = 0
+
+                        if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
                             break
                     else:
                         if self._page_has_service_error():

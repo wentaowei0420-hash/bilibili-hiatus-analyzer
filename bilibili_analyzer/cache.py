@@ -1,5 +1,6 @@
 import json
 import time
+import hashlib
 from datetime import datetime
 
 from .logging_utils import smart_print as print
@@ -50,15 +51,22 @@ class CacheStore:
             print(f"⚠️  读取视频时长分析进度失败，将重新抓取: {exc}")
             return {}
 
+        if data.get("storage") == "split":
+            return self._load_split_progress(
+                self.config.video_duration_progress_dir,
+                data.get("keys", []),
+            )
+
         ups = data.get("ups", {})
         if not isinstance(ups, dict):
             return {}
         return ups
 
     def save_video_duration_progress(self, progress):
-        self._write_json(
+        self._write_split_progress(
             self.config.video_duration_progress_json,
-            {"saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ups": progress},
+            self.config.video_duration_progress_dir,
+            progress,
             "保存视频时长分析进度失败",
         )
 
@@ -140,7 +148,58 @@ class CacheStore:
 
     def _write_json(self, path, payload, error_message):
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8") as progress_file:
                 json.dump(payload, progress_file, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"⚠️  {error_message}: {exc}")
+
+    @staticmethod
+    def _entry_filename(key):
+        digest = hashlib.sha1(str(key).encode("utf-8")).hexdigest()
+        return f"{digest}.json"
+
+    def _load_split_progress(self, directory, keys):
+        progress = {}
+        if not directory.exists():
+            return progress
+
+        for key in keys:
+            entry_path = directory / self._entry_filename(key)
+            if not entry_path.exists():
+                continue
+            try:
+                with entry_path.open("r", encoding="utf-8") as entry_file:
+                    progress[key] = json.load(entry_file)
+            except Exception as exc:
+                print(f"⚠️  读取缓存分片失败({key})，将跳过该分片: {exc}")
+        return progress
+
+    def _write_split_progress(self, manifest_path, directory, progress, error_message):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            keys = sorted(progress.keys(), key=str)
+            expected_filenames = set()
+
+            for key in keys:
+                entry_filename = self._entry_filename(key)
+                expected_filenames.add(entry_filename)
+                entry_path = directory / entry_filename
+                with entry_path.open("w", encoding="utf-8") as entry_file:
+                    json.dump(progress[key], entry_file, ensure_ascii=False, separators=(",", ":"))
+
+            for existing_file in directory.glob("*.json"):
+                if existing_file.name not in expected_filenames:
+                    existing_file.unlink(missing_ok=True)
+
+            self._write_json(
+                manifest_path,
+                {
+                    "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "storage": "split",
+                    "keys": keys,
+                },
+                error_message,
+            )
         except Exception as exc:
             print(f"⚠️  {error_message}: {exc}")

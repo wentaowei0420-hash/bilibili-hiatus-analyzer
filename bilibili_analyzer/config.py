@@ -33,6 +33,7 @@ class AnalyzerConfig:
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
     video_duration_progress_json: Path
+    video_duration_progress_dir: Path
     analysis_mode: str
     enable_video_duration_analysis: bool
     enable_real_video_like_fetch: bool
@@ -94,6 +95,7 @@ class FeishuConfig:
     file_merged_output: Path
     db_path: Path
     upload_state_json: Path
+    history_retention_days: int
 
 
 def _root_dir() -> Path:
@@ -102,9 +104,14 @@ def _root_dir() -> Path:
 
 def load_analyzer_config() -> AnalyzerConfig:
     root_dir = _root_dir()
+    runtime_dir = root_dir / "runtime"
+    log_dir = runtime_dir / "logs"
+    data_dir = root_dir / "data" / "bilibili"
+    output_dir = data_dir / "output"
+    state_dir = data_dir / "state"
     return AnalyzerConfig(
         root_dir=root_dir,
-        log_dir=root_dir / "logs",
+        log_dir=log_dir,
         cookie=os.getenv("BILIBILI_COOKIE", ""),
         followings_api="https://api.bilibili.com/x/relation/followings",
         relation_stat_api="https://api.bilibili.com/x/relation/stat",
@@ -113,12 +120,13 @@ def load_analyzer_config() -> AnalyzerConfig:
         space_wbi_arc_search_api="https://api.bilibili.com/x/space/wbi/arc/search",
         video_view_api="https://api.bilibili.com/x/web-interface/view",
         nav_api="https://api.bilibili.com/x/web-interface/nav",
-        output_csv=root_dir / "bilibili_hiatus_ranking.csv",
-        progress_json=root_dir / "bilibili_hiatus_progress.json",
-        all_videos_csv=root_dir / "bilibili_all_videos.csv",
-        video_duration_analysis_csv=root_dir / "bilibili_video_duration_analysis.csv",
-        video_duration_report_md=root_dir / "bilibili_video_duration_report.md",
-        video_duration_progress_json=root_dir / "bilibili_video_duration_progress.json",
+        output_csv=output_dir / "bilibili_hiatus_ranking.csv",
+        progress_json=state_dir / "bilibili_hiatus_progress.json",
+        all_videos_csv=output_dir / "bilibili_all_videos.csv",
+        video_duration_analysis_csv=output_dir / "bilibili_video_duration_analysis.csv",
+        video_duration_report_md=output_dir / "bilibili_video_duration_report.md",
+        video_duration_progress_json=state_dir / "bilibili_video_duration_progress.json",
+        video_duration_progress_dir=state_dir / "cache" / "video_duration_progress",
         analysis_mode=os.getenv("ANALYSIS_MODE", "precise"),
         enable_video_duration_analysis=_get_bool("ENABLE_VIDEO_DURATION_ANALYSIS", True),
         enable_real_video_like_fetch=_get_bool("ENABLE_REAL_VIDEO_LIKE_FETCH", True),
@@ -156,31 +164,38 @@ def load_analyzer_config() -> AnalyzerConfig:
 
 def load_feishu_config() -> FeishuConfig:
     root_dir = _root_dir()
+    runtime_dir = root_dir / "runtime"
+    log_dir = runtime_dir / "logs"
+    data_dir = root_dir / "data" / "bilibili"
+    output_dir = data_dir / "output"
+    state_dir = data_dir / "state"
+    history_dir = root_dir / "data" / "history"
     return FeishuConfig(
         root_dir=root_dir,
-        log_dir=root_dir / "logs",
+        log_dir=log_dir,
         app_id=os.getenv("FEISHU_APP_ID", ""),
         app_secret=os.getenv("FEISHU_APP_SECRET", ""),
         spreadsheet_token=os.getenv("FEISHU_SPREADSHEET_TOKEN", ""),
         sheet_title=os.getenv("FEISHU_BILIBILI_SHEET_TITLE", "B站数据表"),
         sheet_index=int(os.getenv("FEISHU_BILIBILI_SHEET_INDEX", "0")),
         file_hiatus=Path(
-            os.getenv("FILE_HIATUS_PATH", str(root_dir / "bilibili_hiatus_ranking.csv"))
+            os.getenv("FILE_HIATUS_PATH", str(output_dir / "bilibili_hiatus_ranking.csv"))
         ),
         file_duration=Path(
             os.getenv(
                 "FILE_DURATION_PATH",
-                str(root_dir / "bilibili_video_duration_analysis.csv"),
+                str(output_dir / "bilibili_video_duration_analysis.csv"),
             )
         ),
         file_merged_output=Path(
-            os.getenv("FILE_MERGED_OUTPUT_PATH", str(root_dir / "merged_bilibili_data.csv"))
+            os.getenv("FILE_MERGED_OUTPUT_PATH", str(output_dir / "merged_bilibili_data.csv"))
         ),
-        db_path=Path(os.getenv("DB_PATH", str(root_dir / "bilibili_history.db"))),
+        db_path=Path(os.getenv("DB_PATH", str(history_dir / "bilibili_history.db"))),
         upload_state_json=Path(
             os.getenv(
                 "FEISHU_UPLOAD_STATE_PATH",
-                str(root_dir / "bilibili_feishu_upload_state.json"),
+                str(state_dir / "bilibili_feishu_upload_state.json"),
             )
         ),
+        history_retention_days=int(os.getenv("BILIBILI_HISTORY_RETENTION_DAYS", "30")),
     )

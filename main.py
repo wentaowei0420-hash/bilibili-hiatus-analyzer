@@ -4,7 +4,8 @@ from pathlib import Path
 DOUYIN_FETCH_MODE = "monitor"
 # 可选值: "counts", "monitor", "delta", "full"
 
-DOUYIN_UNFOLLOW_LIST_PATH = Path(__file__).resolve().parent / "douyin_unfollow_list.txt"
+ROOT_DIR = Path(__file__).resolve().parent
+DOUYIN_UNFOLLOW_LIST_PATH = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
 
 
 def prompt_platform_choice():

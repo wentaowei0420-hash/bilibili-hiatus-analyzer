@@ -20,19 +20,17 @@ def run_analysis(trigger_upload=True):
     results = analyzer.analyze_hiatus()
 
     if trigger_upload and results is not None:
-        print("\n" + "=" * 60)
-        print("🚀 B站数据抓取结束，正在自动执行飞书上传...")
-        print("=" * 60)
+        print("☁️  B站分析完成，开始同步飞书...")
         run_feishu_upload()
 
     return results
 
 
-def run_feishu_upload():
+def run_feishu_upload(prune_missing=True):
     config = load_feishu_config()
     setup_logging(config.log_dir, "feishu_upload")
     uploader = FeishuUploader(config)
-    uploader.run()
+    uploader.run(prune_missing=prune_missing)
 
 
 def main():

@@ -1,6 +1,6 @@
 import time
 
-from bilibili_analyzer.logging_utils import smart_print as print
+from bilibili_analyzer.logging_utils import create_progress, create_table, get_console, smart_print as print
 
 from .browser_client import DouyinServiceError
 from .exporters import (
@@ -30,6 +30,23 @@ class DouyinHiatusAnalyzer:
         self.browser_client = browser_client
         self.cache_store = cache_store
         self.upload_callback = upload_callback
+
+    @staticmethod
+    def sort_followings_by_follower_count(followings):
+        def follower_sort_key(user):
+            raw_count = 0
+            if isinstance(user, dict):
+                raw_count = user.get("follower_count") or 0
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                count = 0
+            nickname = ""
+            if isinstance(user, dict):
+                nickname = str(user.get("nickname") or "")
+            return (-count, nickname)
+
+        return sorted(followings or [], key=follower_sort_key)
 
     def get_fetch_mode(self):
         if self.config.fetch_mode in {"counts", "monitor", "delta", "full"}:
@@ -245,42 +262,71 @@ class DouyinHiatusAnalyzer:
             "long_video_ratio": format_ratio(long_count, total_videos),
         }
 
+    @staticmethod
+    def _format_output_summary(paths):
+        return "、".join(path.name for path in paths if path)
+
     def display_top_results(self, results):
-        print("\n" + "=" * 60)
-        print("🏆 抖音断更排行榜 - Top 10")
-        print("=" * 60)
-        print()
+        table = create_table(
+            "🏆 抖音断更排行榜 Top 10",
+            [
+                ("排名", "right", "bold"),
+                ("博主", "left"),
+                ("断更天数", "right"),
+                ("粉丝数", "right"),
+                ("视频数", "right"),
+                ("平均点赞", "right"),
+                ("平均几天一更", "right"),
+                ("最新发布日期", "left"),
+            ],
+        )
 
         for index, result in enumerate(results[:10], 1):
-            print(f"第 {index} 名: {result['uploader_name']}")
-            print(f"   ⏰ 已断更 {result['days_since_update']} 天")
-            print(f"   👥 粉丝数: {result.get('follower_count') or '暂无数据'}")
-            print(f"   🎞️  发布视频数量: {result.get('published_video_count', 0)}")
-            print(f"   👍 平均点赞数: {result.get('average_like_count', 0)}")
             average_update_interval_days = result.get("average_update_interval_days")
             average_update_text = (
-                f"{average_update_interval_days} 天"
-                if average_update_interval_days is not None
-                else "暂无数据"
+                f"{average_update_interval_days:.2f}"
+                if isinstance(average_update_interval_days, (int, float))
+                else "暂无"
             )
-            print(f"   📐 平均几天一更: {average_update_text}")
-            print(f"   📺 最新视频: {result['latest_video_title']}")
-            print(f"   📅 发布日期: {result['upload_date']}")
-            print(f"   🔗 主页: {result['uploader_homepage']}")
-            print()
+            table.add_row(
+                str(index),
+                str(result["uploader_name"]),
+                str(result["days_since_update"]),
+                str(result.get("follower_count") or "暂无"),
+                str(result.get("published_video_count", 0)),
+                str(result.get("average_like_count", 0)),
+                average_update_text,
+                str(result.get("upload_date", UNKNOWN_DATE)),
+            )
+
+        get_console().print()
+        get_console().print(table)
+        get_console().print()
 
     def display_counts_results(self, results):
-        print("\n" + "=" * 60)
-        print("📋 抖音基础监控 - Top 10")
-        print("=" * 60)
-        print()
+        table = create_table(
+            "📋 抖音基础监控 Top 10",
+            [
+                ("排名", "right", "bold"),
+                ("博主", "left"),
+                ("粉丝数", "right"),
+                ("视频数", "right"),
+                ("主页", "left"),
+            ],
+        )
 
         for index, result in enumerate(results[:10], 1):
-            print(f"第 {index} 名: {result['uploader_name']}")
-            print(f"   👥 粉丝数: {result.get('follower_count') or '暂无数据'}")
-            print(f"   🎞️  发布视频数量: {result.get('published_video_count', 0)}")
-            print(f"   🔗 主页: {result['uploader_homepage']}")
-            print()
+            table.add_row(
+                str(index),
+                str(result["uploader_name"]),
+                str(result.get("follower_count") or "暂无"),
+                str(result.get("published_video_count", 0)),
+                str(result["uploader_homepage"]),
+            )
+
+        get_console().print()
+        get_console().print(table)
+        get_console().print()
 
     def flush_partial_outputs(
         self,
@@ -308,10 +354,15 @@ class DouyinHiatusAnalyzer:
             save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
 
         if self.upload_callback is not None:
-            print()
-            print("=" * 60)
-            print(f"☁️  抖音已处理 {processed_count} 位博主，开始阶段性上传飞书...")
-            print("=" * 60)
+            exported = [self.config.output_csv]
+            if self.should_export_summary_analysis():
+                exported.append(self.config.video_duration_analysis_csv)
+            if self.should_export_duration_analysis():
+                exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
+            print(
+                f"☁️  阶段同步：已处理 {processed_count} 位博主，"
+                f"准备上传 {self._format_output_summary(exported)}"
+            )
             try:
                 self.upload_callback(processed_count)
             except Exception as exc:
@@ -349,6 +400,9 @@ class DouyinHiatusAnalyzer:
             print("❌ 未能获取到任何抖音关注列表")
             return None
 
+        followings = self.sort_followings_by_follower_count(followings)
+        print("📈 已按粉丝数从高到低排序后开始抓取。")
+
         progress = {} if fetch_mode == "counts" else self.cache_store.load_progress()
         if progress:
             print(f"♻️  已加载 {len(progress)} 条抖音缓存")
@@ -372,13 +426,169 @@ class DouyinHiatusAnalyzer:
         refreshed_user_count = 0
 
         if fetch_mode == "counts":
+            with create_progress() as progress_bar:
+                task_id = progress_bar.add_task("统计抖音博主基础数据", total=len(followings))
+                for index, user in enumerate(followings, 1):
+                    result = self.build_counts_only_result_item(user)
+                    summary = self.build_counts_only_summary(user)
+                    results.append(result)
+                    if self.should_export_summary_analysis():
+                        summary_rows.append(summary)
+
+                    progress_bar.advance(task_id)
+
+                    if (
+                        self.upload_callback is not None
+                        and self.config.intermediate_upload_interval_users > 0
+                        and index % self.config.intermediate_upload_interval_users == 0
+                    ):
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index,
+                        )
+
+            self.display_counts_results(results)
+            save_to_csv(self.config, results)
+            if self.should_export_summary_analysis():
+                save_video_duration_analysis_to_csv(self.config, summary_rows)
+
+            exported = [self.config.output_csv]
+            if self.should_export_summary_analysis():
+                exported.append(self.config.video_duration_analysis_csv)
+            print(
+                f"🗂️  抖音 counts 模式已输出：{self._format_output_summary(exported)}，"
+                f"共 {len(results)} 位博主"
+            )
+            return results
+
+        with create_progress() as progress_bar:
+            task_id = progress_bar.add_task("分析抖音博主", total=len(followings))
             for index, user in enumerate(followings, 1):
-                print(f"[{index}/{len(followings)}] 正在统计 {user['nickname']} ...")
-                result = self.build_counts_only_result_item(user)
-                summary = self.build_counts_only_summary(user)
+                entry = progress.get(user["sec_uid"])
+                if entry and isinstance(entry.get("user"), dict):
+                    user.setdefault("follower_count", entry["user"].get("follower_count"))
+                    user.setdefault("aweme_count", entry["user"].get("aweme_count"))
+                    user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
+
+                latest_video = self.get_latest_video_from_entry(entry)
+                if self.cache_store.should_refresh_cache(user, entry):
+                    try:
+                        if fetch_mode == "full":
+                            videos = self.browser_client.get_all_videos_for_user(user)
+                            latest_video = self.get_latest_video_from_videos(videos)
+                        else:
+                            recent_videos = self.browser_client.get_recent_videos_for_user(
+                                user,
+                                self.config.recent_video_limit,
+                            )
+                            latest_video = recent_videos[0] if recent_videos else None
+                            if fetch_mode == "delta" and entry:
+                                videos = self.merge_videos(entry.get("videos", []), recent_videos)
+                            elif entry and entry.get("videos"):
+                                videos = entry.get("videos", [])
+                            else:
+                                videos = recent_videos
+                    except DouyinServiceError as exc:
+                        print(
+                            f"⚠️  {user['nickname']} 触发页面级限制: {exc}，"
+                            f"全局冷却 {self.config.service_error_global_cooldown:.0f} 秒后继续..."
+                        )
+                        self.browser_client.restart(self.config.service_error_global_cooldown)
+                        if entry:
+                            videos = entry.get("videos", [])
+                            latest_video = self.get_latest_video_from_entry(entry)
+                        else:
+                            results.append(self.build_fetch_failed_result_item(user))
+                            progress_bar.advance(task_id)
+                            continue
+                    except Exception as exc:
+                        print(f"⚠️  {user['nickname']} 抓取失败: {exc}")
+                        if entry:
+                            videos = entry.get("videos", [])
+                            latest_video = self.get_latest_video_from_entry(entry)
+                        else:
+                            results.append(self.build_fetch_failed_result_item(user))
+                            progress_bar.advance(task_id)
+                            continue
+
+                    if fetch_mode == "full":
+                        summary = self.build_video_duration_summary(user, videos)
+                    elif entry and isinstance(entry.get("summary"), dict):
+                        summary = dict(entry.get("summary") or {})
+                        summary["uploader_name"] = user["nickname"]
+                        summary["uploader_id"] = user["sec_uid"]
+                        summary["follower_count"] = user.get("follower_count")
+                        if user.get("aweme_count") is not None:
+                            summary["total_videos"] = user.get("aweme_count")
+                        if latest_video:
+                            summary["latest_publish_timestamp"] = normalize_timestamp(
+                                latest_video.get("publish_timestamp")
+                            )
+                    else:
+                        summary = self.build_video_duration_summary(user, videos)
+
+                    progress[user["sec_uid"]] = {
+                        "cached_at": int(time.time()),
+                        "user": user,
+                        "videos": videos,
+                        "summary": summary,
+                        "latest_video": latest_video,
+                    }
+                    refreshed_user_count += 1
+                    pending_progress_saves += 1
+
+                    if pending_progress_saves >= self.config.progress_save_interval_users:
+                        self.cache_store.save_progress(progress)
+                        pending_progress_saves = 0
+
+                    if (
+                        self.config.refresh_batch_size > 0
+                        and refreshed_user_count % self.config.refresh_batch_size == 0
+                    ):
+                        cooldown = self.config.refresh_batch_cooldown
+                        print(
+                            f"⏸️  已连续刷新 {refreshed_user_count} 位博主，"
+                            f"批次冷却 {cooldown:.0f} 秒后继续..."
+                        )
+                        time.sleep(cooldown)
+
+                    if (
+                        self.config.browser_restart_interval_users > 0
+                        and refreshed_user_count % self.config.browser_restart_interval_users == 0
+                    ):
+                        print(
+                            f"🔧 已刷新 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
+                        )
+                        self.browser_client.restart(5)
+                else:
+                    videos = entry.get("videos", []) if entry else []
+                    summary = (
+                        entry.get("summary", self.build_empty_summary(user))
+                        if entry
+                        else self.build_empty_summary(user)
+                    )
+
+                if latest_video is None and videos:
+                    latest_video = self.get_latest_video_from_videos(videos)
+
+                if latest_video:
+                    result = self.build_result_item(user, summary, latest_video)
+                else:
+                    result = self.build_no_video_result_item(user)
+
+                self.cache_store.refresh_result_runtime_fields(result)
                 results.append(result)
+
                 if self.should_export_summary_analysis():
                     summary_rows.append(summary)
+                if export_duration_analysis:
+                    all_video_rows.extend(videos)
+
+                progress_bar.advance(task_id)
 
                 if (
                     self.upload_callback is not None
@@ -393,147 +603,7 @@ class DouyinHiatusAnalyzer:
                         pending_progress_saves,
                         index,
                     )
-
-            self.display_counts_results(results)
-            save_to_csv(self.config, results)
-            if self.should_export_summary_analysis():
-                save_video_duration_analysis_to_csv(self.config, summary_rows)
-
-            print(f"✅ 抖音排行已保存到文件: {self.config.output_csv.name}")
-            if self.should_export_summary_analysis():
-                print(f"✅ 抖音汇总分析已保存到文件: {self.config.video_duration_analysis_csv.name}")
-            return results
-
-        for index, user in enumerate(followings, 1):
-            print(f"[{index}/{len(followings)}] 正在分析 {user['nickname']} ...")
-            entry = progress.get(user["sec_uid"])
-            if entry and isinstance(entry.get("user"), dict):
-                user.setdefault("follower_count", entry["user"].get("follower_count"))
-                user.setdefault("aweme_count", entry["user"].get("aweme_count"))
-                user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
-
-            latest_video = self.get_latest_video_from_entry(entry)
-            if self.cache_store.should_refresh_cache(user, entry):
-                try:
-                    if fetch_mode == "full":
-                        videos = self.browser_client.get_all_videos_for_user(user)
-                        latest_video = self.get_latest_video_from_videos(videos)
-                    else:
-                        recent_videos = self.browser_client.get_recent_videos_for_user(
-                            user,
-                            self.config.recent_video_limit,
-                        )
-                        latest_video = recent_videos[0] if recent_videos else None
-                        if fetch_mode == "delta" and entry:
-                            videos = self.merge_videos(entry.get("videos", []), recent_videos)
-                        elif entry and entry.get("videos"):
-                            videos = entry.get("videos", [])
-                        else:
-                            videos = recent_videos
-                except DouyinServiceError as exc:
-                    print(
-                        f"⚠️  {user['nickname']} 触发页面级限制: {exc}，"
-                        f"全局冷却 {self.config.service_error_global_cooldown:.0f} 秒后继续..."
-                    )
-                    self.browser_client.restart(self.config.service_error_global_cooldown)
-                    if entry:
-                        videos = entry.get("videos", [])
-                        latest_video = self.get_latest_video_from_entry(entry)
-                    else:
-                        results.append(self.build_fetch_failed_result_item(user))
-                        continue
-                except Exception as exc:
-                    print(f"⚠️  {user['nickname']} 抓取失败: {exc}")
-                    if entry:
-                        videos = entry.get("videos", [])
-                        latest_video = self.get_latest_video_from_entry(entry)
-                    else:
-                        results.append(self.build_fetch_failed_result_item(user))
-                        continue
-
-                if fetch_mode == "full":
-                    summary = self.build_video_duration_summary(user, videos)
-                elif entry and isinstance(entry.get("summary"), dict):
-                    summary = dict(entry.get("summary") or {})
-                    summary["uploader_name"] = user["nickname"]
-                    summary["uploader_id"] = user["sec_uid"]
-                    summary["follower_count"] = user.get("follower_count")
-                    if user.get("aweme_count") is not None:
-                        summary["total_videos"] = user.get("aweme_count")
-                    if latest_video:
-                        summary["latest_publish_timestamp"] = normalize_timestamp(
-                            latest_video.get("publish_timestamp")
-                        )
-                else:
-                    summary = self.build_video_duration_summary(user, videos)
-
-                progress[user["sec_uid"]] = {
-                    "cached_at": int(time.time()),
-                    "user": user,
-                    "videos": videos,
-                    "summary": summary,
-                    "latest_video": latest_video,
-                }
-                refreshed_user_count += 1
-                pending_progress_saves += 1
-
-                if pending_progress_saves >= self.config.progress_save_interval_users:
-                    self.cache_store.save_progress(progress)
                     pending_progress_saves = 0
-
-                if (
-                    self.config.refresh_batch_size > 0
-                    and refreshed_user_count % self.config.refresh_batch_size == 0
-                ):
-                    cooldown = self.config.refresh_batch_cooldown
-                    print(
-                        f"⏸️  已连续刷新 {refreshed_user_count} 位博主，"
-                        f"批次冷却 {cooldown:.0f} 秒后继续..."
-                    )
-                    time.sleep(cooldown)
-
-                if (
-                    self.config.browser_restart_interval_users > 0
-                    and refreshed_user_count % self.config.browser_restart_interval_users == 0
-                ):
-                    print(
-                        f"🔧 已刷新 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
-                    )
-                    self.browser_client.restart(5)
-            else:
-                videos = entry.get("videos", []) if entry else []
-                summary = entry.get("summary", self.build_empty_summary(user)) if entry else self.build_empty_summary(user)
-
-            if latest_video is None and videos:
-                latest_video = self.get_latest_video_from_videos(videos)
-
-            if latest_video:
-                result = self.build_result_item(user, summary, latest_video)
-            else:
-                result = self.build_no_video_result_item(user)
-
-            self.cache_store.refresh_result_runtime_fields(result)
-            results.append(result)
-
-            if self.should_export_summary_analysis():
-                summary_rows.append(summary)
-            if export_duration_analysis:
-                all_video_rows.extend(videos)
-
-            if (
-                self.upload_callback is not None
-                and self.config.intermediate_upload_interval_users > 0
-                and index % self.config.intermediate_upload_interval_users == 0
-            ):
-                self.flush_partial_outputs(
-                    results,
-                    all_video_rows,
-                    summary_rows,
-                    progress,
-                    pending_progress_saves,
-                    index,
-                )
-                pending_progress_saves = 0
 
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
@@ -548,10 +618,13 @@ class DouyinHiatusAnalyzer:
             save_all_videos_to_csv(self.config, all_video_rows)
             save_video_duration_report(self.config, summary_rows, len(all_video_rows))
 
-        print(f"✅ 抖音排行已保存到文件: {self.config.output_csv.name}")
+        exported = [self.config.output_csv]
         if self.should_export_summary_analysis():
-            print(f"✅ 抖音视频时长分析已保存到文件: {self.config.video_duration_analysis_csv.name}")
+            exported.append(self.config.video_duration_analysis_csv)
         if export_duration_analysis:
-            print(f"✅ 抖音视频明细已保存到文件: {self.config.all_videos_csv.name}")
-            print(f"✅ 抖音视频时长报告已保存到文件: {self.config.video_duration_report_md.name}")
+            exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
+        print(
+            f"🗂️  抖音 {fetch_mode} 模式已输出 {len(exported)} 份文件："
+            f"{self._format_output_summary(exported)}"
+        )
         return results

@@ -57,8 +57,7 @@ def remove_unfollow_target(list_path, homepage):
 
 
 def run_partial_feishu_upload(processed_count):
-    print(f"-> 正在执行抖音阶段性飞书上传，当前已处理 {processed_count} 位博主...")
-    run_feishu_upload()
+    run_feishu_upload(prune_missing=False)
 
 
 def run_analysis(trigger_upload=True, fetch_mode_override=None):
@@ -80,19 +79,17 @@ def run_analysis(trigger_upload=True, fetch_mode_override=None):
         browser_client.close()
 
     if trigger_upload and results is not None:
-        print("\n" + "=" * 60)
-        print("🚀 抖音数据抓取结束，正在自动执行飞书上传...")
-        print("=" * 60)
-        run_feishu_upload()
+        print("☁️  抖音分析完成，开始同步飞书...")
+        run_feishu_upload(prune_missing=True)
 
     return results
 
 
-def run_feishu_upload():
+def run_feishu_upload(prune_missing=True):
     config = load_feishu_config()
     setup_logging(config.log_dir, "douyin_feishu_upload")
     uploader = FeishuUploader(config)
-    uploader.run()
+    uploader.run(prune_missing=prune_missing)
 
 
 def run_unfollow(list_path):

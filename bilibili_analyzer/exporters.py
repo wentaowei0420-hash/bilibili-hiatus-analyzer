@@ -43,10 +43,6 @@ def save_to_csv(config, results):
         "data_source": "数据来源",
     }
     _write_csv(config.output_csv, fieldnames, chinese_headers, results, "保存CSV文件失败")
-    print("=" * 60)
-    print(f"✅ 排行榜已保存到文件: {config.output_csv.name}")
-    print(f"📊 共分析了 {len(results)} 位UP主")
-    print("=" * 60)
 
 
 def save_all_videos_to_csv(config, video_rows):
@@ -137,6 +133,7 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
 
 def save_video_duration_report(config, summary_rows, total_video_count):
     try:
+        config.video_duration_report_md.parent.mkdir(parents=True, exist_ok=True)
         total_up_count = len(summary_rows)
         short_total = sum(row["short_video_count"] for row in summary_rows)
         medium_total = sum(row["medium_video_count"] for row in summary_rows)
@@ -189,6 +186,7 @@ def save_video_duration_report(config, summary_rows, total_video_count):
 
 def _write_csv(path, fieldnames, chinese_headers, rows, error_message):
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
             writer.writerow(chinese_headers)

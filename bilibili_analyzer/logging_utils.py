@@ -1,21 +1,37 @@
-import sys
-
 from loguru import logger
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
 
 
 ERROR_MARKERS = ("❌", "失败", "错误", "出错")
 WARNING_MARKERS = ("⚠️", "异常", "风控", "重试队列")
-SUCCESS_MARKERS = ("✅", "成功", "🎉", "🏆", "🚀")
+SUCCESS_MARKERS = ("✅", "成功", "🏆", "📊", "🎬")
+console = Console(soft_wrap=True)
 
 
 def setup_logging(log_dir, log_prefix: str):
     log_dir.mkdir(parents=True, exist_ok=True)
     logger.remove()
     logger.add(
-        sys.stdout,
-        colorize=True,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-        "<level>{level: <8}</level> | <level>{message}</level>",
+        RichHandler(
+            console=console,
+            rich_tracebacks=True,
+            markup=False,
+            show_path=False,
+        ),
+        colorize=False,
+        format="{message}",
     )
     logger.add(
         str(log_dir / f"{log_prefix}_{{time:YYYY-MM-DD}}.log"),
@@ -40,3 +56,35 @@ def smart_print(*args, **kwargs):
         logger.success(text)
     else:
         logger.info(text)
+
+
+def get_console() -> Console:
+    return console
+
+
+def create_progress(transient: bool = False) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=transient,
+        expand=True,
+    )
+
+
+def create_table(title: str, columns):
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    for column in columns:
+        if isinstance(column, tuple):
+            header = column[0]
+            justify = column[1] if len(column) > 1 else "left"
+            style = column[2] if len(column) > 2 else None
+            table.add_column(header, justify=justify, style=style)
+        else:
+            table.add_column(str(column))
+    return table

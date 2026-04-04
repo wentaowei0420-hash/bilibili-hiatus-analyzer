@@ -30,6 +30,7 @@ class DouyinAnalyzerConfig:
     video_duration_report_md: Path
     followings_cache_json: Path
     progress_json: Path
+    progress_dir: Path
     fetch_mode: str
     recent_video_limit: int
     page_load_delay: float
@@ -54,6 +55,7 @@ class DouyinAnalyzerConfig:
     intermediate_upload_interval_users: int
     followings_cache_max_age_hours: int
     precise_cache_max_age_hours: int
+    progress_trim_video_limit: int
     enable_video_duration_analysis: bool
     unfollow_interval_seconds: float
     unfollow_batch_size: int
@@ -76,6 +78,7 @@ class DouyinFeishuConfig:
     file_merged_output: Path
     db_path: Path
     upload_state_json: Path
+    history_retention_days: int
 
 
 def _root_dir() -> Path:
@@ -84,23 +87,32 @@ def _root_dir() -> Path:
 
 def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
     root_dir = _root_dir()
+    runtime_dir = root_dir / "runtime"
+    log_dir = runtime_dir / "logs"
+    data_dir = root_dir / "data" / "douyin"
+    output_dir = data_dir / "output"
+    state_dir = data_dir / "state"
     fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "monitor")).strip().lower()
     return DouyinAnalyzerConfig(
         root_dir=root_dir,
-        log_dir=root_dir / "logs",
+        log_dir=log_dir,
         browser_user_data_path=Path(
-            os.getenv("DOUYIN_BROWSER_USER_DATA_PATH", str(root_dir / "chrome_data"))
+            os.getenv(
+                "DOUYIN_BROWSER_USER_DATA_PATH",
+                str(runtime_dir / "chrome_data"),
+            )
         ),
         home_url="https://www.douyin.com/",
         self_user_url="https://www.douyin.com/user/self",
         following_api_pattern=os.getenv("DOUYIN_FOLLOWING_API_PATTERN", "following/list"),
         post_api_pattern=os.getenv("DOUYIN_POST_API_PATTERN", "aweme/v1/web/aweme/post/"),
-        output_csv=root_dir / "douyin_hiatus_ranking.csv",
-        all_videos_csv=root_dir / "douyin_all_videos.csv",
-        video_duration_analysis_csv=root_dir / "douyin_video_duration_analysis.csv",
-        video_duration_report_md=root_dir / "douyin_video_duration_report.md",
-        followings_cache_json=root_dir / "douyin_followings_cache.json",
-        progress_json=root_dir / "douyin_progress.json",
+        output_csv=output_dir / "douyin_hiatus_ranking.csv",
+        all_videos_csv=output_dir / "douyin_all_videos.csv",
+        video_duration_analysis_csv=output_dir / "douyin_video_duration_analysis.csv",
+        video_duration_report_md=output_dir / "douyin_video_duration_report.md",
+        followings_cache_json=state_dir / "douyin_followings_cache.json",
+        progress_json=state_dir / "douyin_progress.json",
+        progress_dir=state_dir / "cache" / "progress",
         fetch_mode=fetch_mode,
         recent_video_limit=int(os.getenv("DOUYIN_RECENT_VIDEO_LIMIT", "10")),
         page_load_delay=float(os.getenv("DOUYIN_PAGE_LOAD_DELAY", "1.2")),
@@ -139,6 +151,7 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
             os.getenv("DOUYIN_FOLLOWINGS_CACHE_MAX_AGE_HOURS", "50")
         ),
         precise_cache_max_age_hours=int(os.getenv("DOUYIN_CACHE_MAX_AGE_HOURS", "432")),
+        progress_trim_video_limit=int(os.getenv("DOUYIN_PROGRESS_TRIM_VIDEO_LIMIT", "50")),
         enable_video_duration_analysis=_get_bool(
             "DOUYIN_ENABLE_VIDEO_DURATION_ANALYSIS", True
         ),
@@ -156,9 +169,15 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
 
 def load_feishu_config() -> DouyinFeishuConfig:
     root_dir = _root_dir()
+    runtime_dir = root_dir / "runtime"
+    log_dir = runtime_dir / "logs"
+    data_dir = root_dir / "data" / "douyin"
+    output_dir = data_dir / "output"
+    state_dir = data_dir / "state"
+    history_dir = root_dir / "data" / "history"
     return DouyinFeishuConfig(
         root_dir=root_dir,
-        log_dir=root_dir / "logs",
+        log_dir=log_dir,
         app_id=os.getenv("DOUYIN_FEISHU_APP_ID", os.getenv("FEISHU_APP_ID", "")),
         app_secret=os.getenv("DOUYIN_FEISHU_APP_SECRET", os.getenv("FEISHU_APP_SECRET", "")),
         spreadsheet_token=os.getenv(
@@ -168,22 +187,23 @@ def load_feishu_config() -> DouyinFeishuConfig:
         sheet_title=os.getenv("DOUYIN_FEISHU_SHEET_TITLE", "抖音数据表"),
         sheet_index=int(os.getenv("DOUYIN_FEISHU_SHEET_INDEX", "1")),
         file_hiatus=Path(
-            os.getenv("DOUYIN_FILE_HIATUS_PATH", str(root_dir / "douyin_hiatus_ranking.csv"))
+            os.getenv("DOUYIN_FILE_HIATUS_PATH", str(output_dir / "douyin_hiatus_ranking.csv"))
         ),
         file_duration=Path(
             os.getenv(
                 "DOUYIN_FILE_DURATION_PATH",
-                str(root_dir / "douyin_video_duration_analysis.csv"),
+                str(output_dir / "douyin_video_duration_analysis.csv"),
             )
         ),
         file_merged_output=Path(
-            os.getenv("DOUYIN_FILE_MERGED_OUTPUT_PATH", str(root_dir / "merged_douyin_data.csv"))
+            os.getenv("DOUYIN_FILE_MERGED_OUTPUT_PATH", str(output_dir / "merged_douyin_data.csv"))
         ),
-        db_path=Path(os.getenv("DOUYIN_DB_PATH", str(root_dir / "douyin_history.db"))),
+        db_path=Path(os.getenv("DOUYIN_DB_PATH", str(history_dir / "douyin_history.db"))),
         upload_state_json=Path(
             os.getenv(
                 "DOUYIN_FEISHU_UPLOAD_STATE_PATH",
-                str(root_dir / "douyin_feishu_upload_state.json"),
+                str(state_dir / "douyin_feishu_upload_state.json"),
             )
         ),
+        history_retention_days=int(os.getenv("DOUYIN_HISTORY_RETENTION_DAYS", "30")),
     )

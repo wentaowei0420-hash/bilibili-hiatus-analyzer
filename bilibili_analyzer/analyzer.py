@@ -11,7 +11,7 @@ from .exporters import (
     save_video_duration_report,
 )
 from .http_client import RateLimitExceededError
-from .logging_utils import smart_print as print
+from .logging_utils import create_progress, create_table, get_console, smart_print as print
 from .utils import (
     DEFAULT_GROUP_NAME,
     LONG_VIDEO_LABEL,
@@ -150,6 +150,10 @@ class BilibiliHiatusAnalyzer:
             "long_video_ratio": format_ratio(long_count, total_videos),
         }
 
+    @staticmethod
+    def _format_output_summary(paths):
+        return "、".join(path.name for path in paths if path)
+
     def populate_duration_summary_defaults(self, summary, videos):
         completed_summary = dict(summary or {})
         completed_summary.setdefault("total_videos", len(videos or []))
@@ -206,32 +210,39 @@ class BilibiliHiatusAnalyzer:
         following_map = {str(following.get("mid")): following for following in followings}
         refreshed_count = 0
         rate_limit_hit = False
+        pending_entries = [
+            (mid, entry)
+            for mid, entry in duration_progress.items()
+            if entry.get("videos", [])
+            and self.count_missing_like_videos(entry.get("videos", [])) > 0
+        ]
 
-        for mid, entry in duration_progress.items():
-            if remaining_budget <= 0:
-                break
+        if pending_entries:
+            print(f"👍 准备为 {len(pending_entries)} 位UP主补抓历史点赞数据...")
 
-            videos = entry.get("videos", [])
-            missing_like_count = self.count_missing_like_videos(videos)
-            if not videos or missing_like_count == 0:
-                continue
+        with create_progress() as progress:
+            task_id = progress.add_task("补抓历史点赞", total=len(pending_entries))
+            for mid, entry in pending_entries:
+                progress.advance(task_id)
+                if remaining_budget <= 0:
+                    break
 
-            following = following_map.get(str(mid), {})
-            uname = entry.get("uploader_name") or following.get("uname", "未知UP主")
-            print(f"♻️  正在为缓存中的 {uname} 补抓 {missing_like_count} 个视频的真实点赞数...")
-            remaining_budget, rate_limit_hit = self.enrich_video_like_counts_with_budget(
-                videos,
-                uname,
-                remaining_budget,
-            )
-            entry["summary"] = self.build_video_duration_summary(following, videos)
-            entry["cached_at"] = int(time.time())
-            duration_progress[str(mid)] = entry
-            self.cache_store.save_video_duration_progress(duration_progress)
-            refreshed_count += 1
+                videos = entry.get("videos", [])
+                following = following_map.get(str(mid), {})
+                uname = entry.get("uploader_name") or following.get("uname", "未知UP主")
+                remaining_budget, rate_limit_hit = self.enrich_video_like_counts_with_budget(
+                    videos,
+                    uname,
+                    remaining_budget,
+                )
+                entry["summary"] = self.build_video_duration_summary(following, videos)
+                entry["cached_at"] = int(time.time())
+                duration_progress[str(mid)] = entry
+                self.cache_store.save_video_duration_progress(duration_progress)
+                refreshed_count += 1
 
-            if rate_limit_hit:
-                break
+                if rate_limit_hit:
+                    break
 
         if refreshed_count:
             print(f"✅ 已补齐 {refreshed_count} 位UP主缓存中的部分真实点赞数据。")
@@ -289,35 +300,29 @@ class BilibiliHiatusAnalyzer:
 
     def handle_precise_video_result(self, following, video_info, results_by_mid, cached_video_results):
         mid = following.get("mid")
-        uname = following.get("uname", "未知UP主")
-
         if video_info:
             result_item = self.build_result_item(video_info)
             result_item["following_group_ids"] = following.get("group_id_text", "")
             result_item["following_group_names"] = following.get("group_name_text", DEFAULT_GROUP_NAME)
             result_item["follower_count"] = following.get("follower_count", 0)
             self.save_precise_result(mid, result_item, results_by_mid, cached_video_results)
-            print(
-                f"   ✅ 最后视频发布于 {result_item['upload_date']}，"
-                f"距离现在 {result_item['days_since_last_video']} 天"
-            )
             return True
 
         if video_info is False:
             result_item = self.build_no_video_result_item(following)
             self.save_precise_result(mid, result_item, results_by_mid, cached_video_results)
-            print(f"   📭 {uname} - 暂无公开视频")
             return True
 
-        print(f"   ⚠️  {uname} - 本次请求未拿到有效结果，稍后重试")
         return False
 
     def run_precise_fetch_round(self, followings, label, results_by_mid, cached_video_results):
         remaining_followings = []
+        success_count = 0
+        no_video_count = 0
+        error_count = 0
 
         def fetch_single(following, index):
             uname = following.get("uname", "未知UP主")
-            print(f"[{label} {index}/{len(followings)}] 正在获取 {uname} 的最后一个视频...")
             try:
                 time.sleep(random.uniform(0, 1.5))
                 return following, self.api.get_latest_video(following.get("mid"), uname), None
@@ -327,26 +332,41 @@ class BilibiliHiatusAnalyzer:
             except Exception as exc:
                 return following, None, exc
 
-        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            futures = {
-                executor.submit(fetch_single, following, index + 1): following
-                for index, following in enumerate(followings)
-            }
+        with create_progress() as progress:
+            task_id = progress.add_task(f"精确抓取 {label}", total=len(followings))
+            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+                futures = {
+                    executor.submit(fetch_single, following, index + 1): following
+                    for index, following in enumerate(followings)
+                }
 
-            for future in as_completed(futures):
-                following, video_info, error = future.result()
-                if error == "rate_limit":
-                    remaining_followings.append(following)
-                    continue
-                if error is not None:
-                    print(f"   ❌ {following.get('uname')} - 抓取异常: {error}")
-                    remaining_followings.append(following)
-                    continue
-                if not self.handle_precise_video_result(
-                    following, video_info, results_by_mid, cached_video_results
-                ):
-                    remaining_followings.append(following)
+                for future in as_completed(futures):
+                    following, video_info, error = future.result()
+                    progress.advance(task_id)
+                    if error == "rate_limit":
+                        error_count += 1
+                        remaining_followings.append(following)
+                        continue
+                    if error is not None:
+                        print(f"   ❌ {following.get('uname')} - 抓取异常: {error}")
+                        error_count += 1
+                        remaining_followings.append(following)
+                        continue
+                    if video_info:
+                        success_count += 1
+                    elif video_info is False:
+                        no_video_count += 1
+                    else:
+                        error_count += 1
+                    if not self.handle_precise_video_result(
+                        following, video_info, results_by_mid, cached_video_results
+                    ):
+                        remaining_followings.append(following)
 
+        print(
+            f"📌 批次 {label} 完成：成功 {success_count}，"
+            f"无公开视频 {no_video_count}，待重试 {len(remaining_followings)}"
+        )
         return remaining_followings
 
     def analyze_video_durations(self, followings):
@@ -386,7 +406,6 @@ class BilibiliHiatusAnalyzer:
 
         def process_duration(following, index):
             uname = following.get("uname", "未知UP主")
-            print(f"[{index}/{len(pending_followings)}] 正在获取 {uname} 的全部视频...")
             try:
                 time.sleep(random.uniform(0, 1.5))
                 return following, self.api.get_all_videos_for_up(following.get("mid"), uname), None
@@ -399,58 +418,57 @@ class BilibiliHiatusAnalyzer:
             except Exception as exc:
                 return following, None, exc
 
-        for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
-            batch = pending_followings[start:start + self.config.video_analysis_batch_size]
-            with ThreadPoolExecutor(max_workers=self.config.video_analysis_workers) as executor:
-                futures = {
-                    executor.submit(process_duration, following, start + index + 1): following
-                    for index, following in enumerate(batch)
-                }
-
-                for future in as_completed(futures):
-                    following, videos, error = future.result()
-                    uname = following.get("uname", "未知UP主")
-                    if error or videos is None:
-                        failed_followings.append(following)
-                        continue
-
-                    if self.config.enable_real_video_like_fetch and like_fetch_budget > 0 and not like_rate_limited:
-                        like_fetch_budget, like_rate_limited = self.enrich_video_like_counts_with_budget(
-                            videos,
-                            uname,
-                            like_fetch_budget,
-                        )
-                        if like_rate_limited:
-                            print("⚠️  本轮真实点赞补抓已暂停，剩余视频先保留到后续运行再补抓。")
-                    elif (
-                        self.config.enable_real_video_like_fetch
-                        and like_fetch_budget <= 0
-                        and not like_budget_exhausted_notified
-                    ):
-                        print("⏭️  本轮真实点赞补抓预算已用完，剩余视频跳过点赞补抓。")
-                        like_budget_exhausted_notified = True
-
-                    summary = self.build_video_duration_summary(following, videos)
-                    duration_progress[str(following.get("mid"))] = {
-                        "uploader_name": uname,
-                        "uploader_id": following.get("mid"),
-                        "cached_at": int(time.time()),
-                        "videos": videos,
-                        "summary": summary,
+        with create_progress() as progress:
+            task_id = progress.add_task("全量视频时长分析", total=len(pending_followings))
+            for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
+                batch = pending_followings[start:start + self.config.video_analysis_batch_size]
+                with ThreadPoolExecutor(max_workers=self.config.video_analysis_workers) as executor:
+                    futures = {
+                        executor.submit(process_duration, following, start + index + 1): following
+                        for index, following in enumerate(batch)
                     }
-                    self.cache_store.save_video_duration_progress(duration_progress)
-                    print(
-                        f"   ✅ 共获取 {summary['total_videos']} 个视频，"
-                        f"长视频占比 {summary['long_video_ratio']}"
-                    )
 
-            if start + self.config.video_analysis_batch_size < len(pending_followings):
-                cooldown = self.config.video_analysis_batch_cooldown + random.uniform(0, 5)
-                print(
-                    f"⏸️  视频分析已完成 {start + len(batch)} 位UP主，"
-                    f"批次冷却 {cooldown:.0f} 秒后继续..."
-                )
-                time.sleep(cooldown)
+                    for future in as_completed(futures):
+                        following, videos, error = future.result()
+                        progress.advance(task_id)
+                        uname = following.get("uname", "未知UP主")
+                        if error or videos is None:
+                            failed_followings.append(following)
+                            continue
+
+                        if self.config.enable_real_video_like_fetch and like_fetch_budget > 0 and not like_rate_limited:
+                            like_fetch_budget, like_rate_limited = self.enrich_video_like_counts_with_budget(
+                                videos,
+                                uname,
+                                like_fetch_budget,
+                            )
+                            if like_rate_limited:
+                                print("⚠️  本轮真实点赞补抓已暂停，剩余视频先保留到后续运行再补抓。")
+                        elif (
+                            self.config.enable_real_video_like_fetch
+                            and like_fetch_budget <= 0
+                            and not like_budget_exhausted_notified
+                        ):
+                            print("⏭️  本轮真实点赞补抓预算已用完，剩余视频跳过点赞补抓。")
+                            like_budget_exhausted_notified = True
+
+                        summary = self.build_video_duration_summary(following, videos)
+                        duration_progress[str(following.get("mid"))] = {
+                            "uploader_name": uname,
+                            "uploader_id": following.get("mid"),
+                            "cached_at": int(time.time()),
+                            "videos": videos,
+                            "summary": summary,
+                        }
+                        self.cache_store.save_video_duration_progress(duration_progress)
+
+                if start + self.config.video_analysis_batch_size < len(pending_followings):
+                    cooldown = self.config.video_analysis_batch_cooldown + random.uniform(0, 5)
+                    print(
+                        f"⏸️  视频分析已完成 {start + len(batch)} 位UP主，"
+                        f"批次冷却 {cooldown:.0f} 秒后继续..."
+                    )
+                    time.sleep(cooldown)
 
         all_video_rows = []
         summary_rows = []
@@ -474,44 +492,50 @@ class BilibiliHiatusAnalyzer:
         save_video_duration_analysis_to_csv(self.config, summary_rows)
         save_video_duration_report(self.config, summary_rows, len(all_video_rows))
 
-        print(f"✅ 视频明细已保存到文件: {self.config.all_videos_csv.name}")
-        print(f"✅ 视频时长分析已保存到文件: {self.config.video_duration_analysis_csv.name}")
-        print(f"✅ 视频时长报告已保存到文件: {self.config.video_duration_report_md.name}")
+        print(
+            f"🗂️  视频分析阶段已输出 3 份文件："
+            f"{self._format_output_summary([self.config.all_videos_csv, self.config.video_duration_analysis_csv, self.config.video_duration_report_md])}"
+        )
         if failed_followings:
             print(f"⚠️  仍有 {len(failed_followings)} 位UP主未完成全量视频分析，下次运行会继续补抓。")
         return duration_progress
 
     def display_top_results(self, results):
-        print("\n" + "=" * 60)
-        print("🏆 B站鸽王排行榜 - Top 10")
-        print("=" * 60)
-        print()
+        table = create_table(
+            "🏆 B站鸽王排行榜 Top 10",
+            [
+                ("排名", "right", "bold"),
+                ("UP主", "left"),
+                ("已鸽天数", "right"),
+                ("粉丝数", "right"),
+                ("视频数", "right"),
+                ("平均点赞", "right"),
+                ("平均几天一更", "right"),
+                ("最新发布日期", "left"),
+            ],
+        )
 
         for index, result in enumerate(results[:10], 1):
-            print(f"第 {index} 名: {result['uploader_name']}")
-            print(f"   ⏰ 已鸽 {result['days_since_update']} 天")
-            print(
-                f"   ⌛ 距离最后一个视频发布: "
-                f"{result.get('days_since_last_video', result['days_since_update'])} 天"
-            )
-            print(f"   🏠 主页: {result.get('uploader_homepage', '暂无')}")
-            print(f"   🏷️  分组: {result.get('following_group_names', DEFAULT_GROUP_NAME)}")
-            print(f"   👥 粉丝数: {result.get('follower_count', 0) or '暂无数据'}")
-            print(f"   🎞️  发布视频数量: {result.get('published_video_count', 0)}")
-            print(f"   👍 平均点赞数: {result.get('average_like_count', 0)}")
             average_update_interval_days = result.get("average_update_interval_days")
             average_update_text = (
-                f"{average_update_interval_days} 天"
-                if average_update_interval_days is not None
-                else "暂无数据"
+                f"{average_update_interval_days:.2f}"
+                if isinstance(average_update_interval_days, (int, float))
+                else "暂无"
             )
-            print(f"   📐 平均几天一更: {average_update_text}")
-            print(f"   📺 最新视频: {result['latest_video_title']}")
-            print(f"   📅 发布日期: {result['upload_date']}")
-            print(f"   👁️  播放量: {result['view_count']:,}")
-            print(f"   🧭 数据来源: {result.get('data_source', 'unknown')}")
-            print(f"   🔗 链接: {result['video_url'] or '暂无'}")
-            print()
+            table.add_row(
+                str(index),
+                str(result["uploader_name"]),
+                str(result["days_since_update"]),
+                f"{int(result.get('follower_count') or 0):,}",
+                str(result.get("published_video_count", 0)),
+                str(result.get("average_like_count", 0)),
+                average_update_text,
+                str(result.get("upload_date", UNKNOWN_DATE)),
+            )
+
+        get_console().print()
+        get_console().print(table)
+        get_console().print()
 
     def analyze_hiatus(self):
         self.api.check_cookie()
@@ -623,10 +647,15 @@ class BilibiliHiatusAnalyzer:
         results.sort(key=lambda item: item["days_since_update"], reverse=True)
         self.display_top_results(results)
         save_to_csv(self.config, results)
+        print(
+            f"🗂️  B站主榜阶段已输出：{self.config.output_csv.name}，"
+            f"共 {len(results)} 位UP主"
+        )
 
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
             self.enrich_results_with_profile_and_counts(results, duration_progress, followings)
             save_to_csv(self.config, results)
+            print(f"🔄 已用视频分析结果回填主榜：{self.config.output_csv.name}")
 
         return results

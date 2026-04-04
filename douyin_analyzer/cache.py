@@ -1,5 +1,6 @@
 import json
 import time
+import hashlib
 from datetime import datetime
 
 from bilibili_analyzer.logging_utils import smart_print as print
@@ -33,6 +34,7 @@ class CacheStore:
             "followings": followings,
         }
         try:
+            self.config.followings_cache_json.parent.mkdir(parents=True, exist_ok=True)
             with self.config.followings_cache_json.open("w", encoding="utf-8") as cache_file:
                 json.dump(payload, cache_file, ensure_ascii=False, indent=2)
         except Exception as exc:
@@ -67,21 +69,25 @@ class CacheStore:
             print(f"⚠️  读取抖音进度缓存失败，将重新抓取: {exc}")
             return {}
 
+        if data.get("storage") == "split":
+            return self._load_split_progress(self.config.progress_dir, data.get("keys", []))
+
         ups = data.get("ups", {})
         if not isinstance(ups, dict):
             return {}
         return ups
 
     def save_progress(self, progress):
-        payload = {
-            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ups": progress,
+        trimmed_progress = {
+            key: self._trim_progress_entry(entry)
+            for key, entry in progress.items()
         }
-        try:
-            with self.config.progress_json.open("w", encoding="utf-8") as progress_file:
-                json.dump(payload, progress_file, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            print(f"⚠️  保存抖音进度缓存失败: {exc}")
+        self._write_split_progress(
+            self.config.progress_json,
+            self.config.progress_dir,
+            trimmed_progress,
+            "保存抖音进度缓存失败",
+        )
 
     def is_cache_expired(self, cached_at):
         cached_timestamp = normalize_timestamp(cached_at)
@@ -131,3 +137,65 @@ class CacheStore:
             result["days_since_update"] = days_since
             result["days_since_last_video"] = days_since
         return result
+
+    @staticmethod
+    def _entry_filename(key):
+        digest = hashlib.sha1(str(key).encode("utf-8")).hexdigest()
+        return f"{digest}.json"
+
+    def _load_split_progress(self, directory, keys):
+        progress = {}
+        if not directory.exists():
+            return progress
+
+        for key in keys:
+            entry_path = directory / self._entry_filename(key)
+            if not entry_path.exists():
+                continue
+            try:
+                with entry_path.open("r", encoding="utf-8") as entry_file:
+                    progress[key] = json.load(entry_file)
+            except Exception as exc:
+                print(f"⚠️  读取抖音缓存分片失败({key})，将跳过该分片: {exc}")
+        return progress
+
+    def _trim_progress_entry(self, entry):
+        if not isinstance(entry, dict):
+            return entry
+
+        trimmed_entry = dict(entry)
+        if self.config.fetch_mode == "full":
+            return trimmed_entry
+
+        videos = trimmed_entry.get("videos")
+        if isinstance(videos, list) and len(videos) > self.config.progress_trim_video_limit:
+            trimmed_entry["videos"] = videos[: self.config.progress_trim_video_limit]
+        return trimmed_entry
+
+    def _write_split_progress(self, manifest_path, directory, progress, error_message):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            keys = sorted(progress.keys(), key=str)
+            expected_filenames = set()
+
+            for key in keys:
+                entry_filename = self._entry_filename(key)
+                expected_filenames.add(entry_filename)
+                entry_path = directory / entry_filename
+                with entry_path.open("w", encoding="utf-8") as entry_file:
+                    json.dump(progress[key], entry_file, ensure_ascii=False, separators=(",", ":"))
+
+            for existing_file in directory.glob("*.json"):
+                if existing_file.name not in expected_filenames:
+                    existing_file.unlink(missing_ok=True)
+
+            manifest_payload = {
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "storage": "split",
+                "keys": keys,
+            }
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with manifest_path.open("w", encoding="utf-8") as progress_file:
+                json.dump(manifest_payload, progress_file, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"⚠️  {error_message}: {exc}")

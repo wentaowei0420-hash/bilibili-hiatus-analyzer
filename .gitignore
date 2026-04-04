@@ -159,13 +159,13 @@ $RECYCLE.BIN/
 *.backup
 
 # Runtime outputs
-bilibili_hiatus_progress.json
-bilibili_video_duration_progress.json
-bilibili_video_duration_report.md
-bilibili_all_videos.csv
-bilibili_video_duration_analysis.csv
-douyin_history.db
+runtime/
+data/bilibili/output/
+data/bilibili/state/
+data/douyin/output/
+data/douyin/state/
+data/douyin/ops/douyin_unfollow_list.txt
+data/history/
 # 忽略环境变量配置和本地敏感数据
 .env
 # 忽略 DrissionPage 浏览器缓存数据
-chrome_data/
