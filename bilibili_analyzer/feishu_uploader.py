@@ -436,7 +436,8 @@ class FeishuUploader:
 
         duration_cols = df_duration.columns.difference(df_hiatus.columns).tolist() + merge_keys
         df_duration_clean = df_duration[duration_cols]
-        df_merged = pd.merge(df_hiatus, df_duration_clean, on=merge_keys, how="outer")
+        # 主数据表必须以“当前主榜快照”为准，不能因为分析表残留历史 UID 而把已取关博主重新并回主表。
+        df_merged = pd.merge(df_hiatus, df_duration_clean, on=merge_keys, how="left")
         df_merged = self._deduplicate_by_keys(df_merged, merge_keys)
         df_merged["抓取时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

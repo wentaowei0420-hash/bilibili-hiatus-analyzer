@@ -57,6 +57,19 @@ class CacheStore:
         return followings if isinstance(followings, list) else []
 
     def save_followings_cache(self, followings):
+        previous_followings = self.load_followings_cache()
+        previous_uids = {
+            str((item or {}).get("sec_uid") or "").strip()
+            for item in previous_followings
+            if isinstance(item, dict) and str((item or {}).get("sec_uid") or "").strip()
+        }
+        current_uids = {
+            str((item or {}).get("sec_uid") or "").strip()
+            for item in (followings or [])
+            if isinstance(item, dict) and str((item or {}).get("sec_uid") or "").strip()
+        }
+        removed_uids = sorted(previous_uids - current_uids)
+
         payload = self._build_followings_split_payload(followings)
         self._write_split_followings(
             self.config.followings_cache_json,
@@ -74,6 +87,22 @@ class CacheStore:
             uploader_id_getter=lambda key, payload: ((payload or {}).get("sec_uid") or key),
             cached_at_getter=lambda payload: (payload or {}).get("latest_publish_timestamp", ""),
         )
+
+        if removed_uids:
+            progress = self.load_progress()
+            if isinstance(progress, dict) and progress:
+                updated_progress = {
+                    key: value
+                    for key, value in progress.items()
+                    if str(key).strip() not in removed_uids
+                }
+                if len(updated_progress) != len(progress):
+                    self.save_progress(updated_progress)
+
+            self._remove_uploader_rows_from_store(removed_uids)
+            print(
+                f"🧹 检测到 {len(removed_uids)} 位已取关博主，已从本地缓存与导出状态中清理。"
+            )
 
     def remove_unfollowed_user(self, homepage="", uploader_id=""):
         normalized_homepage = self._normalize_homepage_url(homepage)

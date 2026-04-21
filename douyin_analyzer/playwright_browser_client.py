@@ -171,6 +171,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
     def get_followings(self):
         print("📜 正在抓取抖音关注列表...")
         self._open_page(self.config.self_user_url, self.config.page_load_delay)
+        expected_following_count = self._extract_following_count_from_dom()
         if self._page_has_rate_limit():
             raise DouyinRateLimitError("抖音关注列表页触发速率限制")
 
@@ -179,6 +180,14 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             if follow_tab.is_visible(timeout=3000):
                 follow_tab.click()
                 time.sleep(1)
+        except Exception:
+            pass
+
+        try:
+            list_tab = self.start().locator("text=鍒楄〃").first
+            if list_tab.is_visible(timeout=2000):
+                list_tab.click()
+                time.sleep(0.8)
         except Exception:
             pass
 
@@ -192,7 +201,8 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
             with create_progress(transient=False) as progress:
                 task_id = progress.add_task("抓取抖音关注列表", total=50)
-                dynamic_total = 50
+                dynamic_total = max(expected_following_count, 50) if expected_following_count else 50
+                progress.update(task_id, total=dynamic_total)
                 while has_more and empty_rounds < self.config.empty_round_limit:
                     if self._page_has_rate_limit():
                         raise DouyinRateLimitError("抖音关注列表页触发速率限制")
@@ -243,7 +253,10 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                             has_more = False
 
                     stagnant_rounds = stagnant_rounds + 1 if new_users == 0 else 0
-                    dynamic_total = max(dynamic_total, len(followings) + 50)
+                    if expected_following_count:
+                        dynamic_total = max(dynamic_total, expected_following_count)
+                    else:
+                        dynamic_total = max(dynamic_total, len(followings) + 50)
                     progress.update(
                         task_id,
                         total=dynamic_total,
@@ -254,6 +267,14 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                         break
 
             self.rate_limiter.record_success()
+            if expected_following_count and len(followings) < expected_following_count:
+                raise RuntimeError(
+                    f"抖音关注列表抓取失败：主页显示关注 {expected_following_count} 位，实际仅抓取到 {len(followings)} 位。"
+                )
+            if expected_following_count and len(followings) > expected_following_count:
+                print(
+                    f"⚠️  抖音主页显示关注 {expected_following_count} 位，但本轮抓取到 {len(followings)} 位，请检查主页关注数解析是否准确。"
+                )
             print(f"✅ 成功获取 {len(followings)} 位抖音关注博主")
             return followings
         finally:
@@ -453,12 +474,39 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
     def _scroll_active_containers(self):
         self.start().evaluate(
             """
-            let scrollables = Array.from(document.querySelectorAll('*')).filter(
-                el => el.scrollHeight > el.clientHeight && el.clientHeight > 150 &&
-                      getComputedStyle(el).overflowY !== 'hidden'
-            );
-            scrollables.forEach(el => el.scrollTop += 1600);
-            window.scrollBy(0, 1600);
+            const scoreScrollable = (el) => {
+                const style = getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return -999;
+                if (el.scrollHeight <= el.clientHeight || el.clientHeight <= 150) return -999;
+                if (style.overflowY === 'hidden') return -999;
+                const rect = el.getBoundingClientRect();
+                const text = (el.innerText || '').slice(0, 600);
+                let score = 0;
+                if (text.includes('搜索用户名称或抖音号')) score += 14;
+                if (text.includes('综合排序')) score += 8;
+                if (text.includes('列表')) score += 6;
+                if (text.includes('正在直播')) score -= 6;
+                if (rect.left < window.innerWidth * 0.45) score += 4;
+                if (rect.width > 180 && rect.width < window.innerWidth * 0.5) score += 3;
+                if (rect.height > 280) score += 2;
+                return score;
+            };
+
+            const ranked = Array.from(document.querySelectorAll('*'))
+                .map(el => ({ el, score: scoreScrollable(el) }))
+                .filter(item => item.score > -999)
+                .sort((a, b) => b.score - a.score);
+
+            if (ranked.length && ranked[0].score > 0) {
+                ranked[0].el.scrollTop += 1600;
+            } else {
+                let scrollables = Array.from(document.querySelectorAll('*')).filter(
+                    el => el.scrollHeight > el.clientHeight && el.clientHeight > 150 &&
+                          getComputedStyle(el).overflowY !== 'hidden'
+                );
+                scrollables.forEach(el => el.scrollTop += 1600);
+            }
+            window.scrollBy(0, 320);
             """
         )
 

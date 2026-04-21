@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+import requests
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -42,6 +43,7 @@ GUI_CONFIG_PATH = ROOT_DIR / "data" / "state" / "gui_config.json"
 class RunConfig:
     platform: str
     action: str
+    bilibili_mode: str
     douyin_fetch_mode: str
     douyin_backend: str
     uid_limit_enabled: bool
@@ -60,6 +62,7 @@ class SignalWriter:
 
     def write(self, text):
         if not text:
+            QMessageBox.information(self, "任务运行中", "当前任务还在运行，请等待完成。")
             return
         self._buffer += text
         while "\n" in self._buffer:
@@ -102,12 +105,18 @@ class RunnerThread(QThread):
 
     def _run_task(self):
         os.environ["DOUYIN_BROWSER_BACKEND"] = self.config.douyin_backend
+        bilibili_analysis_mode, bilibili_enable_video_analysis = self._resolve_bilibili_runtime_mode()
+        os.environ["ANALYSIS_MODE"] = bilibili_analysis_mode
+        os.environ["ENABLE_VIDEO_DURATION_ANALYSIS"] = (
+            "true" if bilibili_enable_video_analysis else "false"
+        )
         uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
 
         self.log_line.emit(f"平台: {self.config.platform}")
         self.log_line.emit(f"动作: {self.config.action}")
         self.log_line.emit(f"抖音模式: {self.config.douyin_fetch_mode}")
         self.log_line.emit(f"抖音后端: {self.config.douyin_backend}")
+        self.log_line.emit(f"B站模式: {self.config.bilibili_mode}")
         self.log_line.emit("-" * 60)
 
         if self.config.platform == "bilibili":
@@ -136,13 +145,27 @@ class RunnerThread(QThread):
         else:
             raise ValueError(f"未知平台模式: {self.config.platform}")
 
+    def _resolve_bilibili_runtime_mode(self):
+        mode = (self.config.bilibili_mode or "precise_full").strip().lower()
+        mapping = {
+            "precise_full": ("precise", True),
+            "precise_main_only": ("precise", False),
+            "fallback_full": ("fallback", True),
+            "fallback_main_only": ("fallback", False),
+        }
+        return mapping.get(mode, ("precise", True))
+
     def _run_bilibili_main(self):
         from bilibili_analyzer.app import run_analysis, run_feishu_upload
 
         if self.config.action == "fetch":
-            run_analysis(trigger_upload=False)
+            result = run_analysis(trigger_upload=False)
+            if result is None:
+                raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
         elif self.config.action == "fetch_upload":
-            run_analysis(trigger_upload=True)
+            result = run_analysis(trigger_upload=True)
+            if result is None:
+                raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
         elif self.config.action == "upload":
             run_feishu_upload()
         else:
@@ -152,13 +175,45 @@ class RunnerThread(QThread):
         from douyin_analyzer.app import run_analysis, run_feishu_upload
 
         if self.config.action == "fetch":
-            run_analysis(trigger_upload=False, fetch_mode_override=self.config.douyin_fetch_mode)
+            result = run_analysis(trigger_upload=False, fetch_mode_override=self.config.douyin_fetch_mode)
+            if result is None:
+                raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
         elif self.config.action == "fetch_upload":
-            run_analysis(trigger_upload=True, fetch_mode_override=self.config.douyin_fetch_mode)
+            result = run_analysis(trigger_upload=True, fetch_mode_override=self.config.douyin_fetch_mode)
+            if result is None:
+                raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
         elif self.config.action == "upload":
             run_feishu_upload()
         else:
             raise ValueError(f"未知动作: {self.config.action}")
+
+
+class BilibiliCookieCheckThread(QThread):
+    checked = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from bilibili_analyzer.config import load_analyzer_config
+
+            config = load_analyzer_config()
+            if not (config.cookie or "").strip():
+                self.checked.emit(False, "未配置 BILIBILI_COOKIE")
+                return
+
+            response = requests.get(config.nav_api, headers=config.headers, timeout=20)
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+            if payload.get("code") == 0:
+                user = payload.get("data", {}) or {}
+                uname = user.get("uname") or "未知用户"
+                mid = user.get("mid") or ""
+                self.checked.emit(True, f"已登录：{uname} (mid={mid})")
+                return
+
+            message = payload.get("message") or payload.get("msg") or "账号未登录"
+            self.checked.emit(False, f"未登录：{message}")
+        except Exception as exc:
+            self.checked.emit(False, f"检测失败：{exc}")
 
 
 class AdvancedSettingsDialog(QDialog):
@@ -208,6 +263,12 @@ class AdvancedSettingsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    BILIBILI_MODE_OPTIONS = [
+        ("精确模式（主榜 + 视频分析）", "precise_full"),
+        ("精确模式（仅主榜）", "precise_main_only"),
+        ("回退模式（主榜 + 视频分析）", "fallback_full"),
+        ("回退模式（仅主榜）", "fallback_main_only"),
+    ]
     PLATFORM_OPTIONS = [
         ("B站 + 抖音", "both"),
         ("仅 B站", "bilibili"),
@@ -226,6 +287,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.cookie_checker = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
@@ -255,6 +317,12 @@ class MainWindow(QMainWindow):
         for label, value in self.ACTION_OPTIONS:
             self.action_combo.addItem(label, value)
         run_form.addRow("动作", self.action_combo)
+
+        self.bilibili_mode_combo = QComboBox()
+        for label, mode in self.BILIBILI_MODE_OPTIONS:
+            self.bilibili_mode_combo.addItem(label, mode)
+        self.bilibili_mode_combo.setCurrentIndex(0)
+        run_form.addRow("B站抓取模式", self.bilibili_mode_combo)
 
         self.douyin_mode_combo = QComboBox()
         for label, mode in (
@@ -302,6 +370,10 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("终止运行")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._request_stop)
+        self.high_like_export_button = QPushButton("导出高赞视频")
+        self.high_like_export_button.clicked.connect(self._start_high_like_export)
+        self.cookie_check_button = QPushButton("检测 B站 Cookie")
+        self.cookie_check_button.clicked.connect(self._check_bilibili_cookie)
         self.advanced_button = QPushButton("高级设置")
         self.advanced_button.clicked.connect(self._open_advanced_settings)
         self.lock_button = QPushButton("锁定配置")
@@ -310,10 +382,16 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(lambda: self.log_text.clear())
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
+        button_row.addWidget(self.high_like_export_button)
+        button_row.addWidget(self.cookie_check_button)
         button_row.addWidget(self.advanced_button)
         button_row.addWidget(self.lock_button)
         button_row.addWidget(self.clear_button)
         layout.addLayout(button_row)
+
+        self.cookie_status_label = QLabel("B站 Cookie：未检测")
+        self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #666;")
+        layout.addWidget(self.cookie_status_label)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -328,16 +406,19 @@ class MainWindow(QMainWindow):
     def _sync_visible_options(self):
         platform = self.platform_combo.currentData()
         is_normal = platform in {"both", "bilibili", "douyin"}
+        is_bilibili = platform in {"both", "bilibili"}
         is_douyin = platform in {"both", "douyin", "douyin_unfollow", "douyin_uid"}
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
+        self.bilibili_mode_combo.setEnabled(editable and is_bilibili)
         self.douyin_mode_combo.setEnabled(editable and is_douyin and platform != "douyin_unfollow")
         self.backend_combo.setEnabled(editable and is_douyin)
         self.platform_combo.setEnabled(editable)
         self.uid_limit_check.setEnabled(editable)
         self.uid_limit_spin.setEnabled(editable)
         self.high_like_spin.setEnabled(editable)
+        self.high_like_export_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
         self.lock_button.setText("解除锁定" if self.config_locked else "锁定配置")
@@ -346,6 +427,7 @@ class MainWindow(QMainWindow):
         return RunConfig(
             platform=self.platform_combo.currentData(),
             action=self.action_combo.currentData(),
+            bilibili_mode=self.bilibili_mode_combo.currentData(),
             douyin_fetch_mode=self.douyin_mode_combo.currentData(),
             douyin_backend=self.backend_combo.currentData(),
             uid_limit_enabled=self.uid_limit_check.isChecked(),
@@ -367,6 +449,7 @@ class MainWindow(QMainWindow):
             "locked": self.config_locked,
             "platform": self.platform_combo.currentData(),
             "action": self.action_combo.currentData(),
+            "bilibili_mode": self.bilibili_mode_combo.currentData(),
             "douyin_fetch_mode": self.douyin_mode_combo.currentData(),
             "douyin_backend": self.backend_combo.currentData(),
             "uid_limit_enabled": self.uid_limit_check.isChecked(),
@@ -394,6 +477,7 @@ class MainWindow(QMainWindow):
         for combo, key in (
             (self.platform_combo, "platform"),
             (self.action_combo, "action"),
+            (self.bilibili_mode_combo, "bilibili_mode"),
             (self.douyin_mode_combo, "douyin_fetch_mode"),
             (self.backend_combo, "douyin_backend"),
         ):
@@ -453,6 +537,30 @@ class MainWindow(QMainWindow):
         self.log_text.clear()
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
+        self.high_like_export_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
+        self.worker = RunnerThread(config)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
+
+    def _start_high_like_export(self):
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "任务运行中", "当前任务还在运行，请等待完成。")
+            return
+
+        config = self._collect_config()
+        config.platform = "douyin_high_like"
+        config.action = "fetch"
+        if self.config_locked:
+            self._save_gui_config()
+
+        self.log_text.clear()
+        self.start_button.setEnabled(False)
+        self.high_like_export_button.setEnabled(False)
+        self.high_like_export_button.setText("导出中...")
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -468,6 +576,31 @@ class MainWindow(QMainWindow):
         self.stop_button.setText("正在保存...")
         self.stop_button.setStyleSheet("background-color: #c62828; color: white; font-weight: 700;")
         self._append_log("已请求终止运行，正在等待安全检查点并保存当前数据...")
+
+    def _check_bilibili_cookie(self):
+        if self.cookie_checker and self.cookie_checker.isRunning():
+            return
+        self.cookie_check_button.setEnabled(False)
+        self.cookie_check_button.setText("检测中...")
+        self.cookie_status_label.setText("B站 Cookie：检测中...")
+        self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #1565c0;")
+        self.cookie_checker = BilibiliCookieCheckThread()
+        self.cookie_checker.checked.connect(self._on_bilibili_cookie_checked)
+        self.cookie_checker.start()
+
+    def _on_bilibili_cookie_checked(self, ok, message):
+        self.cookie_check_button.setEnabled(True)
+        self.cookie_check_button.setText("检测 B站 Cookie")
+        if ok:
+            self.cookie_status_label.setText(f"B站 Cookie：{message}")
+            self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #2e7d32; font-weight: 700;")
+            self._append_log(f"B站 Cookie 状态检测：{message}")
+            QMessageBox.information(self, "B站 Cookie 状态", message)
+        else:
+            self.cookie_status_label.setText(f"B站 Cookie：{message}")
+            self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #c62828; font-weight: 700;")
+            self._append_log(f"B站 Cookie 状态检测：{message}")
+            QMessageBox.warning(self, "B站 Cookie 状态", message)
 
     def _validate_config(self, config):
         required_paths = []
@@ -492,6 +625,8 @@ class MainWindow(QMainWindow):
     def _on_done(self, ok, message):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
+        self.high_like_export_button.setEnabled(not self.config_locked)
+        self.high_like_export_button.setText("导出高赞视频")
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):
             self.stop_button.setText("保存完成，可以关闭")

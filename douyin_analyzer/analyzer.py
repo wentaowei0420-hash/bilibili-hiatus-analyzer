@@ -790,11 +790,9 @@ class DouyinHiatusAnalyzer:
         self.browser_client.ensure_login()
         fetch_mode = self.get_fetch_mode()
         cached_followings = self.cache_store.load_followings_cache()
-        use_followings_cache = (
-            fetch_mode != "counts"
-            and bool(cached_followings)
-            and not self.cache_store.is_followings_cache_expired()
-        )
+        # 关注列表决定“当前仍在关注的博主集合”，因此普通运行也必须优先刷新；
+        # 否则用户手动取关后，未过期的旧缓存会让已取关博主持续残留在主表中。
+        use_followings_cache = False
 
         if use_followings_cache:
             followings = cached_followings
