@@ -1,0 +1,13 @@
+{
+  "locked": true,
+  "platform": "douyin",
+  "action": "fetch_upload",
+  "douyin_fetch_mode": "full",
+  "douyin_backend": "drission",
+  "uid_limit_enabled": true,
+  "uid_limit": 10,
+  "high_like_threshold": 10000,
+  "unfollow_list_path": "D:\\pycharm_pro\\bilibili-hiatus-analyzer\\data\\douyin\\ops\\douyin_unfollow_list.txt",
+  "bilibili_uid_list_path": "D:\\pycharm_pro\\bilibili-hiatus-analyzer\\data\\bilibili\\ops\\bilibili_uid_fetch_list.txt",
+  "douyin_uid_list_path": "D:\\pycharm_pro\\bilibili-hiatus-analyzer\\data\\douyin\\ops\\douyin_uid_fetch_list.txt"
+}

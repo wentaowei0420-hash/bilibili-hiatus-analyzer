@@ -823,7 +823,7 @@ class DouyinHiatusAnalyzer:
 
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
-            print("📇 当前为基础统计模式：只抓取每位博主的粉丝数和发布视频数。")
+            print("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
         elif fetch_mode == "monitor":
             print(f"🪶 当前为轻量监控模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品。")
         elif fetch_mode == "delta":
@@ -852,6 +852,10 @@ class DouyinHiatusAnalyzer:
                 task_id = progress_bar.add_task("统计抖音博主基础数据", total=len(followings))
                 for index, user in enumerate(followings, 1):
                     entry = progress.get(user.get("sec_uid")) if isinstance(progress, dict) else None
+                    if isinstance(entry, dict):
+                        cached_user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
+                        if user.get("total_favorited") in (None, "") and cached_user.get("total_favorited") not in (None, ""):
+                            user["total_favorited"] = cached_user.get("total_favorited")
                     summary = self.build_summary_from_cached_entry(user, entry)
                     result = self.build_result_from_cached_entry(user, entry)
                     results.append(result)

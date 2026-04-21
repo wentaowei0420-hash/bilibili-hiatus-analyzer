@@ -23,7 +23,19 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         self.context = None
 
     def _minimize_window_if_possible(self):
-        return
+        if self.context is None or self.page is None:
+            return
+        try:
+            session = self.context.new_cdp_session(self.page)
+            window_info = session.send("Browser.getWindowForTarget")
+            window_id = window_info.get("windowId")
+            if window_id is not None:
+                session.send(
+                    "Browser.setWindowBounds",
+                    {"windowId": window_id, "bounds": {"windowState": "minimized"}},
+                )
+        except Exception:
+            pass
 
     def start(self):
         if self.page is not None:
@@ -39,6 +51,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         launch_kwargs = {
             "user_data_dir": str(self.config.browser_user_data_path),
             "headless": False,
+            "args": ["--mute-audio", "--start-minimized"],
         }
         if getattr(self.config, "browser_binary_path", None):
             launch_kwargs["executable_path"] = str(self.config.browser_binary_path)
@@ -50,6 +63,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         self.context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        self._minimize_window_if_possible()
         return self.page
 
     def close(self):

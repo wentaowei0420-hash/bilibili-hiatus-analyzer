@@ -13,12 +13,6 @@ def normalize_timestamp(value):
     if value in (None, "", 0, "0"):
         return 0
     try:
-        if text.endswith("\u4ebf"):
-            return int(float(text[:-1]) * 100000000)
-        if text.endswith("\u4e07"):
-            return int(float(text[:-1]) * 10000)
-        if text.endswith("\u5343"):
-            return int(float(text[:-1]) * 1000)
         timestamp = int(float(str(value).strip()))
     except (TypeError, ValueError):
         return 0

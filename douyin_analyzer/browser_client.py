@@ -52,6 +52,8 @@ class DouyinBrowserClient:
                 co.set_browser_path(str(self.config.browser_binary_path))
             except Exception:
                 pass
+        co.set_argument("--mute-audio")
+        co.set_argument("--start-minimized")
         co.set_user_data_path(str(self.config.browser_user_data_path))
         self.page = ChromiumPage(co)
         self._minimize_window_if_possible()
