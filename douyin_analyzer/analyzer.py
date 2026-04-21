@@ -68,6 +68,22 @@ class DouyinHiatusAnalyzer:
         return self.config.enable_video_duration_analysis
 
     @staticmethod
+    def _safe_int(value, default=0):
+        try:
+            if value in (None, ""):
+                return default
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def calculate_average_like_from_profile(self, user, fallback=""):
+        total_favorited = self._safe_int((user or {}).get("total_favorited"), 0)
+        published_video_count = self._safe_int((user or {}).get("aweme_count"), 0)
+        if total_favorited > 0 and published_video_count > 0:
+            return int(total_favorited / published_video_count)
+        return fallback
+
+    @staticmethod
     def merge_videos(existing_videos, new_videos):
         merged = {}
         for video in existing_videos or []:
@@ -110,8 +126,12 @@ class DouyinHiatusAnalyzer:
             "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
+            "total_favorited": user.get("total_favorited", ""),
             "published_video_count": published_video_count,
-            "average_like_count": summary.get("average_like_count", 0),
+            "average_like_count": self.calculate_average_like_from_profile(
+                user,
+                summary.get("average_like_count", 0),
+            ),
             "average_update_interval_days": summary.get("average_update_interval_days"),
             "latest_video_title": latest_video.get("video_title", "无标题视频"),
             "upload_timestamp": upload_timestamp,
@@ -131,8 +151,9 @@ class DouyinHiatusAnalyzer:
             "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count", ""),
+            "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
-            "average_like_count": "",
+            "average_like_count": self.calculate_average_like_from_profile(user, ""),
             "average_update_interval_days": "",
             "latest_video_title": "",
             "upload_date": "",
@@ -151,8 +172,9 @@ class DouyinHiatusAnalyzer:
             "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
+            "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
-            "average_like_count": 0,
+            "average_like_count": self.calculate_average_like_from_profile(user, 0),
             "average_update_interval_days": None,
             "latest_video_title": "暂无公开视频",
             "upload_date": UNKNOWN_DATE,
@@ -171,8 +193,9 @@ class DouyinHiatusAnalyzer:
             "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
+            "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
-            "average_like_count": 0,
+            "average_like_count": self.calculate_average_like_from_profile(user, 0),
             "average_update_interval_days": None,
             "latest_video_title": "抓取失败",
             "upload_date": UNKNOWN_DATE,
@@ -189,12 +212,13 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count"),
+            "total_favorited": user.get("total_favorited", ""),
             "total_videos": total_videos,
             "latest_publish_timestamp": 0,
             "total_duration_seconds": 0,
             "average_duration_seconds": 0,
             "average_duration_text": "00:00",
-            "average_like_count": 0,
+            "average_like_count": self.calculate_average_like_from_profile(user, 0),
             "average_update_interval_days": None,
             "short_video_count": 0,
             "short_video_ratio": "0.00%",
@@ -212,13 +236,14 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count", ""),
+            "total_favorited": user.get("total_favorited", ""),
             # counts 模式只抓基础主页信息，因此分析表至少保留真实视频总数。
             "total_videos": user.get("aweme_count", ""),
             "latest_publish_timestamp": "",
             "total_duration_seconds": "",
             "average_duration_seconds": "",
             "average_duration_text": "",
-            "average_like_count": "",
+            "average_like_count": self.calculate_average_like_from_profile(user, ""),
             "average_update_interval_days": "",
             "short_video_count": "",
             "short_video_ratio": "",
@@ -240,12 +265,13 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count", ""),
+            "total_favorited": user.get("total_favorited", ""),
             "total_videos": user.get("aweme_count", ""),
             "latest_publish_timestamp": latest_publish_timestamp,
             "total_duration_seconds": "",
             "average_duration_seconds": "",
             "average_duration_text": "",
-            "average_like_count": "",
+            "average_like_count": self.calculate_average_like_from_profile(user, ""),
             "average_update_interval_days": "",
             "short_video_count": "",
             "short_video_ratio": "",
@@ -273,6 +299,10 @@ class DouyinHiatusAnalyzer:
             summary["uploader_name"] = user.get("nickname", summary.get("uploader_name", ""))
             summary["uploader_id"] = user.get("sec_uid", summary.get("uploader_id", ""))
             summary["follower_count"] = user.get("follower_count", summary.get("follower_count", ""))
+            summary["total_favorited"] = user.get(
+                "total_favorited",
+                summary.get("total_favorited", ""),
+            )
             return self.normalize_summary_for_mode(user, summary, cached_videos, latest_video)
 
         if isinstance(cached_videos, list) and cached_videos:
@@ -417,12 +447,16 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count"),
+            "total_favorited": user.get("total_favorited", ""),
             "total_videos": total_videos,
             "latest_publish_timestamp": latest_publish_timestamp,
             "total_duration_seconds": total_duration_seconds,
             "average_duration_seconds": average_duration_seconds,
             "average_duration_text": seconds_to_duration_text(average_duration_seconds),
-            "average_like_count": int(total_like_count / total_videos) if total_videos else 0,
+            "average_like_count": self.calculate_average_like_from_profile(
+                user,
+                int(total_like_count / total_videos) if total_videos else 0,
+            ),
             "average_update_interval_days": calculate_average_update_interval_days(
                 video.get("publish_timestamp") for video in videos
             ),
@@ -497,6 +531,7 @@ class DouyinHiatusAnalyzer:
         user.setdefault("remark_name", following_user.get("remark_name", cached_user.get("remark_name", "")))
         user.setdefault("follower_count", following_user.get("follower_count", cached_user.get("follower_count")))
         user.setdefault("aweme_count", following_user.get("aweme_count", cached_user.get("aweme_count")))
+        user.setdefault("total_favorited", following_user.get("total_favorited", cached_user.get("total_favorited")))
         user.setdefault(
             "latest_publish_timestamp",
             following_user.get("latest_publish_timestamp", cached_user.get("latest_publish_timestamp")),
@@ -532,6 +567,7 @@ class DouyinHiatusAnalyzer:
                     "uploader_id": uid,
                     "uploader_homepage": user.get("homepage", ""),
                     "follower_count": user.get("follower_count", ""),
+                    "total_favorited": user.get("total_favorited", ""),
                     "published_video_count": user.get("aweme_count", ""),
                     "cache_modes": ",".join(cache_modes),
                     "last_fetch_mode": (entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "",
@@ -590,6 +626,7 @@ class DouyinHiatusAnalyzer:
                 summary["uploader_name"] = user["nickname"]
                 summary["uploader_id"] = user["sec_uid"]
                 summary["follower_count"] = user.get("follower_count")
+                summary["total_favorited"] = user.get("total_favorited", summary.get("total_favorited", ""))
                 if user.get("aweme_count") not in (None, ""):
                     summary["total_videos"] = user.get("aweme_count")
                 summary = self.normalize_summary_for_mode(user, summary, videos, latest_video)
@@ -864,6 +901,7 @@ class DouyinHiatusAnalyzer:
                 if entry and isinstance(entry.get("user"), dict):
                     user.setdefault("follower_count", entry["user"].get("follower_count"))
                     user.setdefault("aweme_count", entry["user"].get("aweme_count"))
+                    user.setdefault("total_favorited", entry["user"].get("total_favorited"))
                     user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
 
                 latest_video = self.get_latest_video_from_entry(entry)
@@ -928,6 +966,7 @@ class DouyinHiatusAnalyzer:
                         summary["uploader_name"] = user["nickname"]
                         summary["uploader_id"] = user["sec_uid"]
                         summary["follower_count"] = user.get("follower_count")
+                        summary["total_favorited"] = user.get("total_favorited", summary.get("total_favorited", ""))
                         if user.get("aweme_count") is not None:
                             summary["total_videos"] = user.get("aweme_count")
                         if latest_video:

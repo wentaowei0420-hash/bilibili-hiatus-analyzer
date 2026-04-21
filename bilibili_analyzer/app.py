@@ -19,6 +19,7 @@ from .config import load_analyzer_config, load_feishu_config
 from .feishu_uploader import FeishuUploader
 from .http_client import BilibiliHttpClient
 from .logging_utils import create_progress, create_summary_panel, get_console, setup_logging
+from .utils import parse_view_count
 
 
 def load_uid_targets(list_path):
@@ -38,6 +39,61 @@ def load_uid_targets(list_path):
                 targets.append(candidate)
 
     return list(dict.fromkeys(targets))
+
+
+def remember_follower_count(follower_index, uid, count):
+    normalized_uid = str(uid or "").strip()
+    parsed_count = parse_view_count(count)
+    if not normalized_uid or parsed_count <= 0:
+        return
+    follower_index[normalized_uid] = max(parsed_count, follower_index.get(normalized_uid, 0))
+
+
+def load_bilibili_follower_count_index(config, cache_store):
+    follower_index = {}
+
+    for result in cache_store.load_precise_progress().values():
+        if not isinstance(result, dict):
+            continue
+        remember_follower_count(
+            follower_index,
+            result.get("uploader_id"),
+            result.get("follower_count"),
+        )
+
+    for entry in cache_store.load_video_duration_progress().values():
+        if not isinstance(entry, dict):
+            continue
+        following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
+        summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
+        remember_follower_count(
+            follower_index,
+            following.get("mid") or summary.get("uploader_id"),
+            following.get("follower_count") or summary.get("follower_count"),
+        )
+
+    for path in (config.output_csv, config.video_duration_analysis_csv):
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", newline="", encoding="utf-8-sig") as csvfile:
+                for row in csv.DictReader(csvfile):
+                    remember_follower_count(
+                        follower_index,
+                        row.get("UP主UID") or row.get("uploader_id") or row.get("uploader_id"),
+                        row.get("粉丝数") or row.get("follower_count"),
+                    )
+        except Exception:
+            continue
+
+    return follower_index
+
+
+def sort_uid_targets_by_follower_count(targets, follower_index):
+    return sorted(
+        targets,
+        key=lambda uid: -parse_view_count(follower_index.get(str(uid), 0)),
+    )
 
 
 def write_uid_fetch_outputs(config, video_rows, summary_rows):
@@ -285,7 +341,7 @@ def _show_uid_analysis_status_panel(config, csv_path, target_uids=None):
     )
 
 
-def run_fetch_uid_videos(list_path):
+def run_fetch_uid_videos(list_path, max_targets=None):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "bilibili_uid_fetch")
 
@@ -293,10 +349,39 @@ def run_fetch_uid_videos(list_path):
     if not targets:
         get_console().print(create_summary_panel("Bilibili UID Fetch", ["No valid UID found in list."], border_style="yellow"))
         return []
+    total_targets = len(targets)
 
     client = BilibiliHttpClient(config)
     api = BilibiliApi(config, client)
     cache_store = CacheStore(config)
+    follower_index = load_bilibili_follower_count_index(config, cache_store)
+    missing_followers = [uid for uid in targets if uid not in follower_index]
+    if missing_followers:
+        with create_progress(transient=False) as progress:
+            task_id = progress.add_task("Load Bilibili UID follower counts", total=len(missing_followers))
+            for uid in missing_followers:
+                relation_stat = api.get_uploader_relation_stat(uid, f"UID_{uid}")
+                remember_follower_count(follower_index, uid, relation_stat.get("follower_count", 0))
+                progress.advance(task_id)
+
+    targets = sort_uid_targets_by_follower_count(targets, follower_index)
+    if max_targets is not None:
+        targets = targets[:max(0, int(max_targets))]
+    if not targets:
+        get_console().print(create_summary_panel("Bilibili UID Fetch", ["Selected UID count is 0."], border_style="yellow"))
+        return []
+
+    get_console().print(
+        create_summary_panel(
+            "Bilibili UID Order",
+            [
+                "已按粉丝数从高到低排序后开始抓取。",
+                f"排序来源: 本地缓存/历史结果 + B站粉丝统计接口",
+                f"Selected UID count: {len(targets)} / {total_targets}",
+            ],
+            border_style="cyan",
+        )
+    )
     analyzer = BilibiliHiatusAnalyzer(config, api, cache_store)
     all_video_rows = []
     summary_rows = []
@@ -313,7 +398,7 @@ def run_fetch_uid_videos(list_path):
                 following = {
                     "mid": uid,
                     "uname": videos[0].get("uploader_name", f"UID_{uid}") if videos else f"UID_{uid}",
-                    "follower_count": "",
+                    "follower_count": follower_index.get(str(uid), ""),
                 }
                 analysis_rows.append(analyzer.build_video_duration_summary(following, videos))
                 summary_rows.append(
@@ -331,7 +416,11 @@ def run_fetch_uid_videos(list_path):
             except Exception as exc:
                 analysis_rows.append(
                     analyzer.build_video_duration_summary(
-                        {"mid": uid, "uname": f"UID_{uid}", "follower_count": ""},
+                        {
+                            "mid": uid,
+                            "uname": f"UID_{uid}",
+                            "follower_count": follower_index.get(str(uid), ""),
+                        },
                         [],
                     )
                 )
@@ -358,7 +447,7 @@ def run_fetch_uid_videos(list_path):
         create_summary_panel(
             "Bilibili UID Fetch Finished",
             [
-                f"UID count: {len(targets)}",
+                f"UID count: {len(targets)} / {total_targets}",
                 f"Video rows: {len(all_video_rows)}",
                 f"Video detail CSV: {videos_path.name}",
                 f"Fetch summary CSV: {summary_path.name}",

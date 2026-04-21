@@ -42,6 +42,24 @@ class BilibiliHiatusAnalyzer:
         self.api = api
         self.cache_store = cache_store
 
+    @staticmethod
+    def _safe_int(value, default=0):
+        try:
+            if value in (None, ""):
+                return default
+            return int(float(str(value).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def sort_followings_by_follower_count(cls, followings):
+        return sorted(
+            followings or [],
+            key=lambda following: -cls._safe_int(
+                (following or {}).get("follower_count") if isinstance(following, dict) else 0
+            ),
+        )
+
     def build_result_item(self, video_info):
         days_since = calculate_days_since(video_info["upload_timestamp"])
         return {
@@ -577,6 +595,8 @@ class BilibiliHiatusAnalyzer:
                 following.get("uname", "UP主"),
             )
             following["follower_count"] = relation_stat.get("follower_count", 0)
+        followings = self.sort_followings_by_follower_count(followings)
+        print("📈 已按粉丝数从高到低排序后开始处理。")
 
         cached_video_results = self.cache_store.load_precise_progress()
         if cached_video_results:

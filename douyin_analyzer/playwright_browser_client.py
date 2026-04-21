@@ -4,6 +4,7 @@ import time
 from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
 from .browser_client import DouyinBrowserClient, DouyinRateLimitError, DouyinServiceError
+from .utils import parse_view_count
 
 try:
     from playwright.sync_api import Error as PlaywrightError
@@ -143,6 +144,16 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         body_text = self._page_body_text()
         return "触发速率限制" in body_text
 
+    def _extract_total_favorited_from_dom(self):
+        try:
+            body_text = self.start().locator("body").inner_text(timeout=1500) or ""
+        except Exception:
+            return 0
+        import re
+
+        match = re.search(r"\u83b7\u8d5e\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
+        return parse_view_count(match.group(1)) if match else 0
+
     def get_followings(self):
         print("📜 正在抓取抖音关注列表...")
         self._open_page(self.config.self_user_url, self.config.page_load_delay)
@@ -210,6 +221,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                                     "homepage": f"https://www.douyin.com/user/{sec_uid}",
                                     "follower_count": self._extract_follower_count(user),
                                     "aweme_count": self._extract_aweme_count(user),
+                                    "total_favorited": self._extract_total_favorited(user),
                                     "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
                                 }
                             )
@@ -244,6 +256,10 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
+                if not user.get("total_favorited"):
+                    total_favorited = self._extract_total_favorited_from_dom()
+                    if total_favorited:
+                        user["total_favorited"] = total_favorited
 
                 videos_by_id = {}
                 empty_rounds = 0

@@ -187,6 +187,7 @@ class DouyinBrowserClient:
                                 "homepage": f"https://www.douyin.com/user/{sec_uid}",
                                 "follower_count": self._extract_follower_count(user),
                                 "aweme_count": self._extract_aweme_count(user),
+                                "total_favorited": self._extract_total_favorited(user),
                                 "latest_publish_timestamp": self._extract_latest_publish_timestamp(user),
                             }
                         )
@@ -243,6 +244,10 @@ class DouyinBrowserClient:
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
+                if not user.get("total_favorited"):
+                    total_favorited = self._extract_total_favorited_from_dom()
+                    if total_favorited:
+                        user["total_favorited"] = total_favorited
 
                 while empty_rounds < self.config.video_empty_round_limit:
                     if self._page_has_rate_limit():
@@ -577,6 +582,10 @@ class DouyinBrowserClient:
         if aweme_count is not None:
             user["aweme_count"] = aweme_count
 
+        total_favorited = self._extract_total_favorited(data)
+        if total_favorited:
+            user["total_favorited"] = total_favorited
+
         latest_publish_timestamp = self._extract_latest_publish_timestamp(data)
         if latest_publish_timestamp:
             user["latest_publish_timestamp"] = latest_publish_timestamp
@@ -613,6 +622,37 @@ class DouyinBrowserClient:
                 "videoCount",
             ],
         )
+
+    def _extract_total_favorited(self, data):
+        if not isinstance(data, dict):
+            return None
+        return self._find_numeric_value_from_profile_candidates(
+            data,
+            [
+                "total_favorited",
+                "totalFavorited",
+                "total_favorited_count",
+                "totalFavoritedCount",
+                "favorited_count",
+                "favoritedCount",
+                "liked_count",
+                "likedCount",
+                "total_liked_count",
+                "totalLikedCount",
+                "favoriting_count",
+                "favoritingCount",
+            ],
+        )
+
+    def _extract_total_favorited_from_dom(self):
+        try:
+            body_text = self.start().run_js("return document.body ? document.body.innerText : '';") or ""
+        except Exception:
+            return 0
+        import re
+
+        match = re.search(r"\u83b7\u8d5e\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
+        return parse_view_count(match.group(1)) if match else 0
 
     def _extract_latest_publish_timestamp(self, data):
         if not isinstance(data, dict):

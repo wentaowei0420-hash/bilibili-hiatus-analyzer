@@ -26,6 +26,7 @@ from .cache import CacheStore
 from .config import load_analyzer_config, load_feishu_config
 from .exporters import save_video_duration_analysis_to_csv
 from .playwright_browser_client import PlaywrightDouyinBrowserClient
+from .utils import parse_view_count
 
 
 def create_douyin_browser_client(config):
@@ -68,6 +69,45 @@ def load_uid_targets(list_path):
     return list(dict.fromkeys(targets))
 
 
+def merge_douyin_profile(profile_index, user):
+    if not isinstance(user, dict):
+        return
+    uid = str(user.get("sec_uid") or user.get("uploader_id") or "").strip()
+    if not uid:
+        return
+
+    existing = profile_index.get(uid, {})
+    merged = dict(existing)
+    for key, value in user.items():
+        if value not in (None, ""):
+            merged[key] = value
+    profile_index[uid] = merged
+
+
+def load_douyin_uid_profile_index(cache_store):
+    profile_index = {}
+
+    for user in cache_store.load_followings_cache():
+        merge_douyin_profile(profile_index, user)
+
+    progress = cache_store.load_progress()
+    for uid, entry in (progress or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
+        summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
+        merge_douyin_profile(profile_index, {**summary, **user, "sec_uid": user.get("sec_uid") or uid})
+
+    return profile_index
+
+
+def sort_uid_targets_by_follower_count(targets, profile_index):
+    return sorted(
+        targets,
+        key=lambda uid: -parse_view_count((profile_index.get(str(uid), {}) or {}).get("follower_count")),
+    )
+
+
 def write_uid_fetch_outputs(config, video_rows, summary_rows):
     output_dir = config.output_csv.parent
     videos_path = output_dir / "douyin_uid_all_videos.csv"
@@ -107,6 +147,7 @@ def write_uid_fetch_outputs(config, video_rows, summary_rows):
         "uploader_name",
         "uploader_homepage",
         "follower_count",
+        "total_favorited",
         "published_video_count",
         "video_count",
         "status",
@@ -119,6 +160,7 @@ def write_uid_fetch_outputs(config, video_rows, summary_rows):
         "uploader_name": "UP主姓名",
         "uploader_homepage": "UP主主页链接",
         "follower_count": "粉丝数",
+        "total_favorited": "获赞总数",
         "published_video_count": "发布视频数量",
         "video_count": "本次抓取视频数",
         "status": "抓取状态",
@@ -144,6 +186,7 @@ def write_uid_fetch_outputs(config, video_rows, summary_rows):
             "UP主姓名": row.get("uploader_name", ""),
             "UP主主页链接": row.get("uploader_homepage", ""),
             "粉丝数": row.get("follower_count", ""),
+            "获赞总数": row.get("total_favorited", ""),
             "发布视频数量": row.get("published_video_count", ""),
             "视频总数": row.get("video_count", ""),
             "抓取状态": row.get("status", ""),
@@ -178,6 +221,7 @@ def write_uid_analysis_output(config, analysis_rows):
         "uploader_name",
         "uploader_id",
         "follower_count",
+        "total_favorited",
         "total_videos",
         "total_duration_seconds",
         "average_duration_seconds",
@@ -197,6 +241,7 @@ def write_uid_analysis_output(config, analysis_rows):
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "follower_count": "粉丝数",
+        "total_favorited": "获赞总数",
         "total_videos": "视频总数",
         "total_duration_seconds": "总时长(秒)",
         "average_duration_seconds": "平均时长(秒)",
@@ -501,7 +546,7 @@ def run_unfollow(list_path):
     return results
 
 
-def run_fetch_uid_videos(list_path):
+def run_fetch_uid_videos(list_path, max_targets=None):
     config = load_analyzer_config(fetch_mode_override="full")
     setup_logging(config.log_dir, "douyin_uid_fetch")
 
@@ -509,9 +554,28 @@ def run_fetch_uid_videos(list_path):
     if not targets:
         get_console().print(create_summary_panel("Douyin UID Fetch", ["No valid UID found in list."], border_style="yellow"))
         return []
-
-    browser_client = create_douyin_browser_client(config)
+    total_targets = len(targets)
     cache_store = CacheStore(config)
+    profile_index = load_douyin_uid_profile_index(cache_store)
+    targets = sort_uid_targets_by_follower_count(targets, profile_index)
+    if max_targets is not None:
+        targets = targets[:max(0, int(max_targets))]
+    if not targets:
+        get_console().print(create_summary_panel("Douyin UID Fetch", ["Selected UID count is 0."], border_style="yellow"))
+        return []
+
+    get_console().print(
+        create_summary_panel(
+            "Douyin UID Order",
+            [
+                "已按粉丝数从高到低排序后开始抓取。",
+                "排序来源: 抖音关注列表缓存/历史抓取缓存；未知粉丝数会排在后面。",
+                f"Selected UID count: {len(targets)} / {total_targets}",
+            ],
+            border_style="cyan",
+        )
+    )
+    browser_client = create_douyin_browser_client(config)
     analyzer = DouyinHiatusAnalyzer(
         config,
         browser_client,
@@ -529,13 +593,15 @@ def run_fetch_uid_videos(list_path):
             for uid in targets:
                 progress.update(task_id, description=f"Fetch Douyin UID videos | current UID: {uid}")
                 fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cached_user = profile_index.get(str(uid), {}) or {}
                 user = {
                     "sec_uid": uid,
-                    "nickname": f"UID_{uid}",
-                    "homepage": f"https://www.douyin.com/user/{uid}",
-                    "remark_name": "",
-                    "follower_count": "",
-                    "aweme_count": "",
+                    "nickname": cached_user.get("nickname") or cached_user.get("uploader_name") or f"UID_{uid}",
+                    "homepage": cached_user.get("homepage") or cached_user.get("uploader_homepage") or f"https://www.douyin.com/user/{uid}",
+                    "remark_name": cached_user.get("remark_name", ""),
+                    "follower_count": cached_user.get("follower_count", ""),
+                    "aweme_count": cached_user.get("aweme_count") or cached_user.get("total_videos") or "",
+                    "total_favorited": cached_user.get("total_favorited", ""),
                 }
                 try:
                     videos = browser_client.get_all_videos_for_user(user)
@@ -547,6 +613,7 @@ def run_fetch_uid_videos(list_path):
                             "uploader_name": user["nickname"],
                             "uploader_homepage": user["homepage"],
                             "follower_count": user.get("follower_count", ""),
+                            "total_favorited": user.get("total_favorited", ""),
                             "published_video_count": user.get("aweme_count", ""),
                             "video_count": len(videos),
                             "status": "success" if videos else "no_video",
@@ -563,6 +630,7 @@ def run_fetch_uid_videos(list_path):
                             "uploader_name": user["nickname"],
                             "uploader_homepage": user["homepage"],
                             "follower_count": user.get("follower_count", ""),
+                            "total_favorited": user.get("total_favorited", ""),
                             "published_video_count": user.get("aweme_count", ""),
                             "video_count": 0,
                             "status": "failed",
@@ -584,7 +652,7 @@ def run_fetch_uid_videos(list_path):
         create_summary_panel(
             "Douyin UID Fetch Finished",
             [
-                f"UID count: {len(targets)}",
+                f"UID count: {len(targets)} / {total_targets}",
                 f"Video rows: {len(all_video_rows)}",
                 f"Video detail CSV: {videos_path.name}",
                 f"Fetch summary CSV: {summary_path.name}",
@@ -596,6 +664,80 @@ def run_fetch_uid_videos(list_path):
     )
     run_uid_analysis_upload(analysis_path, target_uids=targets)
     return summary_rows
+
+
+def run_export_high_like_videos_from_cache(threshold=10000):
+    config = load_analyzer_config()
+    setup_logging(config.log_dir, "douyin_high_like_export")
+    cache_store = CacheStore(config)
+    progress = cache_store.load_progress()
+
+    output_path = config.output_csv.parent / "douyin_cached_high_like_videos.csv"
+    fieldnames = ["uploader_name", "video_id", "video_title", "video_url", "like_count"]
+    headers = {
+        "uploader_name": "UP主",
+        "video_id": "视频ID",
+        "video_title": "视频标题",
+        "video_url": "视频链接",
+        "like_count": "点赞数",
+    }
+
+    unique_videos = {}
+    for uid, entry in (progress or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
+        uploader_name = user.get("nickname") or user.get("uploader_name") or str(uid)
+        for video in entry.get("videos", []) or []:
+            if not isinstance(video, dict):
+                continue
+            try:
+                like_count = int(float(video.get("like_count") or 0))
+            except (TypeError, ValueError):
+                like_count = 0
+            if like_count <= threshold:
+                continue
+
+            video_id = str(video.get("aweme_id") or video.get("bvid") or "").strip()
+            video_url = str(video.get("video_url") or "").strip()
+            unique_key = video_id or video_url
+            if not unique_key:
+                continue
+
+            existing = unique_videos.get(unique_key)
+            row = {
+                "uploader_name": video.get("uploader_name") or uploader_name,
+                "video_id": video_id,
+                "video_title": video.get("video_title") or "",
+                "video_url": video_url,
+                "like_count": like_count,
+            }
+            if existing is None or like_count > int(existing.get("like_count") or 0):
+                unique_videos[unique_key] = row
+
+    rows = sorted(
+        unique_videos.values(),
+        key=lambda item: (-int(item.get("like_count") or 0), str(item.get("uploader_name") or "")),
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8-sig") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+    get_console().print(
+        create_summary_panel(
+            "抖音缓存高赞视频导出完成",
+            [
+                f"筛选条件: 点赞数 > {threshold}",
+                f"唯一视频数: {len(rows)}",
+                f"输出文件: {output_path}",
+            ],
+            border_style="green",
+        )
+    )
+    return output_path
 
 
 def main(fetch_mode_override=None):
