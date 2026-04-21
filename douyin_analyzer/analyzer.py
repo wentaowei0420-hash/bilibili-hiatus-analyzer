@@ -1,5 +1,6 @@
 import time
 
+from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.logging_utils import (
     create_progress,
     create_summary_panel,
@@ -736,6 +737,9 @@ class DouyinHiatusAnalyzer:
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
 
+        if not results and not summary_rows and not all_video_rows:
+            return
+
         snapshot_results = sorted(
             [dict(item) for item in results],
             key=self._sort_days_since_value,
@@ -851,6 +855,18 @@ class DouyinHiatusAnalyzer:
             with create_progress() as progress_bar:
                 task_id = progress_bar.add_task("统计抖音博主基础数据", total=len(followings))
                 for index, user in enumerate(followings, 1):
+                    try:
+                        check_stop()
+                    except OperationCancelled:
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index - 1,
+                        )
+                        raise
                     entry = progress.get(user.get("sec_uid")) if isinstance(progress, dict) else None
                     if isinstance(entry, dict):
                         cached_user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
@@ -901,6 +917,18 @@ class DouyinHiatusAnalyzer:
         with create_progress() as progress_bar:
             task_id = progress_bar.add_task("分析抖音博主", total=len(followings))
             for index, user in enumerate(followings, 1):
+                try:
+                    check_stop()
+                except OperationCancelled:
+                    self.flush_partial_outputs(
+                        results,
+                        all_video_rows,
+                        summary_rows,
+                        progress,
+                        pending_progress_saves,
+                        index - 1,
+                    )
+                    raise
                 entry = progress.get(user["sec_uid"])
                 if entry and isinstance(entry.get("user"), dict):
                     user.setdefault("follower_count", entry["user"].get("follower_count"))

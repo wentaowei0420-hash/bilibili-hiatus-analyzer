@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+from common.runtime_control import OperationCancelled, check_stop
 from .exporters import (
     save_all_videos_to_csv,
     save_to_csv,
@@ -454,6 +455,7 @@ class BilibiliHiatusAnalyzer:
         with create_progress() as progress:
             task_id = progress.add_task("全量视频时长分析", total=len(pending_followings))
             for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
+                check_stop()
                 batch = pending_followings[start:start + self.config.video_analysis_batch_size]
                 with ThreadPoolExecutor(max_workers=self.config.video_analysis_workers) as executor:
                     futures = {
@@ -494,6 +496,12 @@ class BilibiliHiatusAnalyzer:
                             "summary": summary,
                         }
                         self.cache_store.save_video_duration_progress(duration_progress)
+
+                try:
+                    check_stop()
+                except OperationCancelled:
+                    self.cache_store.save_video_duration_progress(duration_progress)
+                    break
 
                 if start + self.config.video_analysis_batch_size < len(pending_followings):
                     cooldown = self.config.video_analysis_batch_cooldown + random.uniform(0, 5)
@@ -590,6 +598,7 @@ class BilibiliHiatusAnalyzer:
             return None
 
         for following in followings:
+            check_stop()
             relation_stat = self.api.get_uploader_relation_stat(
                 following.get("mid"),
                 following.get("uname", "UP主"),
@@ -644,6 +653,19 @@ class BilibiliHiatusAnalyzer:
                         cached_video_results,
                     )
                 )
+                try:
+                    check_stop()
+                except OperationCancelled:
+                    duration_progress = self.cache_store.load_video_duration_progress()
+                    results = self.enrich_results_with_profile_and_counts(
+                        list(results_by_mid.values()),
+                        duration_progress,
+                        followings,
+                    )
+                    if results:
+                        results.sort(key=lambda item: item["days_since_update"], reverse=True)
+                        save_to_csv(self.config, results)
+                    raise
                 if start + self.config.batch_size < len(pending_followings):
                     cooldown = self.config.batch_cooldown + random.uniform(0, 5)
                     print(

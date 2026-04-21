@@ -16,6 +16,8 @@ from rich.text import Text
 from rich.table import Table
 import time
 
+from common.runtime_control import check_stop
+
 
 ERROR_MARKERS = ("❌", "失败", "错误", "出错")
 WARNING_MARKERS = ("⚠️", "异常", "风控", "重试队列")
@@ -114,6 +116,7 @@ def wait_with_progress(seconds: float, description: str, transient: bool = True,
         task_id = progress.add_task(description, total=total)
         remaining = total
         while remaining > 0:
+            check_stop()
             sleep_for = min(step, remaining)
             time.sleep(sleep_for)
             progress.advance(task_id, sleep_for)

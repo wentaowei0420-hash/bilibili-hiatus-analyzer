@@ -28,6 +28,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from common.runtime_control import OperationCancelled, clear_stop, request_stop
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_DOUYIN_UNFOLLOW_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
@@ -84,10 +86,14 @@ class RunnerThread(QThread):
     def run(self):
         writer = SignalWriter(self.log_line)
         try:
+            clear_stop()
             with redirect_stdout(writer), redirect_stderr(writer):
                 self._run_task()
             writer.flush()
             self.done.emit(True, "任务执行完成")
+        except OperationCancelled:
+            writer.flush()
+            self.done.emit(True, "已终止运行，已保存当前可用数据")
         except Exception as exc:
             writer.flush()
             self.log_line.emit("任务执行失败:")
@@ -293,6 +299,9 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("开始运行")
         self.start_button.setStyleSheet("font-size: 16px; font-weight: 700; padding: 10px;")
         self.start_button.clicked.connect(self._start)
+        self.stop_button = QPushButton("终止运行")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._request_stop)
         self.advanced_button = QPushButton("高级设置")
         self.advanced_button.clicked.connect(self._open_advanced_settings)
         self.lock_button = QPushButton("锁定配置")
@@ -300,6 +309,7 @@ class MainWindow(QMainWindow):
         self.clear_button = QPushButton("清空日志")
         self.clear_button.clicked.connect(lambda: self.log_text.clear())
         button_row.addWidget(self.start_button)
+        button_row.addWidget(self.stop_button)
         button_row.addWidget(self.advanced_button)
         button_row.addWidget(self.lock_button)
         button_row.addWidget(self.clear_button)
@@ -443,10 +453,21 @@ class MainWindow(QMainWindow):
         self.log_text.clear()
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
         self.worker = RunnerThread(config)
         self.worker.log_line.connect(self._append_log)
         self.worker.done.connect(self._on_done)
         self.worker.start()
+
+    def _request_stop(self):
+        if not self.worker or not self.worker.isRunning():
+            return
+        request_stop()
+        self.stop_button.setText("正在保存...")
+        self.stop_button.setStyleSheet("background-color: #c62828; color: white; font-weight: 700;")
+        self._append_log("已请求终止运行，正在等待安全检查点并保存当前数据...")
 
     def _validate_config(self, config):
         required_paths = []
@@ -471,6 +492,13 @@ class MainWindow(QMainWindow):
     def _on_done(self, ok, message):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
+        self.stop_button.setEnabled(False)
+        if message.startswith("已终止运行"):
+            self.stop_button.setText("保存完成，可以关闭")
+            self.stop_button.setStyleSheet("background-color: #2e7d32; color: white; font-weight: 700;")
+        else:
+            self.stop_button.setText("终止运行")
+            self.stop_button.setStyleSheet("")
         if ok:
             self._append_log("-" * 60)
             self._append_log(message)

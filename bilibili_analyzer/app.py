@@ -12,6 +12,7 @@ from common.platform_store import (
     replace_video_rows_for_uploader,
     upsert_creator_rows,
 )
+from common.runtime_control import OperationCancelled, check_stop
 from .analyzer import BilibiliHiatusAnalyzer
 from .bilibili_api import BilibiliApi
 from .cache import CacheStore
@@ -390,6 +391,12 @@ def run_fetch_uid_videos(list_path, max_targets=None):
     with create_progress(transient=False) as progress:
         task_id = progress.add_task("Fetch Bilibili UID videos", total=len(targets))
         for uid in targets:
+            try:
+                check_stop()
+            except OperationCancelled:
+                write_uid_fetch_outputs(config, all_video_rows, summary_rows)
+                write_uid_analysis_output(config, analysis_rows)
+                raise
             progress.update(task_id, description=f"Fetch Bilibili UID videos | current UID: {uid}")
             fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
