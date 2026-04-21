@@ -1,8 +1,23 @@
 import csv
 from datetime import datetime
 
+from common.export_store import write_rows_to_table
+from common.platform_store import (
+    replace_summary_rows,
+    replace_video_rows_for_uploader,
+    upsert_creator_rows,
+)
+
 from .logging_utils import smart_print as print
 from .utils import format_ratio
+
+
+def _mapped_rows(fieldnames, headers, rows):
+    mapped_rows = []
+    for row in rows or []:
+        source = row if isinstance(row, dict) else {}
+        mapped_rows.append({headers[field]: source.get(field, "") for field in fieldnames})
+    return mapped_rows
 
 
 def save_to_csv(config, results):
@@ -24,7 +39,7 @@ def save_to_csv(config, results):
         "video_url",
         "data_source",
     ]
-    chinese_headers = {
+    headers = {
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "uploader_homepage": "UP主主页链接",
@@ -42,7 +57,11 @@ def save_to_csv(config, results):
         "video_url": "视频链接",
         "data_source": "数据来源",
     }
-    _write_csv(config.output_csv, fieldnames, chinese_headers, results, "保存CSV文件失败")
+    _write_csv(config.output_csv, fieldnames, headers, results, "保存B站排行榜CSV失败")
+    write_rows_to_table(config.export_store_db, config.export_main_table, fieldnames, headers, results)
+    mapped_rows = _mapped_rows(fieldnames, headers, results)
+    upsert_creator_rows(config.export_store_db, "bilibili", mapped_rows)
+    replace_summary_rows(config.export_store_db, "bilibili", "main", mapped_rows)
 
 
 def save_all_videos_to_csv(config, video_rows):
@@ -60,7 +79,7 @@ def save_all_videos_to_csv(config, video_rows):
         "view_count",
         "video_url",
     ]
-    chinese_headers = {
+    headers = {
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "video_title": "视频标题",
@@ -74,13 +93,24 @@ def save_all_videos_to_csv(config, video_rows):
         "view_count": "播放量",
         "video_url": "视频链接",
     }
-    _write_csv(
-        config.all_videos_csv,
-        fieldnames,
-        chinese_headers,
-        video_rows,
-        "保存视频明细CSV失败",
-    )
+    _write_csv(config.all_videos_csv, fieldnames, headers, video_rows, "保存B站视频明细CSV失败")
+
+    grouped_rows = {}
+    for row in video_rows or []:
+        source = row if isinstance(row, dict) else {}
+        uploader_id = str(source.get("uploader_id") or "").strip()
+        if not uploader_id:
+            continue
+        grouped_rows.setdefault(uploader_id, []).append(source)
+
+    for uploader_id, rows in grouped_rows.items():
+        replace_video_rows_for_uploader(
+            config.export_store_db,
+            "bilibili",
+            uploader_id,
+            rows,
+            "bvid",
+        )
 
 
 def save_video_duration_analysis_to_csv(config, summary_rows):
@@ -103,7 +133,7 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
         "long_video_count",
         "long_video_ratio",
     ]
-    chinese_headers = {
+    headers = {
         "uploader_name": "UP主姓名",
         "uploader_id": "UP主UID",
         "follower_count": "粉丝数",
@@ -122,12 +152,13 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
         "long_video_count": "长视频数量(240s+)",
         "long_video_ratio": "长视频占比",
     }
-    _write_csv(
-        config.video_duration_analysis_csv,
-        fieldnames,
-        chinese_headers,
-        summary_rows,
-        "保存视频时长分析CSV失败",
+    _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存B站视频时长分析CSV失败")
+    write_rows_to_table(config.export_store_db, config.export_analysis_table, fieldnames, headers, summary_rows)
+    replace_summary_rows(
+        config.export_store_db,
+        "bilibili",
+        "analysis",
+        _mapped_rows(fieldnames, headers, summary_rows),
     )
 
 
@@ -139,12 +170,11 @@ def save_video_duration_report(config, summary_rows, total_video_count):
         medium_total = sum(row["medium_video_count"] for row in summary_rows)
         medium_long_total = sum(row["medium_long_video_count"] for row in summary_rows)
         long_total = sum(row["long_video_count"] for row in summary_rows)
-
-        report_lines = [
+        lines = [
             "# B站关注UP视频时长分析报告",
             "",
             f"- 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"- 分析UP主数量: {total_up_count}",
+            f"- 分析UP数量: {total_up_count}",
             f"- 分析视频总数: {total_video_count}",
             "",
             "## 全局视频类型占比",
@@ -153,43 +183,19 @@ def save_video_duration_report(config, summary_rows, total_video_count):
             f"- 中视频(30~60s): {medium_total} ({format_ratio(medium_total, total_video_count)})",
             f"- 中长视频(60~240s): {medium_long_total} ({format_ratio(medium_long_total, total_video_count)})",
             f"- 长视频(240s+): {long_total} ({format_ratio(long_total, total_video_count)})",
-            "",
-            "## 长视频占比 Top 20",
-            "",
-            "| 排名 | UP主 | 粉丝数 | 视频总数 | 长视频数量 | 长视频占比 | 平均时长 | 平均点赞数 | 平均几天一更 |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
-
-        sorted_rows = sorted(
-            summary_rows,
-            key=lambda row: (
-                float(str(row["long_video_ratio"]).rstrip("%") or "0"),
-                row["total_videos"],
-            ),
-            reverse=True,
-        )
-
-        for index, row in enumerate(sorted_rows[:20], 1):
-            average_update_interval_days = row.get("average_update_interval_days")
-            report_lines.append(
-                f"| {index} | {row['uploader_name']} | {row.get('follower_count') or '暂无数据'} | {row['total_videos']} | "
-                f"{row['long_video_count']} | {row['long_video_ratio']} | {row['average_duration_text']} | "
-                f"{row.get('average_like_count', 0)} | "
-                f"{average_update_interval_days if average_update_interval_days is not None else '暂无数据'} |"
-            )
-
         with config.video_duration_report_md.open("w", encoding="utf-8") as report_file:
-            report_file.write("\n".join(report_lines))
+            report_file.write("\n".join(lines))
     except Exception as exc:
-        print(f"❌ 保存视频时长分析报告失败: {exc}")
+        print(f"保存B站视频时长分析报告失败: {exc}")
 
 
-def _write_csv(path, fieldnames, chinese_headers, rows, error_message):
+def _write_csv(path, fieldnames, headers, rows, error_message):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writerow(chinese_headers)
+            writer.writerow(headers)
             writer.writerows(rows)
     except Exception as exc:
-        print(f"❌ {error_message}: {exc}")
+        print(f"{error_message}: {exc}")

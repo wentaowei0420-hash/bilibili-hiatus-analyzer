@@ -141,6 +141,7 @@ config.*.ini
 runtime/
 runtime/logs/
 runtime/chrome_data/
+runtime/edge_data/
 
 # Project local outputs / state / history
 data/bilibili/output/

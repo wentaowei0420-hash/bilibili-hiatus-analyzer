@@ -212,7 +212,8 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count", ""),
-            "total_videos": "",
+            # counts 模式只抓基础主页信息，因此分析表至少保留真实视频总数。
+            "total_videos": user.get("aweme_count", ""),
             "latest_publish_timestamp": "",
             "total_duration_seconds": "",
             "average_duration_seconds": "",
@@ -256,6 +257,60 @@ class DouyinHiatusAnalyzer:
             "long_video_ratio": "",
             "summary_scope": "partial",
         }
+
+    def build_summary_from_cached_entry(self, user, entry):
+        if not isinstance(user, dict):
+            user = {}
+        if not isinstance(entry, dict):
+            return self.build_counts_only_summary(user)
+
+        cached_videos = entry.get("videos", [])
+        latest_video = self.get_latest_video_from_entry(entry)
+        cached_summary = entry.get("summary", {})
+
+        if self.summary_has_complete_statistics(cached_summary):
+            summary = dict(cached_summary or {})
+            summary["uploader_name"] = user.get("nickname", summary.get("uploader_name", ""))
+            summary["uploader_id"] = user.get("sec_uid", summary.get("uploader_id", ""))
+            summary["follower_count"] = user.get("follower_count", summary.get("follower_count", ""))
+            return self.normalize_summary_for_mode(user, summary, cached_videos, latest_video)
+
+        if isinstance(cached_videos, list) and cached_videos:
+            summary = self.build_video_duration_summary(user, cached_videos)
+            summary["summary_scope"] = "cached_sample"
+            return summary
+
+        return self.build_counts_only_summary(user)
+
+    def build_result_from_cached_entry(self, user, entry):
+        summary = self.build_summary_from_cached_entry(user, entry)
+        latest_video = self.get_latest_video_from_entry(entry) if isinstance(entry, dict) else None
+
+        if latest_video:
+            result = self.build_result_item(user, summary, latest_video)
+        else:
+            result = self.build_counts_only_result_item(user)
+            result["average_like_count"] = summary.get("average_like_count", "")
+            result["average_update_interval_days"] = summary.get("average_update_interval_days", "")
+
+            latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
+            if latest_publish_timestamp:
+                result["upload_timestamp"] = latest_publish_timestamp
+                result["data_source"] = "douyin_cached_summary"
+
+        self.cache_store.refresh_result_runtime_fields(result)
+        return result
+
+    def rebuild_summary_rows_from_cache(self, followings=None, progress=None):
+        followings = followings if isinstance(followings, list) else self.cache_store.load_followings_cache()
+        progress = progress if isinstance(progress, dict) else self.cache_store.load_progress()
+
+        summary_rows = []
+        for user in self.sort_followings_by_follower_count(followings):
+            uid = user.get("sec_uid")
+            entry = progress.get(uid) if isinstance(progress, dict) and uid else None
+            summary_rows.append(self.build_summary_from_cached_entry(user, entry))
+        return summary_rows
 
     @staticmethod
     def has_complete_video_sample(user, videos):
@@ -508,7 +563,9 @@ class DouyinHiatusAnalyzer:
             for user in followings
             if isinstance(user, dict) and user.get("sec_uid")
         }
-        all_uids = set(followings_by_uid) | set(progress.keys())
+        # 主表/分析表的缓存重建应只基于“当前仍在关注列表中的博主”。
+        # 旧 progress 里残留的历史博主只保留给缓存清单诊断，不再带入飞书主表。
+        all_uids = set(followings_by_uid)
         if not all_uids:
             return [], [], []
 
@@ -644,7 +701,7 @@ class DouyinHiatusAnalyzer:
 
         snapshot_results = sorted(
             [dict(item) for item in results],
-            key=lambda item: item.get("days_since_update", 0),
+            key=self._sort_days_since_value,
             reverse=True,
         )
         save_to_csv(self.config, snapshot_results)
@@ -655,18 +712,30 @@ class DouyinHiatusAnalyzer:
             save_all_videos_to_csv(self.config, list(all_video_rows))
             save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
 
+        local_outputs = [self.config.output_csv]
+        if self.should_export_summary_analysis():
+            local_outputs.append(self.config.video_duration_analysis_csv)
+        if self.should_export_duration_analysis():
+            local_outputs.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
+
+        get_console().print(
+            create_summary_panel(
+                "💾 本地阶段保存",
+                [
+                    f"已安全保存到本地: 已处理 {processed_count} 位博主",
+                    f"已更新文件: {self._format_output_summary(local_outputs)}",
+                ],
+                border_style="green",
+            )
+        )
+
         if self.upload_callback is not None:
-            exported = [self.config.output_csv]
-            if self.should_export_summary_analysis():
-                exported.append(self.config.video_duration_analysis_csv)
-            if self.should_export_duration_analysis():
-                exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
             get_console().print(
                 create_summary_panel(
                     "☁️ 抖音阶段同步",
                     [
                         f"已处理博主: {processed_count}",
-                        f"待上传文件: {self._format_output_summary(exported)}",
+                        f"待上传文件: {self._format_output_summary(local_outputs)}",
                     ],
                     border_style="cyan",
                 )
@@ -711,7 +780,7 @@ class DouyinHiatusAnalyzer:
         followings = self.sort_followings_by_follower_count(followings)
         print("📈 已按粉丝数从高到低排序后开始抓取。")
 
-        progress = {} if fetch_mode == "counts" else self.cache_store.load_progress()
+        progress = self.cache_store.load_progress()
         if progress:
             print(f"♻️  已加载 {len(progress)} 条抖音缓存")
 
@@ -745,8 +814,9 @@ class DouyinHiatusAnalyzer:
             with create_progress() as progress_bar:
                 task_id = progress_bar.add_task("统计抖音博主基础数据", total=len(followings))
                 for index, user in enumerate(followings, 1):
-                    result = self.build_counts_only_result_item(user)
-                    summary = self.build_counts_only_summary(user)
+                    entry = progress.get(user.get("sec_uid")) if isinstance(progress, dict) else None
+                    summary = self.build_summary_from_cached_entry(user, entry)
+                    result = self.build_result_from_cached_entry(user, entry)
                     results.append(result)
                     if self.should_export_summary_analysis():
                         summary_rows.append(summary)
@@ -754,8 +824,7 @@ class DouyinHiatusAnalyzer:
                     progress_bar.advance(task_id)
 
                     if (
-                        self.upload_callback is not None
-                        and self.config.intermediate_upload_interval_users > 0
+                        self.config.intermediate_upload_interval_users > 0
                         and index % self.config.intermediate_upload_interval_users == 0
                     ):
                         self.flush_partial_outputs(
@@ -943,8 +1012,7 @@ class DouyinHiatusAnalyzer:
                 progress_bar.advance(task_id)
 
                 if (
-                    self.upload_callback is not None
-                    and self.config.intermediate_upload_interval_users > 0
+                    self.config.intermediate_upload_interval_users > 0
                     and index % self.config.intermediate_upload_interval_users == 0
                 ):
                     self.flush_partial_outputs(
@@ -978,7 +1046,7 @@ class DouyinHiatusAnalyzer:
                 )
             )
 
-        results.sort(key=lambda item: item.get("days_since_update", 0), reverse=True)
+        results.sort(key=self._sort_days_since_value, reverse=True)
         self.display_top_results(results)
         save_to_csv(self.config, results)
 

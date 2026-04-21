@@ -45,6 +45,10 @@ class AnalyzerConfig:
     all_videos_csv: Path
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
+    export_store_db: Path
+    export_main_table: str
+    export_analysis_table: str
+    export_uid_analysis_table: str
     video_duration_progress_json: Path
     video_duration_progress_dir: Path
     analysis_mode: str
@@ -103,11 +107,18 @@ class FeishuConfig:
     spreadsheet_token: str
     sheet_title: str
     sheet_index: int
+    analysis_sheet_title: str
+    analysis_sheet_index: int
     file_hiatus: Path
     file_duration: Path
     file_merged_output: Path
+    export_store_db: Path
+    export_main_table: str
+    export_analysis_table: str
+    export_uid_analysis_table: str
     db_path: Path
     upload_state_json: Path
+    analysis_upload_state_json: Path
     history_retention_days: int
 
 
@@ -138,6 +149,10 @@ def load_analyzer_config() -> AnalyzerConfig:
         all_videos_csv=output_dir / "bilibili_all_videos.csv",
         video_duration_analysis_csv=output_dir / "bilibili_video_duration_analysis.csv",
         video_duration_report_md=output_dir / "bilibili_video_duration_report.md",
+        export_store_db=state_dir / "bilibili_export_store.db",
+        export_main_table="main_sheet_current",
+        export_analysis_table="analysis_sheet_current",
+        export_uid_analysis_table="uid_analysis_sheet_current",
         video_duration_progress_json=state_dir / "bilibili_video_duration_progress.json",
         video_duration_progress_dir=state_dir / "cache" / "video_duration_progress",
         analysis_mode=os.getenv("ANALYSIS_MODE", "precise"),
@@ -191,6 +206,8 @@ def load_feishu_config() -> FeishuConfig:
         spreadsheet_token=os.getenv("FEISHU_SPREADSHEET_TOKEN", ""),
         sheet_title=os.getenv("FEISHU_BILIBILI_SHEET_TITLE", "B站数据表"),
         sheet_index=int(os.getenv("FEISHU_BILIBILI_SHEET_INDEX", "0")),
+        analysis_sheet_title=os.getenv("FEISHU_BILIBILI_ANALYSIS_SHEET_TITLE", "B站分析表"),
+        analysis_sheet_index=int(os.getenv("FEISHU_BILIBILI_ANALYSIS_SHEET_INDEX", "2")),
         file_hiatus=_resolve_path_env(
             "FILE_HIATUS_PATH",
             output_dir / "bilibili_hiatus_ranking.csv",
@@ -205,11 +222,21 @@ def load_feishu_config() -> FeishuConfig:
             "FILE_MERGED_OUTPUT_PATH",
             output_dir / "merged_bilibili_data.csv",
         ),
+        export_store_db=state_dir / "bilibili_export_store.db",
+        export_main_table="main_sheet_current",
+        export_analysis_table="analysis_sheet_current",
+        export_uid_analysis_table="uid_analysis_sheet_current",
         db_path=_resolve_path_env("DB_PATH", history_dir / "bilibili_history.db"),
         upload_state_json=Path(
             os.getenv(
                 "FEISHU_UPLOAD_STATE_PATH",
                 str(state_dir / "bilibili_feishu_upload_state.json"),
+            )
+        ),
+        analysis_upload_state_json=Path(
+            os.getenv(
+                "FEISHU_ANALYSIS_UPLOAD_STATE_PATH",
+                str(state_dir / "bilibili_feishu_analysis_upload_state.json"),
             )
         ),
         history_retention_days=int(os.getenv("BILIBILI_HISTORY_RETENTION_DAYS", "30")),

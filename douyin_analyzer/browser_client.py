@@ -7,6 +7,7 @@ from DrissionPage import ChromiumOptions, ChromiumPage
 
 from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
+from .rate_limiter import DouyinRateLimiter
 from .utils import (
     categorize_duration,
     normalize_duration_seconds,
@@ -31,6 +32,7 @@ class DouyinBrowserClient:
         self.page = None
         self.service_error_streak = 0
         self.rate_limit_streak = 0
+        self.rate_limiter = DouyinRateLimiter(config)
 
     def _minimize_window_if_possible(self):
         if self.page is None:
@@ -45,10 +47,36 @@ class DouyinBrowserClient:
             return self.page
 
         co = ChromiumOptions()
+        if getattr(self.config, "browser_binary_path", None):
+            try:
+                co.set_browser_path(str(self.config.browser_binary_path))
+            except Exception:
+                pass
         co.set_user_data_path(str(self.config.browser_user_data_path))
         self.page = ChromiumPage(co)
         self._minimize_window_if_possible()
         return self.page
+
+    def _respect_request_rate(self):
+        self.rate_limiter.before_request()
+
+    def _compute_backoff_seconds(self, attempt, base_seconds=None, max_seconds=None):
+        return self.rate_limiter.compute_backoff_seconds(attempt, base_seconds, max_seconds)
+
+    def _emit_conservative_mode_notice_if_needed(self):
+        if self.rate_limiter.consume_conservative_notice():
+            print(
+                "⚠️  抖音访问已自动切换到保守模式：将降低请求频率、缩短补采数量，并拉长恢复节奏。"
+            )
+
+    def _open_page(self, url, load_delay=None):
+        self._respect_request_rate()
+        page = self.start()
+        page.get(url)
+        delay = self.config.page_load_delay if load_delay is None else load_delay
+        if delay > 0:
+            time.sleep(delay)
+        return page
 
     def close(self):
         if self.page is not None:
@@ -67,9 +95,7 @@ class DouyinBrowserClient:
         return page
 
     def ensure_login(self):
-        page = self.start()
-        page.get(self.config.home_url)
-        time.sleep(self.config.page_load_delay)
+        page = self._open_page(self.config.home_url, self.config.page_load_delay)
         if page.ele("text=登录", timeout=2):
             print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
             input("登录成功并刷新页面后，按回车继续...")
@@ -90,8 +116,7 @@ class DouyinBrowserClient:
         page = self.start()
         print("📜 正在抓取抖音关注列表...")
         page.listen.start(self.config.following_api_pattern)
-        page.get(self.config.self_user_url)
-        time.sleep(self.config.page_load_delay)
+        self._open_page(self.config.self_user_url, self.config.page_load_delay)
         if self._page_has_rate_limit():
             raise DouyinRateLimitError("抖音关注列表页触发速率限制")
 
@@ -113,18 +138,33 @@ class DouyinBrowserClient:
         stagnant_rounds = 0
         has_more = True
 
-        with create_progress(transient=True) as progress:
+        with create_progress(transient=False) as progress:
             task_id = progress.add_task("抓取抖音关注列表", total=50)
             dynamic_total = 50
             while has_more and empty_rounds < self.config.empty_round_limit:
                 if self._page_has_rate_limit():
                     raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+                progress.update(
+                    task_id,
+                    total=dynamic_total,
+                    completed=len(followings),
+                    description=f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | 正在等待新数据包",
+                )
                 self._scroll_active_containers()
                 packets = self._drain_listen_packets(timeout=self.config.packet_timeout)
                 if not packets:
                     if self._page_has_rate_limit():
                         raise DouyinRateLimitError("抖音关注列表页触发速率限制")
                     empty_rounds += 1
+                    progress.update(
+                        task_id,
+                        total=dynamic_total,
+                        completed=len(followings),
+                        description=(
+                            f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | "
+                            f"本轮无新增 ({empty_rounds}/{self.config.empty_round_limit})"
+                        ),
+                    )
                     continue
 
                 empty_rounds = 0
@@ -164,13 +204,23 @@ class DouyinBrowserClient:
                     task_id,
                     total=dynamic_total,
                     completed=len(followings),
-                    description=f"抓取抖音关注列表 ({len(followings)})",
+                    description=(
+                        f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | "
+                        f"本轮新增 {new_users} 位"
+                    ),
                 )
 
                 if stagnant_rounds >= self.config.empty_round_limit:
+                    progress.update(
+                        task_id,
+                        total=dynamic_total,
+                        completed=len(followings),
+                        description=f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | 连续无新增，准备结束",
+                    )
                     break
 
         page.listen.stop()
+        self.rate_limiter.record_success()
         print(f"✅ 成功获取 {len(followings)} 位抖音关注博主")
         return followings
 
@@ -186,10 +236,9 @@ class DouyinBrowserClient:
             videos_by_id = {}
             empty_rounds = 0
             stagnant_rounds = 0
-            page.listen.start(self.config.post_api_pattern)
+            page.listen.start([self.config.post_api_pattern, self.config.video_detail_api_pattern])
             try:
-                page.get(user["homepage"])
-                time.sleep(self.config.video_page_load_delay)
+                self._open_page(user["homepage"], self.config.video_page_load_delay)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
@@ -211,7 +260,7 @@ class DouyinBrowserClient:
                             if self._packet_has_service_error(data):
                                 raise RuntimeError("service_error")
                             self._update_user_profile_from_packet(user, data)
-                            for aweme in data.get("aweme_list") or []:
+                            for aweme in self._extract_awemes_from_packet_body(data):
                                 video = self._build_video_row(user, aweme)
                                 if video and video["aweme_id"] not in videos_by_id:
                                     new_videos += 1
@@ -246,20 +295,39 @@ class DouyinBrowserClient:
                     key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
                     reverse=True,
                 )
+                if (not videos or (limit and len(videos) < limit)) and self.rate_limiter.current_fallback_max_ids() > 0:
+                    fallback_videos = self._collect_videos_by_browser_fallback(
+                        user,
+                        limit,
+                        existing_ids=set(videos_by_id),
+                    )
+                    for video in fallback_videos:
+                        videos_by_id[video["aweme_id"]] = video
+                    videos = sorted(
+                        videos_by_id.values(),
+                        key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
+                        reverse=True,
+                    )
                 if limit:
                     videos = videos[:limit]
                 self.service_error_streak = 0
                 self.rate_limit_streak = 0
-                time.sleep(self.config.user_request_interval + random.uniform(0, 0.2))
+                self.rate_limiter.record_success()
+                time.sleep(self.rate_limiter.scaled_seconds(self.config.user_request_interval) + random.uniform(0, 0.2))
                 print(f"   ✅ 共获取 {user['nickname']} 的 {len(videos)} 个视频")
                 return videos
             except RuntimeError as exc:
                 if str(exc) == "rate_limit":
                     self.rate_limit_streak += 1
+                    self.rate_limiter.record_rate_limit()
+                    self._emit_conservative_mode_notice_if_needed()
                     if attempt >= self.config.video_page_retry_count:
+                        fallback_videos = self._collect_videos_by_browser_fallback(user, limit)
+                        if fallback_videos:
+                            return fallback_videos[:limit] if limit else fallback_videos
                         raise DouyinRateLimitError("页面触发速率限制，重试后仍无法恢复")
 
-                    wait_seconds = self.config.rate_limit_retry_wait * attempt
+                    wait_seconds = self.config.rate_limit_retry_wait + self._compute_backoff_seconds(attempt)
                     if self.rate_limit_streak >= 2:
                         wait_seconds += self.config.rate_limit_long_cooldown
                     self._recover_from_rate_limit(user, wait_seconds)
@@ -268,10 +336,15 @@ class DouyinBrowserClient:
                 if str(exc) != "service_error":
                     raise
                 self.service_error_streak += 1
+                self.rate_limiter.record_service_error()
+                self._emit_conservative_mode_notice_if_needed()
                 if attempt >= self.config.video_page_retry_count:
+                    fallback_videos = self._collect_videos_by_browser_fallback(user, limit)
+                    if fallback_videos:
+                        return fallback_videos[:limit] if limit else fallback_videos
                     raise DouyinServiceError("页面出现服务异常，重试后仍无法恢复")
 
-                wait_seconds = self.config.service_error_retry_wait * attempt
+                wait_seconds = self.config.service_error_retry_wait + self._compute_backoff_seconds(attempt)
                 if self.service_error_streak >= 3:
                     wait_seconds += self.config.service_error_long_cooldown
                 self._recover_from_service_error(user, wait_seconds)
@@ -289,6 +362,100 @@ class DouyinBrowserClient:
         except Exception:
             pass
         return {}
+
+    @staticmethod
+    def _extract_awemes_from_packet_body(data):
+        if not isinstance(data, dict):
+            return []
+        aweme_list = data.get("aweme_list")
+        if isinstance(aweme_list, list):
+            return aweme_list
+
+        for key in ["aweme_detail", "detail", "item", "aweme"]:
+            candidate = data.get(key)
+            if isinstance(candidate, dict) and candidate.get("aweme_id"):
+                return [candidate]
+
+        inner_data = data.get("data")
+        if isinstance(inner_data, dict):
+            inner_list = inner_data.get("aweme_list")
+            if isinstance(inner_list, list):
+                return inner_list
+            for key in ["aweme_detail", "detail", "item", "aweme"]:
+                candidate = inner_data.get(key)
+                if isinstance(candidate, dict) and candidate.get("aweme_id"):
+                    return [candidate]
+        return []
+
+    def _collect_visible_aweme_ids_from_dom(self, limit=None):
+        result = self.start().run_js(
+            """
+            const anchors = Array.from(document.querySelectorAll('a[href*="/video/"]'));
+            const ids = [];
+            const seen = new Set();
+            for (const anchor of anchors) {
+              const href = anchor.getAttribute('href') || '';
+              const match = href.match(/\\/video\\/(\\d+)/);
+              if (!match) continue;
+              const awemeId = match[1];
+              if (seen.has(awemeId)) continue;
+              const rect = anchor.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) continue;
+              seen.add(awemeId);
+              ids.push(awemeId);
+            }
+            return ids;
+            """
+        )
+        aweme_ids = result if isinstance(result, list) else []
+        if limit:
+            aweme_ids = aweme_ids[:limit]
+        return [str(aweme_id).strip() for aweme_id in aweme_ids if str(aweme_id).strip()]
+
+    def _fetch_video_detail_by_aweme_id(self, user, aweme_id):
+        page = self.start()
+        page.listen.start([self.config.video_detail_api_pattern, self.config.post_api_pattern])
+        try:
+            self._open_page(f"https://www.douyin.com/video/{aweme_id}", self.config.video_page_load_delay)
+            packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
+            for packet in packets:
+                data = self._extract_packet_body(packet)
+                self._update_user_profile_from_packet(user, data)
+                for aweme in self._extract_awemes_from_packet_body(data):
+                    if str(aweme.get("aweme_id") or "") == str(aweme_id):
+                        return self._build_video_row(user, aweme)
+        finally:
+            try:
+                page.listen.stop()
+            except Exception:
+                pass
+        return None
+
+    def _collect_videos_by_browser_fallback(self, user, limit=None, existing_ids=None):
+        existing_ids = {str(item) for item in (existing_ids or set()) if str(item)}
+        max_ids = self.rate_limiter.current_fallback_max_ids()
+        if limit:
+            max_ids = min(max_ids, int(limit))
+        candidate_ids = [
+            aweme_id
+            for aweme_id in self._collect_visible_aweme_ids_from_dom(limit=max_ids)
+            if aweme_id not in existing_ids
+        ]
+        recovered = []
+        for index, aweme_id in enumerate(candidate_ids, 1):
+            try:
+                video = self._fetch_video_detail_by_aweme_id(user, aweme_id)
+            except Exception:
+                video = None
+            if video:
+                recovered.append(video)
+            if limit and len(recovered) >= limit:
+                break
+            if index < len(candidate_ids):
+                time.sleep(self.rate_limiter.scaled_seconds(min(self.config.user_request_interval, 0.8)) + random.uniform(0.1, 0.3))
+        if recovered:
+            print(f"   ↩ 浏览器兜底补回 {user['nickname']} 的 {len(recovered)} 个视频详情")
+        return recovered
 
     def _page_has_service_error(self):
         try:
@@ -325,14 +492,13 @@ class DouyinBrowserClient:
             wait_with_progress(wait_seconds, f"抖音服务异常恢复冷却：{user['nickname']}")
             page = self.start()
         try:
+            self._respect_request_rate()
             page.refresh()
             time.sleep(self.config.video_page_load_delay + 1)
             if self._page_has_service_error():
-                page.get(user["homepage"])
-                time.sleep(self.config.video_page_load_delay + 1)
+                self._open_page(user["homepage"], self.config.video_page_load_delay + 1)
         except Exception:
-            page.get(user["homepage"])
-            time.sleep(self.config.video_page_load_delay + 1)
+            self._open_page(user["homepage"], self.config.video_page_load_delay + 1)
 
     def _recover_from_rate_limit(self, user, wait_seconds):
         if self.rate_limit_streak >= 2:
@@ -341,12 +507,10 @@ class DouyinBrowserClient:
             wait_with_progress(wait_seconds, f"抖音速率限制冷却：{user['nickname']}")
             page = self.start()
         try:
-            page.get(user["homepage"])
-            time.sleep(self.config.video_page_load_delay + 2)
+            self._open_page(user["homepage"], self.config.video_page_load_delay + 2)
         except Exception:
             page = self.restart(wait_seconds)
-            page.get(user["homepage"])
-            time.sleep(self.config.video_page_load_delay + 2)
+            self._open_page(user["homepage"], self.config.video_page_load_delay + 2)
 
     def _scroll_active_containers(self):
         self.start().run_js(
@@ -424,30 +588,30 @@ class DouyinBrowserClient:
     def _extract_follower_count(self, data):
         if not isinstance(data, dict):
             return None
-        return self._find_numeric_value(
+        return self._find_numeric_value_from_profile_candidates(
             data,
-            {
+            [
+                "mplatform_followers_count",
                 "follower_count",
                 "fans_count",
-                "fans",
-                "mplatform_followers_count",
                 "followerCount",
-            },
+                "fansCount",
+            ],
         )
 
     def _extract_aweme_count(self, data):
         if not isinstance(data, dict):
             return None
-        return self._find_numeric_value(
+        return self._find_numeric_value_from_profile_candidates(
             data,
-            {
+            [
                 "aweme_count",
                 "awemeCount",
                 "media_count",
                 "mediaCount",
                 "video_count",
                 "videoCount",
-            },
+            ],
         )
 
     def _extract_latest_publish_timestamp(self, data):
@@ -476,9 +640,9 @@ class DouyinBrowserClient:
     def _extract_remark_name(self, data):
         if not isinstance(data, dict):
             return ""
-        return self._find_text_value(
+        return self._find_text_value_from_profile_candidates(
             data,
-            {
+            [
                 "remark_name",
                 "remarkName",
                 "remark",
@@ -489,7 +653,7 @@ class DouyinBrowserClient:
                 "noteName",
                 "follow_remark_name",
                 "followRemarkName",
-            },
+            ],
         )
 
     def _find_numeric_value(self, data, key_candidates):
@@ -508,6 +672,14 @@ class DouyinBrowserClient:
                 found = self._find_numeric_value(item, key_candidates)
                 if found is not None:
                     return found
+        return None
+
+    def _find_numeric_value_from_profile_candidates(self, data, key_candidates):
+        for candidate in self._iter_profile_candidate_dicts(data):
+            for key in key_candidates:
+                parsed = parse_view_count(candidate.get(key))
+                if parsed:
+                    return parsed
         return None
 
     def _find_timestamp_value(self, data, key_candidates):
@@ -546,6 +718,77 @@ class DouyinBrowserClient:
                     return found
         return ""
 
+    def _find_text_value_from_profile_candidates(self, data, key_candidates):
+        for candidate in self._iter_profile_candidate_dicts(data):
+            for key in key_candidates:
+                value = candidate.get(key)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if text:
+                        return text
+        return ""
+
+    @staticmethod
+    def _iter_profile_candidate_dicts(data):
+        if not isinstance(data, dict):
+            return []
+
+        preferred_child_keys = [
+            "user",
+            "user_info",
+            "author",
+            "author_user_info",
+            "follow_user",
+            "follow_info",
+            "profile",
+            "user_detail",
+            "user_data",
+            "card_data",
+            "sec_user",
+        ]
+
+        candidates = []
+        seen_ids = set()
+
+        def add_candidate(candidate):
+            if not isinstance(candidate, dict):
+                return
+            object_id = id(candidate)
+            if object_id in seen_ids:
+                return
+            seen_ids.add(object_id)
+            candidates.append(candidate)
+
+        add_candidate(data)
+        for key in preferred_child_keys:
+            value = data.get(key)
+            if isinstance(value, dict):
+                add_candidate(value)
+            elif isinstance(value, list):
+                for item in value:
+                    add_candidate(item)
+
+        # 一些接口会把真正的用户对象包在 data/list 这种通用键下，这里只展开一层，
+        # 避免像以前那样把整包响应里的无关统计值误识别成粉丝数。
+        for key in ["data", "list"]:
+            value = data.get(key)
+            if isinstance(value, dict):
+                add_candidate(value)
+                for child_key in preferred_child_keys:
+                    child = value.get(child_key)
+                    if isinstance(child, dict):
+                        add_candidate(child)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        add_candidate(item)
+                        for child_key in preferred_child_keys:
+                            child = item.get(child_key)
+                            if isinstance(child, dict):
+                                add_candidate(child)
+
+        return candidates
+
     def unfollow_users_by_homepages(self, homepages, on_unfollowed=None):
         normalized_homepages = []
         seen_homepages = set()
@@ -583,7 +826,7 @@ class DouyinBrowserClient:
                 status = result.get("status")
                 if status in {"failed", "unknown"}:
                     consecutive_failures += 1
-                    cooldown = self.config.unfollow_failure_cooldown
+                    cooldown = self.rate_limiter.scaled_seconds(self.config.unfollow_failure_cooldown)
                     print(f"   ⚠️  检测到异常结果: {result.get('message', '未知原因')}")
                     wait_with_progress(cooldown, "抖音取消关注异常冷却中")
                 else:
@@ -593,14 +836,14 @@ class DouyinBrowserClient:
                         self.config.user_request_interval,
                         1.0,
                     )
-                    time.sleep(base_interval + random.uniform(0.2, 0.8))
+                    time.sleep(self.rate_limiter.scaled_seconds(base_interval) + random.uniform(0.2, 0.8))
 
                 if (
                     self.config.unfollow_batch_size > 0
                     and index % self.config.unfollow_batch_size == 0
                     and index < len(normalized_homepages)
                 ):
-                    cooldown = self.config.unfollow_batch_cooldown
+                    cooldown = self.rate_limiter.scaled_seconds(self.config.unfollow_batch_cooldown)
                     wait_with_progress(cooldown, "抖音取消关注批次冷却中")
 
                 if (
@@ -612,7 +855,7 @@ class DouyinBrowserClient:
                     self.restart(5)
 
                 if consecutive_failures >= 2:
-                    extra_cooldown = self.config.unfollow_failure_cooldown
+                    extra_cooldown = self.rate_limiter.scaled_seconds(self.config.unfollow_failure_cooldown)
                     print("   ⚠️  连续异常较多，准备额外冷却并重启会话...")
                     self.restart(extra_cooldown)
                     consecutive_failures = 0
@@ -621,13 +864,11 @@ class DouyinBrowserClient:
         return results
 
     def unfollow_user_by_homepage(self, homepage):
-        page = self.start()
         homepage = self.normalize_homepage_url(homepage)
         if not homepage:
             return {"homepage": homepage, "status": "invalid", "message": "主页链接无效"}
 
-        page.get(homepage)
-        time.sleep(self.config.page_load_delay + 1)
+        self._open_page(homepage, self.config.page_load_delay + 1)
 
         status = self._detect_profile_follow_status()
         if status == "not_following":

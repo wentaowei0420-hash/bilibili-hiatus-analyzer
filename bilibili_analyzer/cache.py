@@ -1,7 +1,9 @@
+import hashlib
 import json
 import time
-import hashlib
 from datetime import datetime
+
+from common.platform_store import upsert_cache_entries
 
 from .logging_utils import smart_print as print
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date, UNKNOWN_DATE
@@ -18,7 +20,7 @@ class CacheStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            print(f"⚠️  读取进度文件失败，将从头开始: {exc}")
+            print(f"读取进度文件失败，将从头开始: {exc}")
             return {}
 
         raw_results = data.get("results_by_mid", {})
@@ -35,10 +37,19 @@ class CacheStore:
         return results
 
     def save_precise_progress(self, results_by_mid):
-        self._write_json(
-            self.config.progress_json,
-            {"saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "results_by_mid": results_by_mid},
-            "保存进度文件失败",
+        payload = {
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "results_by_mid": results_by_mid,
+        }
+        self._write_json(self.config.progress_json, payload, "保存进度文件失败")
+        upsert_cache_entries(
+            self.config.export_store_db,
+            "bilibili",
+            results_by_mid,
+            cache_type="precise_progress",
+            source_mode="precise",
+            uploader_id_getter=lambda key, payload: ((payload or {}).get("uploader_id") or key),
+            cached_at_getter=lambda payload: (payload or {}).get("cached_at", ""),
         )
 
     def load_video_duration_progress(self):
@@ -48,7 +59,7 @@ class CacheStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            print(f"⚠️  读取视频时长分析进度失败，将重新抓取: {exc}")
+            print(f"读取视频时长分析进度失败，将重新抓取: {exc}")
             return {}
 
         if data.get("storage") == "split":
@@ -58,9 +69,7 @@ class CacheStore:
             )
 
         ups = data.get("ups", {})
-        if not isinstance(ups, dict):
-            return {}
-        return ups
+        return ups if isinstance(ups, dict) else {}
 
     def save_video_duration_progress(self, progress):
         self._write_split_progress(
@@ -68,6 +77,15 @@ class CacheStore:
             self.config.video_duration_progress_dir,
             progress,
             "保存视频时长分析进度失败",
+        )
+        upsert_cache_entries(
+            self.config.export_store_db,
+            "bilibili",
+            progress,
+            cache_type="video_duration_progress",
+            source_mode="analysis",
+            uploader_id_getter=lambda key, payload: (((payload or {}).get("following", {}) or {}).get("mid") or key),
+            cached_at_getter=lambda payload: (payload or {}).get("cached_at", ""),
         )
 
     def is_cache_expired(self, cached_at, max_age_hours):
@@ -110,9 +128,7 @@ class CacheStore:
         if not isinstance(summary, dict) or not summary:
             return True
 
-        if self.is_cache_expired(
-            progress_entry.get("cached_at"), self.config.video_duration_cache_max_age_hours
-        ):
+        if self.is_cache_expired(progress_entry.get("cached_at"), self.config.video_duration_cache_max_age_hours):
             return True
 
         following_mtime = normalize_timestamp(following.get("mtime"))
@@ -152,7 +168,7 @@ class CacheStore:
             with path.open("w", encoding="utf-8") as progress_file:
                 json.dump(payload, progress_file, ensure_ascii=False, indent=2)
         except Exception as exc:
-            print(f"⚠️  {error_message}: {exc}")
+            print(f"{error_message}: {exc}")
 
     @staticmethod
     def _entry_filename(key):
@@ -172,7 +188,7 @@ class CacheStore:
                 with entry_path.open("r", encoding="utf-8") as entry_file:
                     progress[key] = json.load(entry_file)
             except Exception as exc:
-                print(f"⚠️  读取缓存分片失败({key})，将跳过该分片: {exc}")
+                print(f"读取缓存分片失败({key})，将跳过该分片: {exc}")
         return progress
 
     def _write_split_progress(self, manifest_path, directory, progress, error_message):
@@ -202,4 +218,4 @@ class CacheStore:
                 error_message,
             )
         except Exception as exc:
-            print(f"⚠️  {error_message}: {exc}")
+            print(f"{error_message}: {exc}")

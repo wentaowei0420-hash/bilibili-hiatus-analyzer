@@ -102,8 +102,14 @@ def calculate_average_update_interval_days(timestamps):
 def parse_view_count(value):
     if value in (None, "", "--"):
         return 0
-    text = str(value).strip().lower().replace(",", "")
+    text = str(value).strip().lower().replace(",", "").replace("+", "")
     try:
+        if text.endswith("亿"):
+            return int(float(text[:-1]) * 100000000)
+        if text.endswith("万"):
+            return int(float(text[:-1]) * 10000)
+        if text.endswith("千"):
+            return int(float(text[:-1]) * 1000)
         if text.endswith("w"):
             return int(float(text[:-1]) * 10000)
         return int(float(text))

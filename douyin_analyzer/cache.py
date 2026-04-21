@@ -2,8 +2,11 @@ import hashlib
 import json
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 from bilibili_analyzer.logging_utils import smart_print as print
+from common.export_store import delete_rows_by_values
+from common.platform_store import delete_uploader_rows, upsert_cache_entries
 
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date
 
@@ -19,7 +22,7 @@ class CacheStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            print(f"⚠️  读取抖音关注列表缓存失败，将重新抓取: {exc}")
+            print(f"读取抖音关注列表缓存失败，将重新抓取: {exc}")
             return {}
 
         if data.get("storage") == "split":
@@ -51,9 +54,7 @@ class CacheStore:
     def load_followings_cache(self):
         data = self.load_followings_cache_payload()
         followings = data.get("followings", [])
-        if not isinstance(followings, list):
-            return []
-        return followings
+        return followings if isinstance(followings, list) else []
 
     def save_followings_cache(self, followings):
         payload = self._build_followings_split_payload(followings)
@@ -63,6 +64,66 @@ class CacheStore:
             payload,
             "保存抖音关注列表缓存失败",
         )
+        entries = payload.get("entries", {})
+        upsert_cache_entries(
+            self.config.export_store_db,
+            "douyin",
+            entries,
+            cache_type="followings",
+            source_mode="followings",
+            uploader_id_getter=lambda key, payload: ((payload or {}).get("sec_uid") or key),
+            cached_at_getter=lambda payload: (payload or {}).get("latest_publish_timestamp", ""),
+        )
+
+    def remove_unfollowed_user(self, homepage="", uploader_id=""):
+        normalized_homepage = self._normalize_homepage_url(homepage)
+        target_uploader_id = str(uploader_id or "").strip()
+        removed_uids = set()
+
+        followings_payload = self.load_followings_cache_payload()
+        followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
+        if isinstance(followings, list) and followings:
+            kept_followings = []
+            for following in followings:
+                if not isinstance(following, dict):
+                    kept_followings.append(following)
+                    continue
+                current_uid = str(following.get("sec_uid") or "").strip()
+                current_homepage = self._normalize_homepage_url(following.get("homepage", ""))
+                matched = (
+                    (target_uploader_id and current_uid == target_uploader_id)
+                    or (normalized_homepage and current_homepage == normalized_homepage)
+                )
+                if matched:
+                    if current_uid:
+                        removed_uids.add(current_uid)
+                    continue
+                kept_followings.append(following)
+
+            if len(kept_followings) != len(followings):
+                self.save_followings_cache(kept_followings)
+
+        if normalized_homepage and not removed_uids:
+            progress = self.load_progress()
+            for uid, entry in (progress or {}).items():
+                user = (entry or {}).get("user", {}) if isinstance(entry, dict) else {}
+                current_homepage = self._normalize_homepage_url(user.get("homepage", ""))
+                if current_homepage == normalized_homepage:
+                    removed_uids.add(str(uid).strip())
+
+        if removed_uids:
+            progress = self.load_progress()
+            if isinstance(progress, dict):
+                updated_progress = {
+                    key: value
+                    for key, value in progress.items()
+                    if str(key).strip() not in removed_uids
+                }
+                if len(updated_progress) != len(progress):
+                    self.save_progress(updated_progress)
+            self._remove_uploader_rows_from_store(removed_uids)
+
+        return sorted(removed_uids)
 
     def is_followings_cache_expired(self):
         try:
@@ -71,7 +132,7 @@ class CacheStore:
         except FileNotFoundError:
             return True
         except Exception as exc:
-            print(f"⚠️  读取抖音关注列表缓存时间失败，将重新抓取: {exc}")
+            print(f"读取抖音关注列表缓存时间失败，将重新抓取: {exc}")
             return True
 
         cached_at = data.get("cached_at")
@@ -90,16 +151,14 @@ class CacheStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            print(f"⚠️  读取抖音进度缓存失败，将重新抓取: {exc}")
+            print(f"读取抖音进度缓存失败，将重新抓取: {exc}")
             return {}
 
         if data.get("storage") == "split":
             return self._load_split_progress(self.config.progress_dir, data.get("keys", []))
 
         ups = data.get("ups", {})
-        if not isinstance(ups, dict):
-            return {}
-        return ups
+        return ups if isinstance(ups, dict) else {}
 
     def save_progress(self, progress):
         trimmed_progress = {
@@ -112,6 +171,15 @@ class CacheStore:
             trimmed_progress,
             "保存抖音进度缓存失败",
         )
+        upsert_cache_entries(
+            self.config.export_store_db,
+            "douyin",
+            trimmed_progress,
+            cache_type="progress",
+            source_mode=self.config.fetch_mode,
+            uploader_id_getter=lambda key, payload: (((payload or {}).get("user", {}) or {}).get("sec_uid") or key),
+            cached_at_getter=lambda payload: (payload or {}).get("cached_at", ""),
+        )
 
     def is_cache_expired(self, cached_at):
         cached_timestamp = normalize_timestamp(cached_at)
@@ -121,9 +189,7 @@ class CacheStore:
 
     def should_refresh_cache(self, current_user, progress_entry, return_reason=False):
         def _result(needs_refresh, reason=None):
-            if return_reason:
-                return needs_refresh, reason
-            return needs_refresh
+            return (needs_refresh, reason) if return_reason else needs_refresh
 
         if not isinstance(progress_entry, dict):
             return _result(True, "missing_entry")
@@ -132,6 +198,7 @@ class CacheStore:
         summary = progress_entry.get("summary", {})
         if not isinstance(summary, dict) or "total_videos" not in summary:
             return _result(True, "missing_summary")
+
         current_user = current_user if isinstance(current_user, dict) else {}
         cached_user = progress_entry.get("user", {})
         if not isinstance(cached_user, dict):
@@ -143,12 +210,8 @@ class CacheStore:
             if int(current_aweme_count) != int(cached_aweme_count):
                 return _result(True, "aweme_count_changed")
 
-        current_latest_publish_timestamp = normalize_timestamp(
-            current_user.get("latest_publish_timestamp")
-        )
-        cached_latest_publish_timestamp = normalize_timestamp(
-            summary.get("latest_publish_timestamp")
-        )
+        current_latest_publish_timestamp = normalize_timestamp(current_user.get("latest_publish_timestamp"))
+        cached_latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
         if current_latest_publish_timestamp and (
             not cached_latest_publish_timestamp
             or current_latest_publish_timestamp > cached_latest_publish_timestamp
@@ -176,7 +239,6 @@ class CacheStore:
     def _build_followings_split_payload(self, followings):
         keys = []
         entries = {}
-
         for index, following in enumerate(followings or []):
             if isinstance(following, dict):
                 key = str(following.get("sec_uid") or f"__index__:{index}")
@@ -184,7 +246,6 @@ class CacheStore:
                 key = f"__index__:{index}"
             keys.append(key)
             entries[key] = following
-
         return {
             "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "cached_at": int(time.time()),
@@ -197,7 +258,6 @@ class CacheStore:
         followings = []
         if not directory.exists():
             return followings
-
         for key in keys:
             entry_path = directory / self._entry_filename(key)
             if not entry_path.exists():
@@ -206,14 +266,13 @@ class CacheStore:
                 with entry_path.open("r", encoding="utf-8") as entry_file:
                     followings.append(json.load(entry_file))
             except Exception as exc:
-                print(f"⚠️  读取抖音关注列表分片失败({key})，将跳过该分片: {exc}")
+                print(f"读取抖音关注列表分片失败({key})，将跳过该分片: {exc}")
         return followings
 
     def _load_split_progress(self, directory, keys):
         progress = {}
         if not directory.exists():
             return progress
-
         for key in keys:
             entry_path = directory / self._entry_filename(key)
             if not entry_path.exists():
@@ -222,17 +281,15 @@ class CacheStore:
                 with entry_path.open("r", encoding="utf-8") as entry_file:
                     progress[key] = json.load(entry_file)
             except Exception as exc:
-                print(f"⚠️  读取抖音缓存分片失败({key})，将跳过该分片: {exc}")
+                print(f"读取抖音缓存分片失败({key})，将跳过该分片: {exc}")
         return progress
 
     def _trim_progress_entry(self, entry):
         if not isinstance(entry, dict):
             return entry
-
         trimmed_entry = dict(entry)
         if self.config.fetch_mode == "full":
             return trimmed_entry
-
         videos = trimmed_entry.get("videos")
         if isinstance(videos, list) and len(videos) > self.config.progress_trim_video_limit:
             trimmed_entry["videos"] = videos[: self.config.progress_trim_video_limit]
@@ -244,7 +301,6 @@ class CacheStore:
             keys = list(payload.get("keys", []))
             entries = payload.get("entries", {})
             expected_filenames = set()
-
             for key in keys:
                 entry_filename = self._entry_filename(key)
                 expected_filenames.add(entry_filename)
@@ -266,14 +322,13 @@ class CacheStore:
             with manifest_path.open("w", encoding="utf-8") as cache_file:
                 json.dump(manifest_payload, cache_file, ensure_ascii=False, indent=2)
         except Exception as exc:
-            print(f"⚠️  {error_message}: {exc}")
+            print(f"{error_message}: {exc}")
 
     def _write_split_progress(self, manifest_path, directory, progress, error_message):
         try:
             directory.mkdir(parents=True, exist_ok=True)
             keys = sorted(progress.keys(), key=str)
             expected_filenames = set()
-
             for key in keys:
                 entry_filename = self._entry_filename(key)
                 expected_filenames.add(entry_filename)
@@ -294,4 +349,32 @@ class CacheStore:
             with manifest_path.open("w", encoding="utf-8") as progress_file:
                 json.dump(manifest_payload, progress_file, ensure_ascii=False, indent=2)
         except Exception as exc:
-            print(f"⚠️  {error_message}: {exc}")
+            print(f"{error_message}: {exc}")
+
+    @staticmethod
+    def _normalize_homepage_url(homepage):
+        homepage = str(homepage or "").strip()
+        if not homepage:
+            return ""
+        if not homepage.startswith(("http://", "https://")):
+            return homepage
+        parsed = urlparse(homepage)
+        if not parsed.netloc:
+            return ""
+        normalized_path = parsed.path.rstrip("/")
+        if not normalized_path:
+            return ""
+        return f"https://{parsed.netloc}{normalized_path}"
+
+    def _remove_uploader_rows_from_store(self, uploader_ids):
+        uploader_ids = sorted({str(item).strip() for item in (uploader_ids or []) if str(item).strip()})
+        if not uploader_ids:
+            return
+
+        delete_uploader_rows(self.config.export_store_db, "douyin", uploader_ids)
+        for table_name in [
+            self.config.export_main_table,
+            self.config.export_analysis_table,
+            self.config.export_uid_analysis_table,
+        ]:
+            delete_rows_by_values(self.config.export_store_db, table_name, uploader_ids)
