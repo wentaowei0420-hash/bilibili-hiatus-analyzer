@@ -1,6 +1,6 @@
 requests>=2.31.0
 pandas>=2.0.0
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
 loguru>=0.7.2
 DrissionPage>=4.1.0
 playwright>=1.52.0
