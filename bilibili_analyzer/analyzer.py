@@ -38,10 +38,16 @@ from .utils import (
 
 
 class BilibiliHiatusAnalyzer:
-    def __init__(self, config, api, cache_store):
+    def __init__(self, config, api, cache_store, max_followings=None):
         self.config = config
         self.api = api
         self.cache_store = cache_store
+        try:
+            self.max_followings = int(max_followings) if max_followings is not None else None
+        except (TypeError, ValueError):
+            self.max_followings = None
+        if self.max_followings is not None and self.max_followings <= 0:
+            self.max_followings = None
 
     @staticmethod
     def _safe_int(value, default=0):
@@ -605,6 +611,14 @@ class BilibiliHiatusAnalyzer:
             )
             following["follower_count"] = relation_stat.get("follower_count", 0)
         followings = self.sort_followings_by_follower_count(followings)
+        total_followings = len(followings)
+        partial_run = self.max_followings is not None and self.max_followings < total_followings
+        if partial_run:
+            followings = followings[: self.max_followings]
+            print(
+                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                f"本轮仅处理粉丝数前 {len(followings)} 位"
+            )
         print("📈 已按粉丝数从高到低排序后开始处理。")
 
         cached_video_results = self.cache_store.load_precise_progress()
@@ -712,7 +726,7 @@ class BilibiliHiatusAnalyzer:
 
         results.sort(key=lambda item: item["days_since_update"], reverse=True)
         self.display_top_results(results)
-        save_to_csv(self.config, results)
+        save_to_csv(self.config, results, merge_existing=partial_run)
         get_console().print(
             create_summary_panel(
                 "🗂️ B站主榜输出",
@@ -728,7 +742,7 @@ class BilibiliHiatusAnalyzer:
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
             self.enrich_results_with_profile_and_counts(results, duration_progress, followings)
-            save_to_csv(self.config, results)
+            save_to_csv(self.config, results, merge_existing=partial_run)
             get_console().print(
                 create_summary_panel(
                     "🔄 B站主榜回填完成",

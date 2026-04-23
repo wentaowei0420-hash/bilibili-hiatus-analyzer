@@ -119,6 +119,51 @@ def write_rows_to_table(db_path, table_name, fieldnames, headers, rows):
     write_dataframe_to_table(db_path, table_name, dataframe)
 
 
+def upsert_rows_to_table(db_path, table_name, fieldnames, headers, rows, key_field="uploader_id"):
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    incoming = _normalize_rows(fieldnames, headers, rows)
+    if incoming.empty:
+        return
+
+    key_column = headers.get(key_field, key_field)
+    if key_column not in incoming.columns:
+        write_dataframe_to_table(db_path, table_name, incoming)
+        return
+
+    incoming[key_column] = incoming[key_column].astype(str).str.strip()
+    incoming = incoming[incoming[key_column] != ""]
+    if incoming.empty:
+        return
+
+    existing = read_table_to_dataframe(db_path, table_name)
+    ordered_columns = [headers[field] for field in fieldnames]
+    if existing is None or existing.empty:
+        merged = incoming.reindex(columns=ordered_columns)
+    else:
+        existing = existing.copy()
+        if key_column not in existing.columns:
+            merged = incoming.reindex(columns=ordered_columns)
+        else:
+            existing[key_column] = existing[key_column].astype(str).str.strip()
+            all_columns = ordered_columns + [
+                column for column in existing.columns if column not in ordered_columns
+            ]
+            merged = pd.concat(
+                [
+                    existing.reindex(columns=all_columns),
+                    incoming.reindex(columns=all_columns),
+                ],
+                ignore_index=True,
+            )
+            merged = merged[merged[key_column].astype(str).str.strip() != ""]
+            merged = merged.drop_duplicates(subset=[key_column], keep="last")
+            merged = merged.reindex(columns=all_columns)
+
+    write_dataframe_to_table(db_path, table_name, merged)
+
+
 def read_table_to_dataframe(db_path, table_name):
     db_path = Path(db_path)
     if not db_path.exists():

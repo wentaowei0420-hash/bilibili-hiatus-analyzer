@@ -6,7 +6,7 @@ from pathlib import Path
 from common.export_store import (
     read_latest_snapshot_to_dataframe,
     read_table_to_dataframe,
-    write_rows_to_table,
+    upsert_rows_to_table,
 )
 from common.platform_store import (
     replace_video_rows_for_uploader,
@@ -264,12 +264,13 @@ def write_uid_analysis_output(config, analysis_rows):
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
         writer.writerow(chinese_headers)
         writer.writerows(analysis_rows)
-    write_rows_to_table(
+    upsert_rows_to_table(
         config.export_store_db,
         config.export_uid_analysis_table,
         fieldnames,
         chinese_headers,
         analysis_rows,
+        key_field="uploader_id",
     )
     return analysis_path
 
@@ -358,8 +359,16 @@ def run_cached_feishu_preupload(fetch_mode_override=None):
     return True
 
 
-def run_analysis(trigger_upload=True, fetch_mode_override=None):
-    config = load_analyzer_config(fetch_mode_override=fetch_mode_override)
+def run_analysis(
+    trigger_upload=True,
+    fetch_mode_override=None,
+    max_followings=None,
+    recent_video_limit_override=None,
+):
+    config = load_analyzer_config(
+        fetch_mode_override=fetch_mode_override,
+        recent_video_limit_override=recent_video_limit_override,
+    )
     setup_logging(config.log_dir, "douyin_app")
 
     fetch_mode = (config.fetch_mode or "monitor").strip().lower()
@@ -372,6 +381,7 @@ def run_analysis(trigger_upload=True, fetch_mode_override=None):
         browser_client,
         cache_store,
         upload_callback=run_partial_feishu_upload if enable_partial_upload else None,
+        max_followings=max_followings,
     )
 
     if enable_partial_upload:

@@ -6,7 +6,7 @@ from douyin_analyzer.config import load_analyzer_config as load_douyin_config
 
 
 DOUYIN_FETCH_MODE = "monitor"
-# 可选值: "counts", "monitor", "delta", "full"
+# 可选值: "counts", "verify", "monitor", "delta", "full"
 
 ROOT_DIR = Path(__file__).resolve().parent
 DOUYIN_UNFOLLOW_LIST_PATH = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"

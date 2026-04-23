@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 
 from bilibili_analyzer.logging_utils import smart_print as print
-from common.export_store import write_rows_to_table
+from common.export_store import upsert_rows_to_table, write_rows_to_table
 from common.platform_store import (
     replace_summary_rows,
     replace_video_rows_for_uploader,
@@ -20,7 +20,7 @@ def _mapped_rows(fieldnames, headers, rows):
     return mapped_rows
 
 
-def save_to_csv(config, results):
+def save_to_csv(config, results, merge_existing=False):
     fieldnames = [
         "uploader_name",
         "following_remark",
@@ -60,7 +60,17 @@ def save_to_csv(config, results):
         "data_source": "数据来源",
     }
     _write_csv(config.output_csv, fieldnames, headers, results, "保存抖音排行榜CSV失败")
-    write_rows_to_table(config.export_store_db, config.export_main_table, fieldnames, headers, results)
+    if merge_existing:
+        upsert_rows_to_table(
+            config.export_store_db,
+            config.export_main_table,
+            fieldnames,
+            headers,
+            results,
+            key_field="uploader_id",
+        )
+    else:
+        write_rows_to_table(config.export_store_db, config.export_main_table, fieldnames, headers, results)
     mapped_rows = _mapped_rows(fieldnames, headers, results)
     upsert_creator_rows(config.export_store_db, "douyin", mapped_rows)
     replace_summary_rows(config.export_store_db, "douyin", "main", mapped_rows)
@@ -115,7 +125,7 @@ def save_all_videos_to_csv(config, video_rows):
         )
 
 
-def save_video_duration_analysis_to_csv(config, summary_rows):
+def save_video_duration_analysis_to_csv(config, summary_rows, merge_existing=False):
     fieldnames = [
         "uploader_name",
         "uploader_id",
@@ -157,7 +167,17 @@ def save_video_duration_analysis_to_csv(config, summary_rows):
         "long_video_ratio": "长视频占比",
     }
     _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存抖音视频时长分析CSV失败")
-    write_rows_to_table(config.export_store_db, config.export_analysis_table, fieldnames, headers, summary_rows)
+    if merge_existing:
+        upsert_rows_to_table(
+            config.export_store_db,
+            config.export_analysis_table,
+            fieldnames,
+            headers,
+            summary_rows,
+            key_field="uploader_id",
+        )
+    else:
+        write_rows_to_table(config.export_store_db, config.export_analysis_table, fieldnames, headers, summary_rows)
     replace_summary_rows(
         config.export_store_db,
         "douyin",
@@ -207,6 +227,7 @@ def save_cache_inventory_to_csv(config, cache_rows):
         "cache_modes",
         "last_fetch_mode",
         "has_counts_cache",
+        "has_verify_cache",
         "has_monitor_cache",
         "has_delta_cache",
         "has_full_cache",
@@ -232,6 +253,7 @@ def save_cache_inventory_to_csv(config, cache_rows):
         "cache_modes": "已缓存模式",
         "last_fetch_mode": "最近抓取模式",
         "has_counts_cache": "有counts缓存",
+        "has_verify_cache": "有verify缓存",
         "has_monitor_cache": "有monitor缓存",
         "has_delta_cache": "有delta缓存",
         "has_full_cache": "有full缓存",

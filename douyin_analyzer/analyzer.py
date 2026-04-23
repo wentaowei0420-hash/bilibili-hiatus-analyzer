@@ -1,5 +1,7 @@
 import time
 
+from loguru import logger
+
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.logging_utils import (
     create_progress,
@@ -34,11 +36,17 @@ from .utils import (
 
 
 class DouyinHiatusAnalyzer:
-    def __init__(self, config, browser_client, cache_store, upload_callback=None):
+    def __init__(self, config, browser_client, cache_store, upload_callback=None, max_followings=None):
         self.config = config
         self.browser_client = browser_client
         self.cache_store = cache_store
         self.upload_callback = upload_callback
+        try:
+            self.max_followings = int(max_followings) if max_followings is not None else None
+        except (TypeError, ValueError):
+            self.max_followings = None
+        if self.max_followings is not None and self.max_followings <= 0:
+            self.max_followings = None
 
     @staticmethod
     def sort_followings_by_follower_count(followings):
@@ -58,9 +66,55 @@ class DouyinHiatusAnalyzer:
         return sorted(followings or [], key=follower_sort_key)
 
     def get_fetch_mode(self):
-        if self.config.fetch_mode in {"counts", "monitor", "delta", "full"}:
+        if self.config.fetch_mode in {"counts", "verify", "monitor", "delta", "full"}:
             return self.config.fetch_mode
         return "monitor"
+
+    @staticmethod
+    def modes_requiring_basic_cache():
+        return {"verify", "monitor", "delta", "full"}
+
+    def merge_updated_followings_cache(self, original_followings, updated_users):
+        updates = {
+            str((user or {}).get("sec_uid") or "").strip(): user
+            for user in (updated_users or [])
+            if isinstance(user, dict) and str((user or {}).get("sec_uid") or "").strip()
+        }
+        if not updates:
+            return
+
+        merged = []
+        seen = set()
+        for item in original_followings or []:
+            if not isinstance(item, dict):
+                merged.append(item)
+                continue
+            uid = str(item.get("sec_uid") or "").strip()
+            if uid in updates:
+                merged.append({**item, **updates[uid]})
+                seen.add(uid)
+            else:
+                merged.append(item)
+
+        for uid, user in updates.items():
+            if uid not in seen:
+                merged.append(user)
+
+        self.cache_store.save_followings_cache(merged)
+
+    @staticmethod
+    def _is_following_integrity_error(error):
+        message = str(error or "")
+        integrity_markers = (
+            "主页显示关注",
+            "实际仅抓取到",
+            "但主接口抓取到",
+            "关注列表抓取异常",
+            "关注列表抓取失败",
+            "关注列表页未成功打开",
+            "没有检测到关注列表面板",
+        )
+        return any(marker in message for marker in integrity_markers)
 
     def should_export_duration_analysis(self):
         return self.config.enable_video_duration_analysis and self.get_fetch_mode() == "full"
@@ -514,7 +568,7 @@ class DouyinHiatusAnalyzer:
         if self.summary_has_complete_statistics(summary):
             modes.add("full")
 
-        return {mode for mode in modes if mode in {"counts", "monitor", "delta", "full"}}
+        return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
 
     def build_cached_user(self, followings_by_uid, progress, uid):
         following_user = dict(followings_by_uid.get(uid) or {})
@@ -573,6 +627,7 @@ class DouyinHiatusAnalyzer:
                     "cache_modes": ",".join(cache_modes),
                     "last_fetch_mode": (entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "",
                     "has_counts_cache": "是" if uid in followings_by_uid else "",
+                    "has_verify_cache": "是" if "verify" in cache_modes else "",
                     "has_monitor_cache": "是" if "monitor" in cache_modes else "",
                     "has_delta_cache": "是" if "delta" in cache_modes else "",
                     "has_full_cache": "是" if "full" in cache_modes else "",
@@ -790,25 +845,54 @@ class DouyinHiatusAnalyzer:
         self.browser_client.ensure_login()
         fetch_mode = self.get_fetch_mode()
         cached_followings = self.cache_store.load_followings_cache()
+        logger.info(
+            "Douyin analysis start | mode={} | cached_followings={} | intermediate_upload_interval={}",
+            fetch_mode,
+            len(cached_followings or []),
+            self.config.intermediate_upload_interval_users,
+        )
         # 关注列表决定“当前仍在关注的博主集合”，因此普通运行也必须优先刷新；
         # 否则用户手动取关后，未过期的旧缓存会让已取关博主持续残留在主表中。
-        use_followings_cache = False
+        use_followings_cache = fetch_mode in self.modes_requiring_basic_cache()
 
         if use_followings_cache:
+            if not cached_followings:
+                raise RuntimeError("抖音非基础模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
             followings = cached_followings
             print(
                 f"♻️  已复用 {len(followings)} 位抖音关注列表缓存，"
-                f"{self.config.followings_cache_max_age_hours} 小时内不重新刷新关注页。"
+                "本模式不重新滚动关注列表，将直接按缓存主页链接进入主页。"
+            )
+            logger.info(
+                "Douyin basic followings cache reused | mode={} | cached_rows={}",
+                fetch_mode,
+                len(followings),
             )
         else:
             try:
+                print(
+                    f"🧭 关注列表刷新开始 | 模式={fetch_mode} | "
+                    f"本地关注缓存={len(cached_followings or [])} 条"
+                )
                 followings = self.browser_client.get_followings()
                 if followings:
                     self.cache_store.save_followings_cache(followings)
+                    print(f"🧭 关注列表刷新成功 | 已写入缓存={len(followings)} 条")
+                    logger.info("Douyin followings refreshed | rows={}", len(followings))
             except Exception as exc:
+                if self._is_following_integrity_error(exc):
+                    print(f"❌ 关注列表完整性校验失败，不回退旧缓存，避免未关注博主重新进入表格: {exc}")
+                    logger.error("Douyin followings integrity failed | error={}", exc)
+                    raise
                 if cached_followings:
                     followings = cached_followings
+                    print(f"🧭 关注列表回退缓存 | 缓存条数={len(followings)} | 失败原因={exc}")
                     print(f"⚠️  刷新抖音关注列表失败，已回退到本地缓存继续分析: {exc}")
+                    logger.warning(
+                        "Douyin followings fallback cache used | cached_rows={} | error={}",
+                        len(followings),
+                        exc,
+                    )
                 else:
                     raise
 
@@ -817,6 +901,31 @@ class DouyinHiatusAnalyzer:
             return None
 
         followings = self.sort_followings_by_follower_count(followings)
+        total_followings = len(followings)
+        partial_run = self.max_followings is not None and self.max_followings < total_followings
+        if partial_run:
+            followings = followings[: self.max_followings]
+            print(
+                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                f"本轮仅处理粉丝数前 {len(followings)} 位"
+            )
+            logger.info(
+                "Douyin partial following limit applied | total={} | selected={}",
+                total_followings,
+                len(followings),
+            )
+        if followings:
+            top_user = followings[0] if isinstance(followings[0], dict) else {}
+            print(
+                f"🧭 关注列表准备完成 | 本轮处理={len(followings)} 位 | "
+                f"粉丝最高={top_user.get('nickname', '')}({top_user.get('follower_count', 0)})"
+            )
+            logger.info(
+                "Douyin followings ready | rows={} | top_nickname={} | top_followers={}",
+                len(followings),
+                top_user.get("nickname", ""),
+                top_user.get("follower_count", 0),
+            )
         print("📈 已按粉丝数从高到低排序后开始抓取。")
 
         progress = self.cache_store.load_progress()
@@ -826,6 +935,8 @@ class DouyinHiatusAnalyzer:
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
             print("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
+        elif fetch_mode == "verify":
+            print("🔎 当前为主页校验模式：复用基础缓存主页链接，逐个进入主页校验获赞总数等主页数据。")
         elif fetch_mode == "monitor":
             print(f"🪶 当前为轻量监控模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品。")
         elif fetch_mode == "delta":
@@ -892,9 +1003,9 @@ class DouyinHiatusAnalyzer:
                         )
 
             self.display_counts_results(results)
-            save_to_csv(self.config, results)
+            save_to_csv(self.config, results, merge_existing=partial_run)
             if self.should_export_summary_analysis():
-                save_video_duration_analysis_to_csv(self.config, summary_rows)
+                save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
             save_cache_inventory_to_csv(
                 self.config,
                 self.build_cache_inventory_rows(
@@ -906,9 +1017,133 @@ class DouyinHiatusAnalyzer:
             exported = [self.config.output_csv, self.config.cache_inventory_csv]
             if self.should_export_summary_analysis():
                 exported.append(self.config.video_duration_analysis_csv)
+            logger.info(
+                "Douyin counts finished | followings={} | results={} | summaries={} | exported={}",
+                len(followings),
+                len(results),
+                len(summary_rows),
+                [str(path) for path in exported],
+            )
             print(
                 f"🗂️  抖音 counts 模式已输出：{self._format_output_summary(exported)}，"
                 f"共 {len(results)} 位博主"
+            )
+            return results
+
+        if fetch_mode == "verify":
+            verified_users = []
+            profile_verified_count = 0
+            with create_progress() as progress_bar:
+                task_id = progress_bar.add_task("校验抖音博主主页数据", total=len(followings))
+                for index, user in enumerate(followings, 1):
+                    uid = user.get("sec_uid")
+                    try:
+                        check_stop()
+                    except OperationCancelled:
+                        self.merge_updated_followings_cache(cached_followings, verified_users)
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index - 1,
+                        )
+                        raise
+
+                    entry = progress.get(uid) if isinstance(progress, dict) and uid else None
+                    try:
+                        self.browser_client.refresh_user_profile_from_homepage(user)
+                        verified_users.append(dict(user))
+                        profile_verified_count += 1
+                    except DouyinRateLimitError as exc:
+                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
+                        self.browser_client.restart(self.config.rate_limit_global_cooldown)
+                    except DouyinServiceError as exc:
+                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
+                        self.browser_client.restart(self.config.service_error_global_cooldown)
+                    except Exception as exc:
+                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
+
+                    summary = self.build_summary_from_cached_entry(user, entry)
+                    result = self.build_result_from_cached_entry(user, entry)
+                    result["data_source"] = "douyin_profile_verify"
+                    results.append(result)
+                    if self.should_export_summary_analysis():
+                        summary_rows.append(summary)
+
+                    if uid:
+                        videos = entry.get("videos", []) if isinstance(entry, dict) else []
+                        latest_video = self.get_latest_video_from_entry(entry)
+                        existing_modes = set()
+                        if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
+                            existing_modes = {
+                                str(mode).strip().lower()
+                                for mode in entry.get("cache_modes", [])
+                                if str(mode).strip()
+                            }
+                        existing_modes.add("verify")
+                        progress[uid] = {
+                            "cached_at": int(time.time()),
+                            "user": user,
+                            "videos": videos,
+                            "summary": summary,
+                            "latest_video": latest_video,
+                            "last_fetch_mode": fetch_mode,
+                            "cache_modes": sorted(existing_modes),
+                        }
+                        pending_progress_saves += 1
+
+                    progress_bar.advance(task_id)
+
+                    if pending_progress_saves >= self.config.progress_save_interval_users:
+                        self.cache_store.save_progress(progress)
+                        pending_progress_saves = 0
+
+                    if (
+                        self.config.intermediate_upload_interval_users > 0
+                        and index % self.config.intermediate_upload_interval_users == 0
+                    ):
+                        self.merge_updated_followings_cache(cached_followings, verified_users)
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index,
+                        )
+                        pending_progress_saves = 0
+
+            if pending_progress_saves:
+                self.cache_store.save_progress(progress)
+            self.merge_updated_followings_cache(cached_followings, verified_users)
+
+            self.display_counts_results(results)
+            save_to_csv(self.config, results, merge_existing=partial_run)
+            if self.should_export_summary_analysis():
+                save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
+            save_cache_inventory_to_csv(
+                self.config,
+                self.build_cache_inventory_rows(
+                    self.cache_store.load_followings_cache_payload(),
+                    self.cache_store.load_progress(),
+                ),
+            )
+
+            exported = [self.config.output_csv, self.config.cache_inventory_csv]
+            if self.should_export_summary_analysis():
+                exported.append(self.config.video_duration_analysis_csv)
+            logger.info(
+                "Douyin verify finished | followings={} | verified={} | results={} | exported={}",
+                len(followings),
+                profile_verified_count,
+                len(results),
+                [str(path) for path in exported],
+            )
+            print(
+                f"🗂️  抖音 verify 模式已输出：{self._format_output_summary(exported)}，"
+                f"成功校验 {profile_verified_count}/{len(followings)} 位博主"
             )
             return results
 
@@ -1099,6 +1334,13 @@ class DouyinHiatusAnalyzer:
 
         if fetch_mode != "full":
             refreshed_total = sum(refresh_reason_counts.values())
+            logger.info(
+                "Douyin cache summary | mode={} | cache_hits={} | refreshed_total={} | reasons={}",
+                fetch_mode,
+                cache_hit_count,
+                refreshed_total,
+                refresh_reason_counts,
+            )
             get_console().print(
                 create_summary_panel(
                     "📦 抖音缓存命中摘要",
@@ -1117,10 +1359,10 @@ class DouyinHiatusAnalyzer:
 
         results.sort(key=self._sort_days_since_value, reverse=True)
         self.display_top_results(results)
-        save_to_csv(self.config, results)
+        save_to_csv(self.config, results, merge_existing=partial_run)
 
         if self.should_export_summary_analysis():
-            save_video_duration_analysis_to_csv(self.config, summary_rows)
+            save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
         save_cache_inventory_to_csv(
             self.config,
             self.build_cache_inventory_rows(
@@ -1137,6 +1379,14 @@ class DouyinHiatusAnalyzer:
             exported.append(self.config.video_duration_analysis_csv)
         if export_duration_analysis:
             exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
+        logger.info(
+            "Douyin analysis finished | mode={} | results={} | summaries={} | videos={} | exported={}",
+            fetch_mode,
+            len(results),
+            len(summary_rows),
+            len(all_video_rows),
+            [str(path) for path in exported],
+        )
         get_console().print(
             create_summary_panel(
                 f"🗂️ 抖音 {fetch_mode} 模式输出",

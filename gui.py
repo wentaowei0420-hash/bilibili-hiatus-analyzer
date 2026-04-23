@@ -10,7 +10,6 @@ import requests
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QDialog,
@@ -23,6 +22,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -46,6 +46,7 @@ class RunConfig:
     bilibili_mode: str
     douyin_fetch_mode: str
     douyin_backend: str
+    monitor_video_limit: int
     uid_limit_enabled: bool
     uid_limit: int
     high_like_threshold: int
@@ -62,7 +63,6 @@ class SignalWriter:
 
     def write(self, text):
         if not text:
-            QMessageBox.information(self, "任务运行中", "当前任务还在运行，请等待完成。")
             return
         self._buffer += text
         while "\n" in self._buffer:
@@ -116,6 +116,7 @@ class RunnerThread(QThread):
         self.log_line.emit(f"动作: {self.config.action}")
         self.log_line.emit(f"抖音模式: {self.config.douyin_fetch_mode}")
         self.log_line.emit(f"抖音后端: {self.config.douyin_backend}")
+        self.log_line.emit(f"监控视频数: {self.config.monitor_video_limit}")
         self.log_line.emit(f"B站模式: {self.config.bilibili_mode}")
         self.log_line.emit("-" * 60)
 
@@ -158,12 +159,13 @@ class RunnerThread(QThread):
     def _run_bilibili_main(self):
         from bilibili_analyzer.app import run_analysis, run_feishu_upload
 
+        uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
         if self.config.action == "fetch":
-            result = run_analysis(trigger_upload=False)
+            result = run_analysis(trigger_upload=False, max_followings=uid_limit)
             if result is None:
                 raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
         elif self.config.action == "fetch_upload":
-            result = run_analysis(trigger_upload=True)
+            result = run_analysis(trigger_upload=True, max_followings=uid_limit)
             if result is None:
                 raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
         elif self.config.action == "upload":
@@ -174,12 +176,23 @@ class RunnerThread(QThread):
     def _run_douyin_main(self):
         from douyin_analyzer.app import run_analysis, run_feishu_upload
 
+        uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
         if self.config.action == "fetch":
-            result = run_analysis(trigger_upload=False, fetch_mode_override=self.config.douyin_fetch_mode)
+            result = run_analysis(
+                trigger_upload=False,
+                fetch_mode_override=self.config.douyin_fetch_mode,
+                max_followings=uid_limit,
+                recent_video_limit_override=self.config.monitor_video_limit,
+            )
             if result is None:
                 raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
         elif self.config.action == "fetch_upload":
-            result = run_analysis(trigger_upload=True, fetch_mode_override=self.config.douyin_fetch_mode)
+            result = run_analysis(
+                trigger_upload=True,
+                fetch_mode_override=self.config.douyin_fetch_mode,
+                max_followings=uid_limit,
+                recent_video_limit_override=self.config.monitor_video_limit,
+            )
             if result is None:
                 raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
         elif self.config.action == "upload":
@@ -327,13 +340,21 @@ class MainWindow(QMainWindow):
         self.douyin_mode_combo = QComboBox()
         for label, mode in (
             ("基础统计模式（粉丝数/获赞总数/视频数）", "counts"),
+            ("主页校验模式（按基础缓存进主页核对）", "verify"),
             ("监控模式（推荐日常使用）", "monitor"),
             ("增量模式（只补变化数据）", "delta"),
             ("完整模式（抓取视频明细）", "full"),
         ):
             self.douyin_mode_combo.addItem(label, mode)
-        self.douyin_mode_combo.setCurrentIndex(1)
+        self.douyin_mode_combo.setCurrentIndex(2)
+        self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
         run_form.addRow("抖音抓取模式", self.douyin_mode_combo)
+
+        self.monitor_video_limit_spin = QSpinBox()
+        self.monitor_video_limit_spin.setRange(1, 500)
+        self.monitor_video_limit_spin.setValue(10)
+        self.monitor_video_limit_spin.setToolTip("监控/增量模式下，每位博主最多抓取最近 N 条视频。基础统计和完整模式会忽略该参数。")
+        run_form.addRow("监控视频数", self.monitor_video_limit_spin)
 
         self.backend_combo = QComboBox()
         self.backend_combo.addItem("DrissionPage", "drission")
@@ -344,16 +365,28 @@ class MainWindow(QMainWindow):
 
         uid_group = QGroupBox("UID 与筛选参数")
         uid_form = QFormLayout(uid_group)
-        self.uid_limit_check = QCheckBox("只抓取前 N 个 UID")
-        self.uid_limit_check.setToolTip("仅在 B站/抖音 UID 全量视频模式下生效。未勾选时抓取全部 UID。")
-        self.uid_limit_check.toggled.connect(self._sync_visible_options)
+        self.uid_fetch_all_radio = QRadioButton("全抓取模式")
+        self.uid_fetch_all_radio.setToolTip("抓取 UID 名单中的全部博主。")
+        self.uid_fetch_partial_radio = QRadioButton("部分抓取模式")
+        self.uid_fetch_partial_radio.setToolTip(
+            "只抓取排序后的前 N 个 UID。已存在博主会更新，新博主会添加，未涉及博主保持不变。"
+        )
+        self.uid_fetch_all_radio.setChecked(True)
+        self.uid_fetch_all_radio.toggled.connect(self._sync_visible_options)
+        self.uid_fetch_partial_radio.toggled.connect(self._sync_visible_options)
         self.uid_limit_spin = QSpinBox()
         self.uid_limit_spin.setRange(1, 100000)
         self.uid_limit_spin.setValue(100)
-        self.uid_limit_spin.setToolTip("可提前填写；仅在勾选“只抓取前 N 个 UID”且运行 UID 全量视频模式时生效。")
+        self.uid_limit_spin.setToolTip("部分抓取模式下生效；全抓取模式会忽略该数量。")
+        fetch_mode_row = QHBoxLayout()
+        fetch_mode_row.addWidget(self.uid_fetch_all_radio)
+        fetch_mode_row.addWidget(self.uid_fetch_partial_radio)
+        fetch_mode_row.addStretch(1)
+        uid_form.addRow("抓取方式", fetch_mode_row)
         limit_row = QHBoxLayout()
-        limit_row.addWidget(self.uid_limit_check)
+        limit_row.addWidget(QLabel("抓取前 N 个 UID"))
         limit_row.addWidget(self.uid_limit_spin)
+        limit_row.addStretch(1)
         uid_form.addRow("UID 数量", limit_row)
 
         self.high_like_spin = QSpinBox()
@@ -408,20 +441,32 @@ class MainWindow(QMainWindow):
         is_normal = platform in {"both", "bilibili", "douyin"}
         is_bilibili = platform in {"both", "bilibili"}
         is_douyin = platform in {"both", "douyin", "douyin_unfollow", "douyin_uid"}
+        is_recent_video_mode = self.douyin_mode_combo.currentData() in {"monitor", "delta"}
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
         self.bilibili_mode_combo.setEnabled(editable and is_bilibili)
         self.douyin_mode_combo.setEnabled(editable and is_douyin and platform != "douyin_unfollow")
+        self.monitor_video_limit_spin.setEnabled(editable and is_douyin and is_recent_video_mode)
         self.backend_combo.setEnabled(editable and is_douyin)
         self.platform_combo.setEnabled(editable)
-        self.uid_limit_check.setEnabled(editable)
-        self.uid_limit_spin.setEnabled(editable)
+        self.uid_fetch_all_radio.setEnabled(editable)
+        self.uid_fetch_partial_radio.setEnabled(editable)
+        self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
         self.high_like_spin.setEnabled(editable)
         self.high_like_export_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
         self.lock_button.setText("解除锁定" if self.config_locked else "锁定配置")
+
+    def _show_info_dialog(self, title, message):
+        QMessageBox.information(self, title, message)
+
+    def _show_warning_dialog(self, title, message):
+        QMessageBox.warning(self, title, message)
+
+    def _show_error_dialog(self, title, message):
+        QMessageBox.critical(self, title, message)
 
     def _collect_config(self):
         return RunConfig(
@@ -430,7 +475,8 @@ class MainWindow(QMainWindow):
             bilibili_mode=self.bilibili_mode_combo.currentData(),
             douyin_fetch_mode=self.douyin_mode_combo.currentData(),
             douyin_backend=self.backend_combo.currentData(),
-            uid_limit_enabled=self.uid_limit_check.isChecked(),
+            monitor_video_limit=self.monitor_video_limit_spin.value(),
+            uid_limit_enabled=self.uid_fetch_partial_radio.isChecked(),
             uid_limit=self.uid_limit_spin.value(),
             high_like_threshold=self.high_like_spin.value(),
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
@@ -452,7 +498,8 @@ class MainWindow(QMainWindow):
             "bilibili_mode": self.bilibili_mode_combo.currentData(),
             "douyin_fetch_mode": self.douyin_mode_combo.currentData(),
             "douyin_backend": self.backend_combo.currentData(),
-            "uid_limit_enabled": self.uid_limit_check.isChecked(),
+            "monitor_video_limit": self.monitor_video_limit_spin.value(),
+            "uid_limit_enabled": self.uid_fetch_partial_radio.isChecked(),
             "uid_limit": self.uid_limit_spin.value(),
             "high_like_threshold": self.high_like_spin.value(),
             "unfollow_list_path": self.unfollow_list_path,
@@ -485,8 +532,14 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 combo.setCurrentIndex(index)
 
-        self.uid_limit_check.setChecked(bool(data.get("uid_limit_enabled", False)))
+        if bool(data.get("uid_limit_enabled", False)):
+            self.uid_fetch_partial_radio.setChecked(True)
+        else:
+            self.uid_fetch_all_radio.setChecked(True)
         self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
+        self.monitor_video_limit_spin.setValue(
+            int(data.get("monitor_video_limit", self.monitor_video_limit_spin.value()) or self.monitor_video_limit_spin.value())
+        )
         self.high_like_spin.setValue(
             int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
         )
@@ -525,7 +578,7 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         if self.worker and self.worker.isRunning():
-            QMessageBox.information(self, "任务运行中", "当前任务还在运行，请等待完成。")
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
             return
 
         config = self._collect_config()
@@ -548,7 +601,7 @@ class MainWindow(QMainWindow):
 
     def _start_high_like_export(self):
         if self.worker and self.worker.isRunning():
-            QMessageBox.information(self, "任务运行中", "当前任务还在运行，请等待完成。")
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
             return
 
         config = self._collect_config()
@@ -595,12 +648,12 @@ class MainWindow(QMainWindow):
             self.cookie_status_label.setText(f"B站 Cookie：{message}")
             self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #2e7d32; font-weight: 700;")
             self._append_log(f"B站 Cookie 状态检测：{message}")
-            QMessageBox.information(self, "B站 Cookie 状态", message)
+            self._show_info_dialog("B站 Cookie 状态", message)
         else:
             self.cookie_status_label.setText(f"B站 Cookie：{message}")
             self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #c62828; font-weight: 700;")
             self._append_log(f"B站 Cookie 状态检测：{message}")
-            QMessageBox.warning(self, "B站 Cookie 状态", message)
+            self._show_warning_dialog("B站 Cookie 状态", message)
 
     def _validate_config(self, config):
         required_paths = []
@@ -613,7 +666,7 @@ class MainWindow(QMainWindow):
 
         missing = [str(path) for path in required_paths if not path.exists()]
         if missing:
-            QMessageBox.warning(self, "名单文件不存在", "\n".join(missing))
+            self._show_warning_dialog("名单文件不存在", "\n".join(missing))
             return False
         return True
 
@@ -638,7 +691,7 @@ class MainWindow(QMainWindow):
             self._append_log("-" * 60)
             self._append_log(message)
         else:
-            QMessageBox.critical(self, "任务失败", message)
+            self._show_error_dialog("任务失败", message)
 
 
 def main():

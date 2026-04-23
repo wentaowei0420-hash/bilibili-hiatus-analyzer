@@ -8,6 +8,7 @@ from urllib.parse import quote
 import numpy as np
 import pandas as pd
 import requests
+from loguru import logger
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -21,6 +22,49 @@ from .logging_utils import create_progress, create_summary_panel, get_console, w
 
 
 class FeishuUploader:
+    INTEGER_COLUMNS = {
+        "粉丝数",
+        "获赞总数",
+        "发布视频数量",
+        "未更新天数",
+        "平均点赞数",
+        "视频总数",
+        "短视频数量(0~30s)",
+        "中视频数量(30~60s)",
+        "中长视频数量(60~240s)",
+        "长视频数量(240s+)",
+        "总时长(秒)",
+    }
+    FLOAT_COLUMNS = {
+        "平均几天一更",
+        "平均时长(秒)",
+    }
+    PERCENT_COLUMNS = {
+        "短视频占比",
+        "中视频占比",
+        "中长视频占比",
+        "长视频占比",
+    }
+    COLUMN_FORMATTERS = {
+        "粉丝数": "0",
+        "获赞总数": "0",
+        "发布视频数量": "0",
+        "未更新天数": "0",
+        "平均点赞数": "0",
+        "视频总数": "0",
+        "短视频数量(0~30s)": "0",
+        "中视频数量(30~60s)": "0",
+        "中长视频数量(60~240s)": "0",
+        "长视频数量(240s+)": "0",
+        "总时长(秒)": "0",
+        "平均几天一更": "0.00",
+        "平均时长(秒)": "0.00",
+        "短视频占比": "0.00%",
+        "中视频占比": "0.00%",
+        "中长视频占比": "0.00%",
+        "长视频占比": "0.00%",
+    }
+
     @staticmethod
     def _build_session():
         session = requests.Session()
@@ -80,12 +124,59 @@ class FeishuUploader:
             return ""
         return str(value)
 
+    @staticmethod
+    def _parse_numeric_value(value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
+            return float(value)
+
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        if not text:
+            return None
+
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_feishu_cell(self, column, value):
+        if pd.isna(value) or value in (None, ""):
+            return ""
+
+        if column == self.uid_column:
+            return str(value).strip()
+
+        if column in self.INTEGER_COLUMNS:
+            numeric = self._parse_numeric_value(value)
+            if numeric is None:
+                return ""
+            return int(numeric)
+
+        if column in self.FLOAT_COLUMNS:
+            numeric = self._parse_numeric_value(value)
+            if numeric is None:
+                return ""
+            return round(float(numeric), 4)
+
+        if column in self.PERCENT_COLUMNS:
+            numeric = self._parse_numeric_value(value)
+            if numeric is None:
+                return ""
+            return round(float(numeric) / 100.0, 6)
+
+        return str(value)
+
     def _sanitize_feishu_dataframe(self, dataframe):
         cleaned = dataframe.copy()
         cleaned = cleaned.replace({np.nan: "", pd.NaT: ""})
 
         for column in cleaned.columns:
-            cleaned[column] = cleaned[column].map(self._normalize_cell)
+            cleaned[column] = cleaned[column].map(lambda value, col=column: self._coerce_feishu_cell(col, value))
 
         if self.uid_column in cleaned.columns:
             cleaned[self.uid_column] = cleaned[self.uid_column].astype(str).str.strip()
@@ -245,6 +336,164 @@ class FeishuUploader:
             current, remainder = divmod(current - 1, 26)
             result = chr(65 + remainder) + result
         return result
+
+    def _build_column_format_specs(self, headers, row_count):
+        if row_count <= 0:
+            return []
+
+        specs = []
+        for index, header in enumerate(headers, start=1):
+            formatter = self.COLUMN_FORMATTERS.get(str(header).strip())
+            if not formatter:
+                continue
+            column_letter = self._column_letter(index)
+            specs.append(
+                {
+                    "header": str(header).strip(),
+                    "formatter": formatter,
+                    "range": f"{column_letter}2:{column_letter}{row_count + 1}",
+                }
+            )
+        return specs
+
+    @staticmethod
+    def _formatter_fallbacks(formatter):
+        formatter = str(formatter or "").strip()
+        fallback_map = {
+            "0.00%": ["0.00%", "0%", "%"],
+            "0.00": ["0.00", "0.0", "0"],
+            "0": ["0"],
+        }
+        return fallback_map.get(formatter, [formatter] if formatter else [])
+
+    def _apply_column_formats(self, token, sheet_id, headers, row_count):
+        format_specs = self._build_column_format_specs(headers, row_count)
+        if not format_specs:
+            logger.info(
+                "Feishu column format skipped | sheet_id={} | row_count={} | reason=no_matching_columns",
+                sheet_id,
+                row_count,
+            )
+            return {
+                "formatted_columns": 0,
+                "formatters": [],
+                "skipped_columns": [],
+                "format_errors": [],
+            }
+        logger.info(
+            "Feishu column format start | sheet_id={} | row_count={} | target_columns={}",
+            sheet_id,
+            row_count,
+            [spec["header"] for spec in format_specs],
+        )
+
+        headers_map = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        url = (
+            "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/"
+            f"{self.config.spreadsheet_token}/styles_batch_update"
+        )
+        applied = []
+        skipped = []
+        errors = []
+
+        for spec in format_specs:
+            success = False
+            last_result = None
+            for formatter in self._formatter_fallbacks(spec["formatter"]):
+                payload = {
+                    "data": [
+                        {
+                            "ranges": [f"{sheet_id}!{spec['range']}"],
+                            "style": {
+                                "formatter": formatter,
+                            },
+                        }
+                    ]
+                }
+                try:
+                    response = self._request_with_retry(
+                        "PUT",
+                        url,
+                        f"设置飞书列格式({spec['header']})",
+                        headers=headers_map,
+                        data=json.dumps(payload),
+                        timeout=60,
+                    )
+                    result = response.json()
+                    last_result = result
+                except Exception as exc:
+                    errors.append(f"{spec['header']}: {exc}")
+                    last_result = {"msg": str(exc)}
+                    break
+
+                if result.get("code") == 0:
+                    applied.append(f"{spec['header']}={formatter}")
+                    success = True
+                    logger.info(
+                        "Feishu column format applied | sheet_id={} | column={} | range={} | formatter={}",
+                        sheet_id,
+                        spec["header"],
+                        spec["range"],
+                        formatter,
+                    )
+                    break
+                if result.get("code") == 90204 and "invalid formatter" in str(result.get("msg", "")).lower():
+                    logger.warning(
+                        "Feishu column formatter rejected | sheet_id={} | column={} | formatter={} | result={}",
+                        sheet_id,
+                        spec["header"],
+                        formatter,
+                        result,
+                    )
+                    continue
+
+                errors.append(f"{spec['header']}: {result}")
+                logger.warning(
+                    "Feishu column format failed | sheet_id={} | column={} | formatter={} | result={}",
+                    sheet_id,
+                    spec["header"],
+                    formatter,
+                    result,
+                )
+                break
+
+            if not success:
+                skipped.append(f"{spec['header']}={spec['formatter']}")
+                logger.warning(
+                    "Feishu column format skipped | sheet_id={} | column={} | target_formatter={} | last_result={}",
+                    sheet_id,
+                    spec["header"],
+                    spec["formatter"],
+                    last_result,
+                )
+                get_console().print(
+                    create_summary_panel(
+                        "列格式已跳过",
+                        [
+                            f"列名: {spec['header']}",
+                            f"目标格式: {spec['formatter']}",
+                            f"原因: {last_result}",
+                        ],
+                        border_style="yellow",
+                    )
+                )
+
+        logger.info(
+            "Feishu column format finished | sheet_id={} | applied={} | skipped={} | errors={}",
+            sheet_id,
+            len(applied),
+            len(skipped),
+            len(errors),
+        )
+        return {
+            "formatted_columns": len(applied),
+            "formatters": applied,
+            "skipped_columns": skipped,
+            "format_errors": errors,
+        }
 
     def _write_range(self, token, sheet_id, start_row, rows):
         if not rows:
@@ -419,6 +668,13 @@ class FeishuUploader:
             self.config.export_analysis_table,
             self.config.file_duration,
         )
+        logger.info(
+            "Feishu prepare start | hiatus_rows={} | duration_rows={} | hiatus_cols={} | duration_cols={}",
+            len(df_hiatus),
+            len(df_duration),
+            len(df_hiatus.columns),
+            len(df_duration.columns),
+        )
 
         if df_hiatus.empty and df_duration.empty:
             raise RuntimeError("没有可上传的数据，主表和分析表快照都为空。")
@@ -428,17 +684,32 @@ class FeishuUploader:
             df_duration = pd.DataFrame(columns=list(df_hiatus.columns))
 
         merge_keys = self._determine_merge_keys(df_hiatus, df_duration)
+        logger.info("Feishu merge keys selected | keys={}", merge_keys)
         if not merge_keys:
             raise RuntimeError("无法找到可用于合并飞书数据的稳定字段，请至少保留 UP主UID。")
 
+        before_hiatus_rows = len(df_hiatus)
+        before_duration_rows = len(df_duration)
         df_hiatus = self._deduplicate_by_keys(df_hiatus, merge_keys)
         df_duration = self._deduplicate_by_keys(df_duration, merge_keys)
+        logger.info(
+            "Feishu deduplicate done | hiatus {}->{} | duration {}->{}",
+            before_hiatus_rows,
+            len(df_hiatus),
+            before_duration_rows,
+            len(df_duration),
+        )
 
         duration_cols = df_duration.columns.difference(df_hiatus.columns).tolist() + merge_keys
         df_duration_clean = df_duration[duration_cols]
         # 主数据表必须以“当前主榜快照”为准，不能因为分析表残留历史 UID 而把已取关博主重新并回主表。
         df_merged = pd.merge(df_hiatus, df_duration_clean, on=merge_keys, how="left")
         df_merged = self._deduplicate_by_keys(df_merged, merge_keys)
+        logger.info(
+            "Feishu merge done | merged_rows={} | merged_cols={}",
+            len(df_merged),
+            len(df_merged.columns),
+        )
         df_merged["抓取时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         deleted_rows = 0
@@ -457,6 +728,11 @@ class FeishuUploader:
 
         final_cols = self._desired_main_columns(df_merged)
         df_feishu = self._sanitize_feishu_dataframe(df_merged[final_cols] if final_cols else df_merged)
+        logger.info(
+            "Feishu view ready | upload_rows={} | upload_cols={}",
+            len(df_feishu),
+            len(df_feishu.columns),
+        )
         header = df_feishu.columns.tolist()
         values = df_feishu.values.tolist()
         return [header] + values, {
@@ -471,6 +747,12 @@ class FeishuUploader:
 
     def prepare_single_csv_data(self, csv_path):
         dataframe = pd.read_csv(csv_path, encoding="utf-8-sig")
+        logger.info(
+            "Feishu single CSV prepare | path={} | rows={} | cols={}",
+            csv_path,
+            len(dataframe),
+            len(dataframe.columns),
+        )
         dataframe = self._sanitize_feishu_dataframe(dataframe)
         header = dataframe.columns.tolist()
         values = dataframe.values.tolist()
@@ -485,6 +767,13 @@ class FeishuUploader:
         dataframe = self._load_dataframe_from_store_or_csv(table_name, csv_fallback_path)
         if dataframe is None or dataframe.empty:
             raise RuntimeError(f"没有可上传的数据表: {table_name}")
+        logger.info(
+            "Feishu single table prepare | table={} | csv_fallback={} | rows={} | cols={}",
+            table_name,
+            csv_fallback_path,
+            len(dataframe),
+            len(dataframe.columns),
+        )
         dataframe = self._sanitize_feishu_dataframe(dataframe)
         header = dataframe.columns.tolist()
         values = dataframe.values.tolist()
@@ -497,6 +786,15 @@ class FeishuUploader:
 
     def overwrite_feishu_sheets(self, token, sheet_id, all_values, previous_row_count=0, chunk_size=2000):
         actual_row_count = max(len(all_values) - 1, 0)
+        headers = all_values[0] if all_values else []
+        logger.info(
+            "Feishu overwrite start | sheet_id={} | upload_rows={} | upload_cols={} | previous_state_rows={} | chunk_size={}",
+            sheet_id,
+            actual_row_count,
+            len(headers),
+            previous_row_count,
+            chunk_size,
+        )
         existing_total_row_count = self._probe_existing_sheet_row_count(
             token,
             sheet_id,
@@ -504,12 +802,26 @@ class FeishuUploader:
             max(previous_row_count, actual_row_count),
         )
         total_chunks = (len(all_values) + chunk_size - 1) // chunk_size if all_values else 0
+        logger.info(
+            "Feishu remote sheet probed | sheet_id={} | existing_total_rows={} | total_chunks={}",
+            sheet_id,
+            existing_total_row_count,
+            total_chunks,
+        )
 
         with create_progress(transient=True) as progress:
             task_id = progress.add_task("整表覆盖飞书", total=max(total_chunks, 1))
             for index in range(0, len(all_values), chunk_size):
                 chunk_data = all_values[index:index + chunk_size]
                 start_row = index + 1
+                logger.info(
+                    "Feishu write chunk | sheet_id={} | start_row={} | chunk_rows={} | chunk_index={}/{}",
+                    sheet_id,
+                    start_row,
+                    len(chunk_data),
+                    (index // chunk_size) + 1,
+                    max(total_chunks, 1),
+                )
                 self._write_range(token, sheet_id, start_row, chunk_data)
                 progress.advance(task_id)
             if not all_values:
@@ -520,7 +832,24 @@ class FeishuUploader:
         if pruned_rows > 0:
             delete_start_index = actual_row_count + 1
             delete_end_index = existing_total_row_count
+            logger.info(
+                "Feishu prune rows | sheet_id={} | delete_start={} | delete_end={} | prune_rows={}",
+                sheet_id,
+                delete_start_index,
+                delete_end_index,
+                pruned_rows,
+            )
             self._delete_row_range(token, sheet_id, delete_start_index, delete_end_index)
+
+        format_meta = self._apply_column_formats(token, sheet_id, headers, actual_row_count)
+        logger.info(
+            "Feishu overwrite finished | sheet_id={} | upload_rows={} | pruned_rows={} | formatted_columns={} | skipped_format_columns={}",
+            sheet_id,
+            actual_row_count,
+            pruned_rows,
+            format_meta.get("formatted_columns", 0),
+            len(format_meta.get("skipped_columns", [])),
+        )
 
         return {
             "mode": "overwrite",
@@ -529,11 +858,15 @@ class FeishuUploader:
             "pruned_rows": pruned_rows,
             "existing_row_count": existing_row_count,
             "existing_total_row_count": existing_total_row_count,
+            "formatted_columns": format_meta.get("formatted_columns", 0),
+            "formatters": format_meta.get("formatters", []),
+            "skipped_format_columns": format_meta.get("skipped_columns", []),
+            "format_errors": format_meta.get("format_errors", []),
         }
 
     def run(self, prune_missing=True):
         with create_progress(transient=False) as progress:
-            task_id = progress.add_task("准备飞书同步", total=5)
+            task_id = progress.add_task("准备飞书同步", total=6)
 
             progress.update(task_id, description="整理本地结果并生成飞书视图")
             sheets_data, data_meta = self.prepare_data_and_save_to_db()
@@ -560,6 +893,9 @@ class FeishuUploader:
             )
             self._advance_stage(progress, task_id, "飞书同步完成")
 
+            progress.update(task_id, description="应用飞书列格式")
+            self._advance_stage(progress, task_id, "列格式已应用")
+
             progress.update(task_id, description="保存上传状态")
             self.save_upload_state(content_hash, len(sheets_data) - 1)
             self._advance_stage(progress, task_id, "上传状态已保存")
@@ -572,6 +908,8 @@ class FeishuUploader:
             f"更新行数: {sync_meta.get('updated_rows', 0)}",
             f"清理旧行: {sync_meta.get('pruned_rows', 0)}",
             f"覆盖前远端行数: {sync_meta.get('existing_row_count', 0)}",
+            f"格式化列数: {sync_meta.get('formatted_columns', 0)}",
+            f"跳过格式列数: {len(sync_meta.get('skipped_format_columns', []))}",
             "上传方式: 整表覆盖",
             "数据来源: SQLite 快照优先，CSV 回退",
         ]
@@ -593,7 +931,7 @@ class FeishuUploader:
     ):
         csv_path = Path(csv_path).resolve()
         with create_progress(transient=False) as progress:
-            task_id = progress.add_task("准备分析表同步", total=5)
+            task_id = progress.add_task("准备分析表同步", total=6)
 
             progress.update(task_id, description="整理本地分析数据")
             sheets_data, data_meta = self.prepare_single_csv_data(csv_path)
@@ -624,6 +962,9 @@ class FeishuUploader:
             )
             self._advance_stage(progress, task_id, "分析表同步完成")
 
+            progress.update(task_id, description="应用分析表列格式")
+            self._advance_stage(progress, task_id, "分析表列格式已应用")
+
             progress.update(task_id, description="保存分析表上传状态")
             self.save_upload_state(content_hash, len(sheets_data) - 1, upload_state_json)
             self._advance_stage(progress, task_id, "分析表上传状态已保存")
@@ -635,6 +976,8 @@ class FeishuUploader:
             f"视图列数: {data_meta['columns']}",
             f"去重主键: {data_meta.get('deduplicated_by', self.uid_column)}",
             f"清理旧行: {sync_meta.get('pruned_rows', 0)}",
+            f"格式化列数: {sync_meta.get('formatted_columns', 0)}",
+            f"跳过格式列数: {len(sync_meta.get('skipped_format_columns', []))}",
             "上传方式: 整表覆盖",
         ]
         get_console().print(create_summary_panel(panel_title, lines, border_style="green"))
@@ -650,7 +993,7 @@ class FeishuUploader:
         panel_title="分析表同步完成",
     ):
         with create_progress(transient=False) as progress:
-            task_id = progress.add_task("准备分析表同步", total=5)
+            task_id = progress.add_task("准备分析表同步", total=6)
 
             progress.update(task_id, description="整理SQLite分析数据")
             sheets_data, data_meta = self.prepare_single_table_data(table_name, csv_fallback_path)
@@ -681,6 +1024,9 @@ class FeishuUploader:
             )
             self._advance_stage(progress, task_id, "分析表同步完成")
 
+            progress.update(task_id, description="应用分析表列格式")
+            self._advance_stage(progress, task_id, "分析表列格式已应用")
+
             progress.update(task_id, description="保存分析表上传状态")
             self.save_upload_state(content_hash, len(sheets_data) - 1, upload_state_json)
             self._advance_stage(progress, task_id, "分析表上传状态已保存")
@@ -692,6 +1038,8 @@ class FeishuUploader:
             f"视图列数: {data_meta['columns']}",
             f"去重主键: {data_meta.get('deduplicated_by', self.uid_column)}",
             f"清理旧行: {sync_meta.get('pruned_rows', 0)}",
+            f"格式化列数: {sync_meta.get('formatted_columns', 0)}",
+            f"跳过格式列数: {len(sync_meta.get('skipped_format_columns', []))}",
             "上传方式: 整表覆盖",
         ]
         get_console().print(create_summary_panel(panel_title, lines, border_style="green"))

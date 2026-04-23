@@ -160,7 +160,7 @@ def _default_browser_user_data_path(runtime_dir: Path, browser_name: str) -> Pat
     return preferred
 
 
-def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
+def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=None) -> DouyinAnalyzerConfig:
     root_dir = _root_dir()
     runtime_dir = root_dir / "runtime"
     log_dir = runtime_dir / "logs"
@@ -168,6 +168,16 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
     output_dir = data_dir / "output"
     state_dir = data_dir / "state"
     fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "monitor")).strip().lower()
+    try:
+        recent_video_limit = (
+            int(recent_video_limit_override)
+            if recent_video_limit_override is not None
+            else int(os.getenv("DOUYIN_RECENT_VIDEO_LIMIT", "10"))
+        )
+    except (TypeError, ValueError):
+        recent_video_limit = 10
+    if recent_video_limit <= 0:
+        recent_video_limit = 1
     browser_name = os.getenv("DOUYIN_BROWSER_NAME", "edge").strip().lower() or "edge"
     return DouyinAnalyzerConfig(
         root_dir=root_dir,
@@ -186,7 +196,10 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
         ),
         home_url="https://www.douyin.com/",
         self_user_url="https://www.douyin.com/user/self",
-        following_api_pattern=os.getenv("DOUYIN_FOLLOWING_API_PATTERN", "following/list"),
+        following_api_pattern=os.getenv(
+            "DOUYIN_FOLLOWING_API_PATTERN",
+            "following/list",
+        ),
         post_api_pattern=os.getenv("DOUYIN_POST_API_PATTERN", "aweme/v1/web/aweme/post/"),
         output_csv=output_dir / "douyin_hiatus_ranking.csv",
         all_videos_csv=output_dir / "douyin_all_videos.csv",
@@ -202,7 +215,7 @@ def load_analyzer_config(fetch_mode_override=None) -> DouyinAnalyzerConfig:
         progress_json=state_dir / "douyin_progress.json",
         progress_dir=state_dir / "cache" / "progress",
         fetch_mode=fetch_mode,
-        recent_video_limit=int(os.getenv("DOUYIN_RECENT_VIDEO_LIMIT", "10")),
+        recent_video_limit=recent_video_limit,
         page_load_delay=float(os.getenv("DOUYIN_PAGE_LOAD_DELAY", "1.2")),
         packet_timeout=float(os.getenv("DOUYIN_PACKET_TIMEOUT", "4.0")),
         scroll_pause=float(os.getenv("DOUYIN_SCROLL_PAUSE", "0.6")),

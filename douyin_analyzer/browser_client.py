@@ -5,6 +5,7 @@ import time
 from urllib.parse import urlparse
 
 from DrissionPage import ChromiumOptions, ChromiumPage
+from loguru import logger
 
 from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
@@ -34,6 +35,7 @@ class DouyinBrowserClient:
         self.service_error_streak = 0
         self.rate_limit_streak = 0
         self.rate_limiter = DouyinRateLimiter(config)
+        self._last_following_click_result = {}
 
     def _minimize_window_if_possible(self):
         if self.page is None:
@@ -115,40 +117,429 @@ class DouyinBrowserClient:
                 packets.append(step)
         return packets
 
+    @staticmethod
+    def _extract_packet_url(packet):
+        candidates = [
+            getattr(packet, "url", None),
+            getattr(getattr(packet, "request", None), "url", None),
+            getattr(getattr(packet, "response", None), "url", None),
+            getattr(packet, "target", None),
+        ]
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _is_blocked_following_list_url(url):
+        lowered = str(url or "").strip().lower()
+        if "aweme/v1/web/user/following/list" in lowered or "user/following/list" in lowered:
+            return False
+        path = urlparse(lowered).path
+        blocked_keywords = ("/webcast/", "/live/", "live_info", "/room/", "webcast_room")
+        return any(keyword in path for keyword in blocked_keywords)
+
+    @staticmethod
+    def _is_primary_following_list_url(url):
+        lowered = str(url or "").strip().lower()
+        if not lowered:
+            return False
+        if "following/list" not in lowered:
+            return False
+        if DouyinBrowserClient._is_blocked_following_list_url(lowered):
+            return False
+        return "aweme/v1/web/user/following/list" in lowered or "user/following/list" in lowered
+
+    @staticmethod
+    def _extract_following_users(data):
+        if not isinstance(data, dict):
+            return []
+        candidates = [data.get("followings")]
+        inner_data = data.get("data")
+        if isinstance(inner_data, dict):
+            candidates.append(inner_data.get("followings"))
+        for candidate in candidates:
+            if isinstance(candidate, list):
+                return candidate
+        return []
+
+    @classmethod
+    def _packet_has_followings(cls, data):
+        return any(
+            isinstance(user, dict) and user.get("sec_uid")
+            for user in cls._extract_following_users(data)
+        )
+
+    def _current_url(self):
+        try:
+            return str(getattr(self.start(), "url", "") or "")
+        except Exception:
+            return ""
+
+    def _native_click_at(self, x, y):
+        try:
+            x = float(x)
+            y = float(y)
+        except (TypeError, ValueError):
+            return False
+        try:
+            page = self.start()
+            page.run_cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
+            page.run_cdp(
+                "Input.dispatchMouseEvent",
+                type="mousePressed",
+                x=x,
+                y=y,
+                button="left",
+                clickCount=1,
+            )
+            page.run_cdp(
+                "Input.dispatchMouseEvent",
+                type="mouseReleased",
+                x=x,
+                y=y,
+                button="left",
+                clickCount=1,
+            )
+            logger.info("Douyin native click dispatched | x={} | y={}", round(x), round(y))
+            return True
+        except Exception as exc:
+            logger.warning("Douyin native click failed | x={} | y={} | error={}", x, y, exc)
+            return False
+
+    def _open_following_route_fallback(self, href=""):
+        candidates = []
+        href = str(href or "").strip()
+        if href and "/follow" in href and "following/list" not in href:
+            candidates.append(href)
+        candidates.extend(
+            [
+                "https://www.douyin.com/follow",
+                "https://www.douyin.com/following",
+            ]
+        )
+
+        seen = set()
+        for url in candidates:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            logger.warning("Douyin following route fallback | url={}", url)
+            self._open_page(url, max(2.5, self.config.page_load_delay))
+            if self._page_has_rate_limit():
+                raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+            if self._wait_for_following_panel_ready(timeout_seconds=6.0):
+                return True
+        return False
+
+    def _click_self_following_entry(self):
+        script = r"""
+        const keyword = '\u5173\u6ce8';
+        const liveText = '\u6b63\u5728\u76f4\u64ad';
+        const elements = Array.from(document.querySelectorAll('a,button,div,span'));
+        const visible = elements
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            const parentText = (el.parentElement && (el.parentElement.innerText || '')) || '';
+            return {el, rect, text, parentText};
+          })
+          .filter(item =>
+            item.text.includes(keyword) &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.left >= 0 &&
+            item.rect.left < 190 &&
+            item.rect.top > 70 &&
+            item.rect.top < window.innerHeight - 80 &&
+            !item.text.includes(liveText) &&
+            !item.parentText.includes(liveText)
+          )
+          .map(item => {
+            let score = 0;
+            if (item.text === keyword) score += 40;
+            if (item.text.length <= 8) score += 12;
+            if (item.rect.left < 120) score += 18;
+            if (item.rect.top > 180 && item.rect.top < 330) score += 16;
+            if (item.parentText.includes('\u670b\u53cb')) score += 3;
+            if (item.parentText.includes('\u6211\u7684')) score += 3;
+            if (item.parentText.includes('\u7c89\u4e1d')) score -= 30;
+            if (item.parentText.includes('\u83b7\u8d5e')) score -= 30;
+            if (item.parentText.includes('\u4f5c\u54c1')) score -= 12;
+            if (item.parentText.length > 120) score -= 15;
+            return {...item, score};
+          })
+          .sort((a, b) => b.score - a.score);
+        if (!visible.length) {
+          return {clicked: false, reason: 'not_found'};
+        }
+        const target = visible[0];
+        let clickTarget = target.el.closest('a,button,[role="button"]');
+        if (!clickTarget) {
+          let current = target.el;
+          while (current && current.parentElement) {
+            const rect = current.getBoundingClientRect();
+            const text = (current.innerText || current.textContent || '').trim();
+            if (rect.left >= 0 && rect.left < 190 && rect.width > 70 && text.includes(keyword) && text.length < 80) {
+              clickTarget = current;
+            }
+            current = current.parentElement;
+          }
+        }
+        clickTarget = clickTarget || target.el;
+        const linkTarget = target.el.closest('a[href]') || clickTarget.closest('a[href]');
+        const clickRect = clickTarget.getBoundingClientRect();
+        const x = clickRect.left + Math.min(Math.max(clickRect.width / 2, 20), Math.max(clickRect.width - 5, 20));
+        const y = clickRect.top + clickRect.height / 2;
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          clickTarget.dispatchEvent(new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: x,
+            clientY: y
+          }));
+        }
+        return {
+          clicked: true,
+          reason: 'left_nav_following',
+          text: target.text,
+          parentText: target.parentText.slice(0, 80),
+          href: linkTarget ? linkTarget.href : '',
+          clickX: Math.round(x),
+          clickY: Math.round(y),
+          rect: {
+            left: Math.round(target.rect.left),
+            top: Math.round(target.rect.top),
+            width: Math.round(target.rect.width),
+            height: Math.round(target.rect.height)
+          },
+          score: target.score
+        };
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"clicked": False, "reason": "unsupported_page_backend"}
+            logger.info("Douyin left nav following click | result={}", result)
+            self._last_following_click_result = result if isinstance(result, dict) else {}
+            if isinstance(result, dict) and result.get("clicked"):
+                self._native_click_at(result.get("clickX"), result.get("clickY"))
+                return True
+            return False
+        except Exception as exc:
+            logger.warning("Douyin left nav following click failed | error={}", exc)
+            return False
+
+    def _is_following_panel_ready(self):
+        script = r"""
+        const searchText = '\u641c\u7d22\u7528\u6237\u540d\u6216\u6296\u97f3\u53f7';
+        const liveText = '\u6b63\u5728\u76f4\u64ad';
+        const myFollowingText = '\u6211\u7684\u5173\u6ce8';
+        const listText = '\u5217\u8868';
+        const sortText = '\u7efc\u5408\u6392\u5e8f';
+        const url = location.href || '';
+        const candidates = Array.from(document.querySelectorAll('*')).map(el => {
+          const rect = el.getBoundingClientRect();
+          const text = (el.innerText || el.textContent || '').trim();
+          return {rect, text};
+        }).filter(item =>
+          item.rect.width > 0 &&
+          item.rect.height > 0 &&
+          item.rect.left >= 100 &&
+          item.rect.left < 470 &&
+          item.rect.top >= 40 &&
+          item.rect.height > 100
+        );
+        const panel = candidates
+          .map(item => {
+            let score = 0;
+            if (item.text.includes(searchText)) score += 30;
+            if (item.text.includes(liveText)) score += 20;
+            if (item.text.includes(myFollowingText)) score += 25;
+            if (item.text.includes(listText)) score += 10;
+            if (item.text.includes(sortText)) score += 10;
+            return {...item, score};
+          })
+          .sort((a, b) => b.score - a.score)[0];
+        const ready = Boolean(panel && panel.score >= 20);
+        return {
+          ready,
+          url,
+          score: panel ? panel.score : 0,
+          text: panel ? panel.text.slice(0, 120) : ''
+        };
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"ready": False, "reason": "unsupported_page_backend"}
+            logger.info("Douyin following panel ready check | result={}", result)
+            return bool(isinstance(result, dict) and result.get("ready"))
+        except Exception as exc:
+            logger.warning("Douyin following panel ready check failed | error={}", exc)
+            return False
+
+    def _wait_for_following_panel_ready(self, timeout_seconds=8.0, poll_interval=0.5):
+        deadline = time.time() + max(0.5, float(timeout_seconds or 0))
+        while time.time() < deadline:
+            if self._page_has_rate_limit():
+                raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+            if self._is_following_panel_ready():
+                time.sleep(2.0)
+                return True
+            time.sleep(max(0.2, float(poll_interval or 0.5)))
+        return False
+
+    def _focus_following_list_after_live(self):
+        script = r"""
+        const followTitle = '\u6211\u7684\u5173\u6ce8';
+        const liveTitle = '\u6b63\u5728\u76f4\u64ad';
+        const isScrollable = (el) => {
+          if (!el) return false;
+          const style = getComputedStyle(el);
+          return el.scrollHeight > el.clientHeight + 20 &&
+                 el.clientHeight > 120 &&
+                 style.display !== 'none' &&
+                 style.visibility !== 'hidden' &&
+                 style.overflowY !== 'hidden';
+        };
+        const nearestScrollable = (el) => {
+          let current = el;
+          while (current && current !== document.body) {
+            if (isScrollable(current)) return current;
+            current = current.parentElement;
+          }
+          return null;
+        };
+        const textOf = (el) => (el.innerText || el.textContent || '').trim();
+        const visible = Array.from(document.querySelectorAll('*'))
+          .map(el => ({el, text: textOf(el), rect: el.getBoundingClientRect()}))
+          .filter(item =>
+            item.text.includes(followTitle) &&
+            item.text.length <= 80 &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.left < window.innerWidth * 0.45
+          )
+          .sort((a, b) => a.rect.top - b.rect.top);
+
+        if (visible.length) {
+          const target = visible[0];
+          const container = nearestScrollable(target.el);
+          if (container) {
+            const targetRect = target.el.getBoundingClientRect();
+            const containerRect = container.getBoundingClientRect();
+            container.scrollTop += targetRect.top - containerRect.top - 40;
+            return {
+              focused: true,
+              reason: 'found_following_title',
+              title: target.text.slice(0, 40),
+              scrollTop: Math.round(container.scrollTop),
+              containerText: textOf(container).slice(0, 80)
+            };
+          }
+        }
+
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .filter(isScrollable)
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = textOf(el).slice(0, 1000);
+            let score = 0;
+            if (text.includes(liveTitle)) score += 24;
+            if (text.includes(followTitle)) score += 20;
+            if (text.includes('\u641c\u7d22\u7528\u6237\u540d\u6216\u6296\u97f3\u53f7')) score += 18;
+            if (text.includes('\u7efc\u5408\u6392\u5e8f')) score += 8;
+            if (text.includes('\u5217\u8868')) score += 6;
+            if (rect.left >= 110 && rect.left < 460) score += 16;
+            if (rect.width > 160 && rect.width < 380) score += 12;
+            if (rect.height > 250) score += 3;
+            return {el, rect, text, score};
+          })
+          .sort((a, b) => b.score - a.score);
+        if (candidates.length && candidates[0].score > 0) {
+          const container = candidates[0].el;
+          container.scrollTop += Math.max(700, Math.round(container.clientHeight * 0.9));
+          return {
+            focused: false,
+            reason: 'scroll_following_column_until_my_following',
+            score: candidates[0].score,
+            scrollTop: Math.round(container.scrollTop),
+            containerText: textOf(container).slice(0, 80)
+          };
+        }
+        return {focused: false, reason: 'container_not_found'};
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"focused": False, "reason": "unsupported_page_backend"}
+            logger.info("Douyin following list focus | result={}", result)
+            return bool(isinstance(result, dict) and result.get("focused"))
+        except Exception as exc:
+            logger.warning("Douyin following list focus failed | error={}", exc)
+            return False
+
     def get_followings(self):
         page = self.start()
         print("📜 正在抓取抖音关注列表...")
-        page.listen.start(self.config.following_api_pattern)
+        listen_patterns = list(
+            dict.fromkeys(
+                [
+                    "following/list",
+                    self.config.following_api_pattern,
+                    "aweme/v1/web/user/following/list",
+                ]
+            )
+        )
+        page.listen.start(listen_patterns)
         self._open_page(self.config.self_user_url, self.config.page_load_delay)
         expected_following_count = self._extract_following_count_from_dom()
+        print(
+            f"🧭 关注数量校验基准 | 主页显示={expected_following_count or '未知'} | "
+            f"监听接口={listen_patterns}"
+        )
+        if self._page_has_rate_limit():
+            raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+
+        logger.info("Douyin following route direct open | url=https://www.douyin.com/follow")
+        if not self._open_following_route_fallback("https://www.douyin.com/follow"):
+            raise RuntimeError("抖音关注列表页未成功打开：直接跳转 /follow 后没有检测到关注列表面板。")
         if self._page_has_rate_limit():
             raise DouyinRateLimitError("抖音关注列表页触发速率限制")
 
         try:
-            tab = page.ele("text:关注", timeout=3)
-            if tab:
-                tab.click()
-                time.sleep(1)
-                if self._page_has_rate_limit():
-                    raise DouyinRateLimitError("抖音关注列表页触发速率限制")
-        except DouyinRateLimitError:
-            raise
-        except Exception:
-            pass
-
-        try:
-            list_tab = page.ele("text:鍒楄〃", timeout=2)
+            list_tab = page.ele("text:\u5217\u8868", timeout=2)
             if list_tab:
                 list_tab.click()
                 time.sleep(0.8)
         except Exception:
             pass
 
+        self._focus_following_list_after_live()
+
         followings = []
         seen_sec_uids = set()
         empty_rounds = 0
         stagnant_rounds = 0
         has_more = True
+        skipped_non_primary_packets = 0
+        accepted_unrecognized_packets = 0
+        skipped_url_samples = []
+        accepted_url_samples = []
 
         with create_progress(transient=False) as progress:
             task_id = progress.add_task("抓取抖音关注列表", total=50)
@@ -163,6 +554,8 @@ class DouyinBrowserClient:
                     completed=len(followings),
                     description=f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | 正在等待新数据包",
                 )
+                if not followings:
+                    self._focus_following_list_after_live()
                 self._scroll_active_containers()
                 packets = self._drain_listen_packets(timeout=self.config.packet_timeout)
                 if not packets:
@@ -183,10 +576,26 @@ class DouyinBrowserClient:
                 empty_rounds = 0
                 new_users = 0
                 for packet in packets:
+                    packet_url = self._extract_packet_url(packet)
+                    if packet_url and self._is_blocked_following_list_url(packet_url):
+                        skipped_non_primary_packets += 1
+                        if len(skipped_url_samples) < 5:
+                            skipped_url_samples.append(packet_url)
+                        continue
                     data = self._extract_packet_body(packet)
+                    body_has_followings = self._packet_has_followings(data)
+                    if packet_url and not self._is_primary_following_list_url(packet_url) and not body_has_followings:
+                        skipped_non_primary_packets += 1
+                        if len(skipped_url_samples) < 5:
+                            skipped_url_samples.append(packet_url)
+                        continue
+                    if packet_url and not self._is_primary_following_list_url(packet_url) and body_has_followings:
+                        accepted_unrecognized_packets += 1
+                        if len(accepted_url_samples) < 5:
+                            accepted_url_samples.append(packet_url)
                     if self._packet_has_rate_limit(data):
                         raise DouyinRateLimitError("抖音关注列表接口触发速率限制")
-                    for user in data.get("followings") or []:
+                    for user in self._extract_following_users(data):
                         sec_uid = user.get("sec_uid") or ""
                         if not sec_uid or sec_uid in seen_sec_uids:
                             continue
@@ -238,13 +647,29 @@ class DouyinBrowserClient:
 
         page.listen.stop()
         self.rate_limiter.record_success()
+        print(
+            f"🧭 关注列表抓取汇总 | 主页显示={expected_following_count or '未知'} | "
+            f"主接口去重后={len(followings)} | 过滤非主包={skipped_non_primary_packets} | "
+            f"结构兜底接受={accepted_unrecognized_packets}"
+        )
+        logger.info(
+            "Douyin followings packet summary | expected={} | collected={} | skipped={} | accepted_by_body={} | skipped_samples={} | accepted_samples={}",
+            expected_following_count,
+            len(followings),
+            skipped_non_primary_packets,
+            accepted_unrecognized_packets,
+            skipped_url_samples,
+            accepted_url_samples,
+        )
+        if skipped_non_primary_packets:
+            print(f"🧹 已过滤 {skipped_non_primary_packets} 个非主关注列表数据包（如直播关注流）。")
         if expected_following_count and len(followings) < expected_following_count:
             raise RuntimeError(
                 f"抖音关注列表抓取失败：主页显示关注 {expected_following_count} 位，实际仅抓取到 {len(followings)} 位。"
             )
         if expected_following_count and len(followings) > expected_following_count:
-            print(
-                f"⚠️  抖音主页显示关注 {expected_following_count} 位，但本轮抓取到 {len(followings)} 位，请检查主页关注数解析是否准确。"
+            raise RuntimeError(
+                f"抖音关注列表抓取异常：主页显示关注 {expected_following_count} 位，但主接口抓取到 {len(followings)} 位。"
             )
         print(f"✅ 成功获取 {len(followings)} 位抖音关注博主")
         return followings
@@ -254,6 +679,41 @@ class DouyinBrowserClient:
 
     def get_recent_videos_for_user(self, user, limit):
         return self._collect_videos_for_user(user, limit=max(1, int(limit or 1)))
+
+    def refresh_user_profile_from_homepage(self, user):
+        page = self.start()
+        page.listen.start([self.config.post_api_pattern, self.config.video_detail_api_pattern])
+        try:
+            self._open_page(user["homepage"], self.config.video_page_load_delay)
+            if self._page_has_rate_limit():
+                raise DouyinRateLimitError("抖音主页触发速率限制")
+            if self._page_has_service_error():
+                raise DouyinServiceError("抖音主页出现服务异常")
+
+            total_favorited = self._extract_total_favorited_from_dom()
+            if total_favorited:
+                user["total_favorited"] = total_favorited
+
+            packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
+            for packet in packets:
+                data = self._extract_packet_body(packet)
+                if self._packet_has_rate_limit(data):
+                    raise DouyinRateLimitError("抖音主页接口触发速率限制")
+                if self._packet_has_service_error(data):
+                    raise DouyinServiceError("抖音主页接口出现服务异常")
+                self._update_user_profile_from_packet(user, data)
+
+            total_favorited = self._extract_total_favorited_from_dom()
+            if total_favorited:
+                user["total_favorited"] = total_favorited
+
+            time.sleep(self.rate_limiter.scaled_seconds(self.config.user_request_interval) + random.uniform(0, 0.2))
+            return user
+        finally:
+            try:
+                page.listen.stop()
+            except Exception:
+                pass
 
     def _collect_videos_for_user(self, user, limit=None):
         page = self.start()
@@ -268,10 +728,9 @@ class DouyinBrowserClient:
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
-                if not user.get("total_favorited"):
-                    total_favorited = self._extract_total_favorited_from_dom()
-                    if total_favorited:
-                        user["total_favorited"] = total_favorited
+                total_favorited = self._extract_total_favorited_from_dom()
+                if total_favorited:
+                    user["total_favorited"] = total_favorited
 
                 while empty_rounds < self.config.video_empty_round_limit:
                     if self._page_has_rate_limit():
@@ -556,15 +1015,16 @@ class DouyinBrowserClient:
                 if (el.scrollHeight <= el.clientHeight || el.clientHeight <= 150) return -999;
                 if (style.overflowY === 'hidden') return -999;
                 const rect = el.getBoundingClientRect();
-                const text = (el.innerText || '').slice(0, 600);
+                const text = (el.innerText || '').slice(0, 1200);
                 let score = 0;
-                if (text.includes('搜索用户名称或抖音号')) score += 14;
+                if (text.includes('搜索用户名称或抖音号')) score += 18;
+                if (text.includes('我的关注')) score += 18;
                 if (text.includes('综合排序')) score += 8;
                 if (text.includes('列表')) score += 6;
-                if (text.includes('正在直播')) score -= 6;
-                if (rect.left < window.innerWidth * 0.45) score += 4;
-                if (rect.width > 180 && rect.width < window.innerWidth * 0.5) score += 3;
-                if (rect.height > 280) score += 2;
+                if (text.includes('正在直播')) score += 24;
+                if (rect.left >= 110 && rect.left < 460) score += 16;
+                if (rect.width > 160 && rect.width < 380) score += 12;
+                if (rect.height > 250) score += 3;
                 return score;
             };
 
@@ -707,9 +1167,85 @@ class DouyinBrowserClient:
         return parse_view_count(match.group(1)) if match else 0
 
     def _extract_following_count_from_dom(self):
+        script = r"""
+        const followingText = '\u5173\u6ce8';
+        const fansText = '\u7c89\u4e1d';
+        const likedText = '\u83b7\u8d5e';
+        const liveText = '\u6b63\u5728\u76f4\u64ad';
+        const parseCount = (raw) => {
+          const text = String(raw || '').trim().toLowerCase();
+          const match = text.match(/([\d.]+)\s*(\u4ebf|\u4e07|\u5343|w)?/i);
+          if (!match) return 0;
+          let value = Number(match[1]);
+          if (!Number.isFinite(value)) return 0;
+          const unit = match[2] || '';
+          if (unit === '\u4ebf') value *= 100000000;
+          if (unit === '\u4e07' || unit === 'w') value *= 10000;
+          if (unit === '\u5343') value *= 1000;
+          return Math.round(value);
+        };
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            const match = text.match(/\u5173\u6ce8\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)/i);
+            return {el, rect, text, count: match ? parseCount(match[1]) : 0};
+          })
+          .filter(item =>
+            item.count > 0 &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.top >= 60 &&
+            item.rect.top <= 260 &&
+            item.rect.left > 120 &&
+            item.rect.left < window.innerWidth * 0.75 &&
+            !item.text.includes(liveText)
+          )
+          .map(item => {
+            let score = 0;
+            if (item.text.includes(followingText)) score += 8;
+            if (item.text.includes(fansText)) score += 20;
+            if (item.text.includes(likedText)) score += 20;
+            if (item.rect.top >= 90 && item.rect.top <= 210) score += 12;
+            if (item.rect.left >= 250 && item.rect.left <= 760) score += 10;
+            if (item.text.length < 180) score += 6;
+            return {...item, score};
+          })
+          .sort((a, b) => b.score - a.score);
+        if (candidates.length) {
+          return {
+            count: candidates[0].count,
+            source: 'profile_stats_dom',
+            text: candidates[0].text.slice(0, 80),
+            rect: {
+              left: Math.round(candidates[0].rect.left),
+              top: Math.round(candidates[0].rect.top),
+              width: Math.round(candidates[0].rect.width),
+              height: Math.round(candidates[0].rect.height)
+            }
+          };
+        }
+        return {count: 0, source: 'not_found'};
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"count": 0, "source": "unsupported_page_backend"}
+            if isinstance(result, dict) and int(result.get("count") or 0) > 0:
+                logger.info("Douyin following count DOM parse | result={}", result)
+                return int(result.get("count") or 0)
+        except Exception as exc:
+            logger.warning("Douyin following count DOM parse failed | error={}", exc)
+
         body_text = self._page_body_text()
-        match = re.search(r"\u5173\u6ce8\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
-        return parse_view_count(match.group(1)) if match else 0
+        matches = re.findall(r"\u5173\u6ce8\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
+        counts = [parse_view_count(match) for match in matches]
+        counts = [count for count in counts if count > 0]
+        return max(counts) if counts else 0
 
     def _extract_latest_publish_timestamp(self, data):
         if not isinstance(data, dict):

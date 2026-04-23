@@ -1,6 +1,8 @@
 import random
 import time
 
+from loguru import logger
+
 from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
 from .browser_client import DouyinBrowserClient, DouyinRateLimitError, DouyinServiceError
@@ -90,6 +92,31 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             time.sleep(delay)
         return page
 
+    def _current_url(self):
+        try:
+            return str(self.start().url or "")
+        except Exception:
+            return ""
+
+    def _native_click_at(self, x, y):
+        try:
+            x = float(x)
+            y = float(y)
+        except (TypeError, ValueError):
+            return False
+        try:
+            self.start().mouse.click(x, y)
+            logger.info("Douyin native click dispatched | backend=playwright | x={} | y={}", round(x), round(y))
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Douyin native click failed | backend=playwright | x={} | y={} | error={}",
+                x,
+                y,
+                exc,
+            )
+            return False
+
     def ensure_login(self):
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
         try:
@@ -119,6 +146,46 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         page.on("response", handle_response)
         return collected, handle_response
+
+    def _create_following_response_collector(self):
+        page = self.start()
+        collected = []
+        stats = {
+            "skipped_non_primary": 0,
+            "accepted_unrecognized": 0,
+            "skipped_samples": [],
+            "accepted_samples": [],
+        }
+
+        def handle_response(response):
+            try:
+                url = response.url or ""
+                lowered = str(url).lower()
+                if "following/list" not in lowered:
+                    return
+                if self._is_blocked_following_list_url(url):
+                    stats["skipped_non_primary"] += 1
+                    if len(stats["skipped_samples"]) < 5:
+                        stats["skipped_samples"].append(url)
+                    return
+                body = response.json()
+                body_has_followings = self._packet_has_followings(body)
+                if not self._is_primary_following_list_url(url) and not body_has_followings:
+                    stats["skipped_non_primary"] += 1
+                    if len(stats["skipped_samples"]) < 5:
+                        stats["skipped_samples"].append(url)
+                    return
+                if not self._is_primary_following_list_url(url) and body_has_followings:
+                    stats["accepted_unrecognized"] += 1
+                    if len(stats["accepted_samples"]) < 5:
+                        stats["accepted_samples"].append(url)
+                if isinstance(body, dict):
+                    collected.append(body)
+            except Exception:
+                return
+
+        page.on("response", handle_response)
+        return collected, handle_response, stats
 
     def _remove_response_collector(self, handler):
         try:
@@ -168,30 +235,66 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         match = re.search(r"\u83b7\u8d5e\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
         return parse_view_count(match.group(1)) if match else 0
 
+    def refresh_user_profile_from_homepage(self, user):
+        collected, handler = self._create_response_collector(
+            [self.config.post_api_pattern, self.config.video_detail_api_pattern]
+        )
+        try:
+            self._open_page(user["homepage"], self.config.video_page_load_delay)
+            if self._page_has_rate_limit():
+                raise DouyinRateLimitError("抖音主页触发速率限制")
+            if self._page_has_service_error():
+                raise DouyinServiceError("抖音主页出现服务异常")
+
+            total_favorited = self._extract_total_favorited_from_dom()
+            if total_favorited:
+                user["total_favorited"] = total_favorited
+
+            packets = self._drain_response_collector(collected, self.config.video_packet_timeout)
+            for data in packets:
+                if self._packet_has_rate_limit(data):
+                    raise DouyinRateLimitError("抖音主页接口触发速率限制")
+                if self._packet_has_service_error(data):
+                    raise DouyinServiceError("抖音主页接口出现服务异常")
+                self._update_user_profile_from_packet(user, data)
+
+            total_favorited = self._extract_total_favorited_from_dom()
+            if total_favorited:
+                user["total_favorited"] = total_favorited
+
+            time.sleep(self.rate_limiter.scaled_seconds(self.config.user_request_interval) + random.uniform(0, 0.2))
+            return user
+        finally:
+            self._remove_response_collector(handler)
+
     def get_followings(self):
         print("📜 正在抓取抖音关注列表...")
+        collected, handler, collector_stats = self._create_following_response_collector()
         self._open_page(self.config.self_user_url, self.config.page_load_delay)
         expected_following_count = self._extract_following_count_from_dom()
+        print(
+            f"🧭 关注数量校验基准 | 主页显示={expected_following_count or '未知'} | "
+            f"监听接口={self.config.following_api_pattern}"
+        )
+        if self._page_has_rate_limit():
+            raise DouyinRateLimitError("抖音关注列表页触发速率限制")
+
+        logger.info("Douyin following route direct open | url=https://www.douyin.com/follow | backend=playwright")
+        if not self._open_following_route_fallback("https://www.douyin.com/follow"):
+            raise RuntimeError("抖音关注列表页未成功打开：直接跳转 /follow 后没有检测到关注列表面板。")
         if self._page_has_rate_limit():
             raise DouyinRateLimitError("抖音关注列表页触发速率限制")
 
         try:
-            follow_tab = self.start().locator("text=关注").first
-            if follow_tab.is_visible(timeout=3000):
-                follow_tab.click()
-                time.sleep(1)
-        except Exception:
-            pass
-
-        try:
-            list_tab = self.start().locator("text=鍒楄〃").first
+            list_tab = self.start().locator("text=\u5217\u8868").first
             if list_tab.is_visible(timeout=2000):
                 list_tab.click()
                 time.sleep(0.8)
         except Exception:
             pass
 
-        collected, handler = self._create_response_collector([self.config.following_api_pattern])
+        self._focus_following_list_after_live()
+
         try:
             followings = []
             seen_sec_uids = set()
@@ -214,6 +317,8 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                         description=f"抓取抖音关注列表 | 已获取 {len(followings)} 位 | 正在等待新数据包",
                     )
 
+                    if not followings:
+                        self._focus_following_list_after_live()
                     self._scroll_active_containers()
                     packets = self._drain_response_collector(collected, self.config.packet_timeout)
                     if not packets:
@@ -231,7 +336,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     for data in packets:
                         if self._packet_has_rate_limit(data):
                             raise DouyinRateLimitError("抖音关注列表接口触发速率限制")
-                        for user in data.get("followings") or []:
+                        for user in self._extract_following_users(data):
                             sec_uid = user.get("sec_uid") or ""
                             if not sec_uid or sec_uid in seen_sec_uids:
                                 continue
@@ -267,13 +372,32 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                         break
 
             self.rate_limiter.record_success()
+            print(
+                f"🧭 关注列表抓取汇总 | 主页显示={expected_following_count or '未知'} | "
+                f"主接口去重后={len(followings)} | "
+                f"过滤非主包={collector_stats.get('skipped_non_primary', 0)} | "
+                f"结构兜底接受={collector_stats.get('accepted_unrecognized', 0)}"
+            )
+            logger.info(
+                "Douyin followings packet summary | backend=playwright | expected={} | collected={} | skipped={} | accepted_by_body={} | skipped_samples={} | accepted_samples={}",
+                expected_following_count,
+                len(followings),
+                collector_stats.get("skipped_non_primary", 0),
+                collector_stats.get("accepted_unrecognized", 0),
+                collector_stats.get("skipped_samples", []),
+                collector_stats.get("accepted_samples", []),
+            )
+            if collector_stats.get("skipped_non_primary"):
+                print(
+                    f"🧹 已过滤 {collector_stats['skipped_non_primary']} 个非主关注列表数据包（如直播关注流）。"
+                )
             if expected_following_count and len(followings) < expected_following_count:
                 raise RuntimeError(
                     f"抖音关注列表抓取失败：主页显示关注 {expected_following_count} 位，实际仅抓取到 {len(followings)} 位。"
                 )
             if expected_following_count and len(followings) > expected_following_count:
-                print(
-                    f"⚠️  抖音主页显示关注 {expected_following_count} 位，但本轮抓取到 {len(followings)} 位，请检查主页关注数解析是否准确。"
+                raise RuntimeError(
+                    f"抖音关注列表抓取异常：主页显示关注 {expected_following_count} 位，但主接口抓取到 {len(followings)} 位。"
                 )
             print(f"✅ 成功获取 {len(followings)} 位抖音关注博主")
             return followings
@@ -291,10 +415,9 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
-                if not user.get("total_favorited"):
-                    total_favorited = self._extract_total_favorited_from_dom()
-                    if total_favorited:
-                        user["total_favorited"] = total_favorited
+                total_favorited = self._extract_total_favorited_from_dom()
+                if total_favorited:
+                    user["total_favorited"] = total_favorited
 
                 videos_by_id = {}
                 empty_rounds = 0
@@ -480,15 +603,16 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                 if (el.scrollHeight <= el.clientHeight || el.clientHeight <= 150) return -999;
                 if (style.overflowY === 'hidden') return -999;
                 const rect = el.getBoundingClientRect();
-                const text = (el.innerText || '').slice(0, 600);
+                const text = (el.innerText || '').slice(0, 1200);
                 let score = 0;
-                if (text.includes('搜索用户名称或抖音号')) score += 14;
+                if (text.includes('搜索用户名称或抖音号')) score += 18;
+                if (text.includes('我的关注')) score += 18;
                 if (text.includes('综合排序')) score += 8;
                 if (text.includes('列表')) score += 6;
-                if (text.includes('正在直播')) score -= 6;
-                if (rect.left < window.innerWidth * 0.45) score += 4;
-                if (rect.width > 180 && rect.width < window.innerWidth * 0.5) score += 3;
-                if (rect.height > 280) score += 2;
+                if (text.includes('正在直播')) score += 24;
+                if (rect.left >= 110 && rect.left < 460) score += 16;
+                if (rect.width > 160 && rect.width < 380) score += 12;
+                if (rect.height > 250) score += 3;
                 return score;
             };
 
