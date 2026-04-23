@@ -39,6 +39,29 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         except Exception:
             pass
 
+    def _set_window_state_if_possible(self, window_state):
+        if self.context is None or self.page is None:
+            return
+        try:
+            session = self.context.new_cdp_session(self.page)
+            window_info = session.send("Browser.getWindowForTarget")
+            window_id = window_info.get("windowId")
+            if window_id is not None:
+                session.send(
+                    "Browser.setWindowBounds",
+                    {"windowId": window_id, "bounds": {"windowState": window_state}},
+                )
+        except Exception:
+            pass
+
+    def _maximize_window_if_possible(self):
+        self._set_window_state_if_possible("maximized")
+
+    def _prepare_window_after_launch(self):
+        self._maximize_window_if_possible()
+        time.sleep(0.8)
+        self._minimize_window_if_possible()
+
     def start(self):
         if self.page is not None:
             return self.page
@@ -53,7 +76,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         launch_kwargs = {
             "user_data_dir": str(self.config.browser_user_data_path),
             "headless": False,
-            "args": ["--mute-audio", "--start-minimized"],
+            "args": ["--mute-audio", "--start-maximized"],
         }
         if getattr(self.config, "browser_binary_path", None):
             launch_kwargs["executable_path"] = str(self.config.browser_binary_path)
@@ -65,7 +88,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         self.context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-        self._minimize_window_if_possible()
+        self._prepare_window_after_launch()
         return self.page
 
     def close(self):

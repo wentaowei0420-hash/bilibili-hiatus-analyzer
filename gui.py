@@ -4,6 +4,7 @@ import sys
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -131,6 +132,10 @@ class RunnerThread(QThread):
             from douyin_analyzer.app import run_unfollow
 
             run_unfollow(self.config.unfollow_list_path)
+        elif self.config.platform == "douyin_non_followed_cleanup":
+            from douyin_analyzer.app import run_prune_non_followed_cache
+
+            run_prune_non_followed_cache()
         elif self.config.platform == "bilibili_uid":
             from bilibili_analyzer.app import run_fetch_uid_videos
 
@@ -275,6 +280,183 @@ class AdvancedSettingsDialog(QDialog):
         }
 
 
+class DouyinStatsDialog(QDialog):
+    MODE_ROWS = [
+        ("verify", "主页校验模式"),
+        ("monitor", "监控模式"),
+        ("full", "完整模式"),
+    ]
+
+    def __init__(self, parent=None, high_like_threshold=10000):
+        super().__init__(parent)
+        self.high_like_threshold = int(high_like_threshold or 10000)
+        self.setWindowTitle("抖音统计")
+        self.resize(620, 360)
+
+        layout = QVBoxLayout(self)
+
+        self.summary_label = QLabel("正在读取抖音缓存统计...")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("padding: 4px 2px; color: #444;")
+        layout.addWidget(self.summary_label)
+
+        stats_group = QGroupBox("模式完成度")
+        stats_grid = QGridLayout(stats_group)
+        stats_grid.addWidget(QLabel("模式"), 0, 0)
+        stats_grid.addWidget(QLabel("已抓取博主数量"), 0, 1)
+        stats_grid.addWidget(QLabel("完成百分比"), 0, 2)
+
+        self.mode_count_labels = {}
+        self.mode_percent_labels = {}
+        for row_index, (mode, label) in enumerate(self.MODE_ROWS, start=1):
+            title_label = QLabel(label)
+            count_label = QLabel("-")
+            percent_label = QLabel("-")
+            count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            percent_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            stats_grid.addWidget(title_label, row_index, 0)
+            stats_grid.addWidget(count_label, row_index, 1)
+            stats_grid.addWidget(percent_label, row_index, 2)
+            self.mode_count_labels[mode] = count_label
+            self.mode_percent_labels[mode] = percent_label
+        layout.addWidget(stats_group)
+
+        video_group = QGroupBox("视频缓存统计")
+        video_grid = QGridLayout(video_group)
+        video_grid.addWidget(QLabel("指标"), 0, 0)
+        video_grid.addWidget(QLabel("数量"), 0, 1)
+        video_grid.addWidget(QLabel("占比"), 0, 2)
+
+        video_grid.addWidget(QLabel("当前缓存视频数量"), 1, 0)
+        self.cached_video_count_label = QLabel("-")
+        self.cached_video_ratio_label = QLabel("100.00%")
+        self.cached_video_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cached_video_ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        video_grid.addWidget(self.cached_video_count_label, 1, 1)
+        video_grid.addWidget(self.cached_video_ratio_label, 1, 2)
+
+        video_grid.addWidget(QLabel(f"高赞视频数量（>{self.high_like_threshold}）"), 2, 0)
+        self.high_like_video_count_label = QLabel("-")
+        self.high_like_video_ratio_label = QLabel("-")
+        self.high_like_video_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.high_like_video_ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        video_grid.addWidget(self.high_like_video_count_label, 2, 1)
+        video_grid.addWidget(self.high_like_video_ratio_label, 2, 2)
+        layout.addWidget(video_group)
+
+        self.refresh_info_label = QLabel("")
+        self.refresh_info_label.setStyleSheet("padding: 2px 2px; color: #666;")
+        layout.addWidget(self.refresh_info_label)
+
+        button_row = QHBoxLayout()
+        self.refresh_button = QPushButton("刷新数据")
+        self.close_button = QPushButton("关闭")
+        self.refresh_button.clicked.connect(self.refresh_stats)
+        self.close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(self.refresh_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+        self.refresh_stats()
+
+    def refresh_stats(self):
+        try:
+            from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
+            from douyin_analyzer.cache import CacheStore
+            from douyin_analyzer.config import load_analyzer_config
+
+            config = load_analyzer_config()
+            cache_store = CacheStore(config)
+            analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
+
+            followings_payload = cache_store.load_followings_cache_payload()
+            progress = cache_store.load_progress()
+            cache_rows = analyzer.build_cache_inventory_rows(followings_payload, progress)
+            active_rows = [
+                row for row in cache_rows
+                if str((row or {}).get("has_followings_cache", "")).strip() == "是"
+            ]
+            total_followings = len(active_rows)
+            followings_cached_at = analyzer._format_cached_at(
+                (followings_payload or {}).get("cached_at") if isinstance(followings_payload, dict) else ""
+            )
+
+            for mode, _ in self.MODE_ROWS:
+                flag_key = f"has_{mode}_cache"
+                captured_count = sum(
+                    1 for row in active_rows
+                    if str((row or {}).get(flag_key, "")).strip() == "是"
+                )
+                percent = (captured_count / total_followings * 100) if total_followings else 0
+                self.mode_count_labels[mode].setText(str(captured_count))
+                self.mode_percent_labels[mode].setText(f"{percent:.2f}%")
+
+            active_uids = {
+                str((row or {}).get("uploader_id") or "").strip()
+                for row in active_rows
+                if str((row or {}).get("uploader_id") or "").strip()
+            }
+            cached_video_count = 0
+            high_like_video_count = 0
+            seen_video_ids = set()
+            for uid, entry in (progress or {}).items():
+                if str(uid).strip() not in active_uids or not isinstance(entry, dict):
+                    continue
+                for video in entry.get("videos", []) or []:
+                    if not isinstance(video, dict):
+                        continue
+                    video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
+                    dedupe_key = video_id or f"{uid}:{len(seen_video_ids)}"
+                    if dedupe_key in seen_video_ids:
+                        continue
+                    seen_video_ids.add(dedupe_key)
+                    cached_video_count += 1
+                    try:
+                        like_count = int(float(video.get("like_count") or 0))
+                    except (TypeError, ValueError):
+                        like_count = 0
+                    if like_count > self.high_like_threshold:
+                        high_like_video_count += 1
+
+            high_like_ratio = (
+                high_like_video_count / cached_video_count * 100
+                if cached_video_count
+                else 0
+            )
+            self.cached_video_count_label.setText(str(cached_video_count))
+            self.cached_video_ratio_label.setText("100.00%" if cached_video_count else "0.00%")
+            self.high_like_video_count_label.setText(str(high_like_video_count))
+            self.high_like_video_ratio_label.setText(f"{high_like_ratio:.2f}%")
+
+            if total_followings:
+                self.summary_label.setText(
+                    f"当前关注博主总数：{total_followings} 位\n"
+                    f"关注列表缓存时间：{followings_cached_at or '暂无'}\n"
+                    f"进度缓存条目：{len(progress or {})} 条"
+                )
+            else:
+                self.summary_label.setText(
+                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看模式完成度。"
+                )
+
+            self.refresh_info_label.setText(
+                f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except Exception as exc:
+            self.summary_label.setText(f"读取抖音统计失败：{exc}")
+            for mode, _ in self.MODE_ROWS:
+                self.mode_count_labels[mode].setText("-")
+                self.mode_percent_labels[mode].setText("-")
+            self.cached_video_count_label.setText("-")
+            self.cached_video_ratio_label.setText("-")
+            self.high_like_video_count_label.setText("-")
+            self.high_like_video_ratio_label.setText("-")
+            self.refresh_info_label.setText(
+                f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+
 class MainWindow(QMainWindow):
     BILIBILI_MODE_OPTIONS = [
         ("精确模式（主榜 + 视频分析）", "precise_full"),
@@ -405,6 +587,10 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.high_like_export_button = QPushButton("导出高赞视频")
         self.high_like_export_button.clicked.connect(self._start_high_like_export)
+        self.unfollow_cleanup_button = QPushButton("清理非当前关注缓存")
+        self.unfollow_cleanup_button.clicked.connect(self._start_douyin_non_followed_cache_cleanup)
+        self.douyin_stats_button = QPushButton("抖音统计")
+        self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
         self.cookie_check_button.clicked.connect(self._check_bilibili_cookie)
         self.advanced_button = QPushButton("高级设置")
@@ -416,6 +602,8 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.high_like_export_button)
+        button_row.addWidget(self.unfollow_cleanup_button)
+        button_row.addWidget(self.douyin_stats_button)
         button_row.addWidget(self.cookie_check_button)
         button_row.addWidget(self.advanced_button)
         button_row.addWidget(self.lock_button)
@@ -576,6 +764,10 @@ class MainWindow(QMainWindow):
             self._append_log(f"配置已锁定，后续将按当前参数运行。配置文件: {GUI_CONFIG_PATH}")
         self._sync_visible_options()
 
+    def _open_douyin_stats(self):
+        dialog = DouyinStatsDialog(self, high_like_threshold=self.high_like_spin.value())
+        dialog.exec_()
+
     def _start(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
@@ -591,6 +783,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.high_like_export_button.setEnabled(False)
+        self.unfollow_cleanup_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -614,6 +807,31 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.high_like_export_button.setEnabled(False)
         self.high_like_export_button.setText("导出中...")
+        self.unfollow_cleanup_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
+        self.worker = RunnerThread(config)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
+
+    def _start_douyin_non_followed_cache_cleanup(self):
+        if self.worker and self.worker.isRunning():
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+
+        config = self._collect_config()
+        config.platform = "douyin_non_followed_cleanup"
+        config.action = "fetch"
+        if self.config_locked:
+            self._save_gui_config()
+
+        self.log_text.clear()
+        self.start_button.setEnabled(False)
+        self.high_like_export_button.setEnabled(False)
+        self.unfollow_cleanup_button.setEnabled(False)
+        self.unfollow_cleanup_button.setText("清理中...")
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -680,6 +898,8 @@ class MainWindow(QMainWindow):
         self.start_button.setText("开始运行")
         self.high_like_export_button.setEnabled(not self.config_locked)
         self.high_like_export_button.setText("导出高赞视频")
+        self.unfollow_cleanup_button.setEnabled(True)
+        self.unfollow_cleanup_button.setText("清理非当前关注缓存")
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):
             self.stop_button.setText("保存完成，可以关闭")

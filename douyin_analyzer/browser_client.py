@@ -45,6 +45,27 @@ class DouyinBrowserClient:
         except Exception:
             pass
 
+    def _maximize_window_if_possible(self):
+        if self.page is None:
+            return
+        try:
+            window = self.page.set.window
+        except Exception:
+            return
+        for method_name in ("max", "full", "maximize", "fullscreen"):
+            try:
+                method = getattr(window, method_name, None)
+                if callable(method):
+                    method()
+                    return
+            except Exception:
+                continue
+
+    def _prepare_window_after_launch(self):
+        self._maximize_window_if_possible()
+        time.sleep(0.8)
+        self._minimize_window_if_possible()
+
     def start(self):
         if self.page is not None:
             return self.page
@@ -56,10 +77,10 @@ class DouyinBrowserClient:
             except Exception:
                 pass
         co.set_argument("--mute-audio")
-        co.set_argument("--start-minimized")
+        co.set_argument("--start-maximized")
         co.set_user_data_path(str(self.config.browser_user_data_path))
         self.page = ChromiumPage(co)
-        self._minimize_window_if_possible()
+        self._prepare_window_after_launch()
         return self.page
 
     def _respect_request_rate(self):
@@ -96,7 +117,6 @@ class DouyinBrowserClient:
         if wait_seconds > 0:
             wait_with_progress(wait_seconds, "抖音浏览器会话重启冷却中")
         page = self.start()
-        self._minimize_window_if_possible()
         return page
 
     def ensure_login(self):

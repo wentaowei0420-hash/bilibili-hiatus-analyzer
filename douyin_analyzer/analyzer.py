@@ -2,6 +2,7 @@ import time
 
 from loguru import logger
 
+from common.platform_store import read_video_rows_for_uploader
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.logging_utils import (
     create_progress,
@@ -139,6 +140,107 @@ class DouyinHiatusAnalyzer:
         return fallback
 
     @staticmethod
+    def summary_has_precise_public_like_total(summary):
+        if not isinstance(summary, dict):
+            return False
+        summary_scope = str(summary.get("summary_scope") or "").strip().lower()
+        total_favorited_source = str(summary.get("total_favorited_source") or "").strip().lower()
+        return (
+            summary_scope in {"full", "preserved_full"}
+            and total_favorited_source == "public_video_like_sum"
+            and summary.get("total_favorited") not in (None, "")
+        )
+
+    @staticmethod
+    def sum_public_video_likes(videos):
+        if not isinstance(videos, list):
+            return None
+
+        total_like_count = 0
+        has_like_value = False
+        for video in videos:
+            if not isinstance(video, dict):
+                continue
+            like_count = video.get("like_count")
+            if like_count in (None, ""):
+                continue
+            try:
+                total_like_count += int(like_count)
+                has_like_value = True
+            except (TypeError, ValueError):
+                continue
+
+        return total_like_count if has_like_value else None
+
+    def apply_precise_public_like_total_from_videos(self, user, summary, videos):
+        if not isinstance(summary, dict):
+            return summary
+
+        if not self.has_complete_video_sample(user, videos):
+            return summary
+
+        total_like_count = self.sum_public_video_likes(videos)
+        if total_like_count is None:
+            return summary
+
+        summary["total_favorited"] = total_like_count
+        summary["total_favorited_source"] = "public_video_like_sum"
+        summary["total_videos"] = len(videos)
+        if videos:
+            summary["average_like_count"] = int(total_like_count / len(videos))
+        return summary
+
+    def resolve_total_favorited(self, user, summary=None):
+        user_total_favorited = (user or {}).get("total_favorited", "")
+        if self.summary_has_precise_public_like_total(summary):
+            return self._safe_int(summary.get("total_favorited"), summary.get("total_favorited"))
+        if isinstance(summary, dict):
+            summary_total_favorited = summary.get("total_favorited")
+            if self.get_fetch_mode() == "full" and summary_total_favorited not in (None, ""):
+                return self._safe_int(summary_total_favorited, summary_total_favorited)
+        if user_total_favorited not in (None, ""):
+            return self._safe_int(user_total_favorited, user_total_favorited)
+        if isinstance(summary, dict):
+            summary_total_favorited = summary.get("total_favorited")
+            if summary_total_favorited not in (None, ""):
+                return self._safe_int(summary_total_favorited, summary_total_favorited)
+        return user_total_favorited
+
+    def resolve_published_video_count(self, user, summary=None):
+        if self.summary_has_precise_public_like_total(summary):
+            summary_total_videos = (summary or {}).get("total_videos")
+            if summary_total_videos not in (None, ""):
+                return self._safe_int(summary_total_videos, summary_total_videos)
+        user_aweme_count = (user or {}).get("aweme_count")
+        if user_aweme_count not in (None, ""):
+            return self._safe_int(user_aweme_count, user_aweme_count)
+        if isinstance(summary, dict):
+            summary_total_videos = summary.get("total_videos")
+            if summary_total_videos not in (None, ""):
+                return self._safe_int(summary_total_videos, summary_total_videos)
+        return user_aweme_count
+
+    def resolve_average_like_count(self, user, summary=None, fallback=""):
+        total_favorited = self.resolve_total_favorited(user, summary)
+        video_count = 0
+        if self.summary_has_precise_public_like_total(summary):
+            video_count = self._safe_int((summary or {}).get("total_videos"), 0)
+        if video_count <= 0:
+            video_count = self._safe_int((user or {}).get("aweme_count"), 0)
+        if video_count <= 0 and isinstance(summary, dict):
+            video_count = self._safe_int(summary.get("total_videos"), 0)
+
+        total_favorited_int = self._safe_int(total_favorited, 0)
+        if total_favorited_int > 0 and video_count > 0:
+            return int(total_favorited_int / video_count)
+
+        if isinstance(summary, dict):
+            average_like_count = summary.get("average_like_count")
+            if average_like_count not in (None, ""):
+                return average_like_count
+        return self.calculate_average_like_from_profile(user, fallback)
+
+    @staticmethod
     def merge_videos(existing_videos, new_videos):
         merged = {}
         for video in existing_videos or []:
@@ -172,7 +274,7 @@ class DouyinHiatusAnalyzer:
     def build_result_item(self, user, summary, latest_video):
         upload_timestamp = normalize_timestamp(latest_video.get("publish_timestamp"))
         days_since = calculate_days_since(upload_timestamp)
-        published_video_count = user.get("aweme_count") or summary.get("total_videos", 0)
+        published_video_count = self.resolve_published_video_count(user, summary)
         data_source = "douyin_video_api" if self.get_fetch_mode() == "full" else "douyin_recent_video_api"
         return {
             "uploader_name": user["nickname"],
@@ -181,10 +283,11 @@ class DouyinHiatusAnalyzer:
             "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
-            "total_favorited": user.get("total_favorited", ""),
+            "total_favorited": self.resolve_total_favorited(user, summary),
             "published_video_count": published_video_count,
-            "average_like_count": self.calculate_average_like_from_profile(
+            "average_like_count": self.resolve_average_like_count(
                 user,
+                summary,
                 summary.get("average_like_count", 0),
             ),
             "average_update_interval_days": summary.get("average_update_interval_days"),
@@ -348,16 +451,18 @@ class DouyinHiatusAnalyzer:
         cached_videos = entry.get("videos", [])
         latest_video = self.get_latest_video_from_entry(entry)
         cached_summary = entry.get("summary", {})
+        complete_stored_videos = self.load_complete_stored_videos(user, cached_summary, cached_videos)
+        if complete_stored_videos:
+            cached_videos = complete_stored_videos
 
         if self.summary_has_complete_statistics(cached_summary):
             summary = dict(cached_summary or {})
+            summary = self.apply_precise_public_like_total_from_videos(user, summary, cached_videos)
             summary["uploader_name"] = user.get("nickname", summary.get("uploader_name", ""))
             summary["uploader_id"] = user.get("sec_uid", summary.get("uploader_id", ""))
             summary["follower_count"] = user.get("follower_count", summary.get("follower_count", ""))
-            summary["total_favorited"] = user.get(
-                "total_favorited",
-                summary.get("total_favorited", ""),
-            )
+            if summary.get("total_favorited") in (None, ""):
+                summary["total_favorited"] = user.get("total_favorited", "")
             return self.normalize_summary_for_mode(user, summary, cached_videos, latest_video)
 
         if isinstance(cached_videos, list) and cached_videos:
@@ -375,7 +480,8 @@ class DouyinHiatusAnalyzer:
             result = self.build_result_item(user, summary, latest_video)
         else:
             result = self.build_counts_only_result_item(user)
-            result["average_like_count"] = summary.get("average_like_count", "")
+            result["total_favorited"] = self.resolve_total_favorited(user, summary)
+            result["average_like_count"] = self.resolve_average_like_count(user, summary, "")
             result["average_update_interval_days"] = summary.get("average_update_interval_days", "")
 
             latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
@@ -412,6 +518,31 @@ class DouyinHiatusAnalyzer:
             aweme_count = 0
 
         return aweme_count > 0 and len(videos) >= aweme_count
+
+    def load_complete_stored_videos(self, user, summary=None, current_videos=None):
+        uid = str((user or {}).get("sec_uid") or (summary or {}).get("uploader_id") or "").strip()
+        if not uid:
+            return []
+
+        expected_count = self._safe_int((user or {}).get("aweme_count"), 0)
+        if expected_count <= 0 and isinstance(summary, dict):
+            expected_count = self._safe_int(summary.get("total_videos"), 0)
+        if expected_count <= 0:
+            return []
+
+        if isinstance(current_videos, list) and len(current_videos) >= expected_count:
+            return current_videos
+
+        stored_videos = read_video_rows_for_uploader(self.config.export_store_db, "douyin", uid)
+        if len(stored_videos) >= expected_count:
+            logger.info(
+                "Douyin precise likes recovered from stored videos | uid={} | videos={} | expected={}",
+                uid,
+                len(stored_videos),
+                expected_count,
+            )
+            return stored_videos
+        return []
 
     @staticmethod
     def summary_has_complete_statistics(summary):
@@ -452,6 +583,8 @@ class DouyinHiatusAnalyzer:
     def build_preserved_full_summary(self, user, summary, latest_video=None):
         preserved = self.build_partial_summary(user, latest_video)
         for key in [
+            "total_favorited",
+            "total_favorited_source",
             "total_duration_seconds",
             "average_duration_seconds",
             "average_duration_text",
@@ -474,8 +607,8 @@ class DouyinHiatusAnalyzer:
         if self.get_fetch_mode() == "full":
             return summary
         if self.has_complete_video_sample(user, videos):
-            return summary
-        if self.summary_has_complete_statistics(summary):
+            return self.apply_precise_public_like_total_from_videos(user, summary, videos)
+        if self.summary_has_precise_public_like_total(summary):
             return self.build_preserved_full_summary(user, summary, latest_video)
         return self.build_partial_summary(user, latest_video)
 
@@ -484,6 +617,7 @@ class DouyinHiatusAnalyzer:
             return self.build_empty_summary(user)
 
         total_videos = len(videos)
+        complete_video_sample = self.get_fetch_mode() == "full" or self.has_complete_video_sample(user, videos)
         short_count = sum(1 for video in videos if video["duration_category"] == SHORT_VIDEO_LABEL)
         medium_count = sum(1 for video in videos if video["duration_category"] == MEDIUM_VIDEO_LABEL)
         medium_long_count = sum(
@@ -491,7 +625,16 @@ class DouyinHiatusAnalyzer:
         )
         long_count = sum(1 for video in videos if video["duration_category"] == LONG_VIDEO_LABEL)
         total_duration_seconds = sum(video["duration_seconds"] for video in videos)
-        total_like_count = sum(int(video.get("like_count") or 0) for video in videos)
+        total_like_count = self.sum_public_video_likes(videos) or 0
+        total_favorited = total_like_count if complete_video_sample else user.get("total_favorited", "")
+        average_like_count = (
+            int(total_like_count / total_videos)
+            if complete_video_sample and total_videos
+            else self.calculate_average_like_from_profile(
+                user,
+                int(total_like_count / total_videos) if total_videos else 0,
+            )
+        )
         average_duration_seconds = int(total_duration_seconds / total_videos) if total_videos else 0
         latest_publish_timestamp = max(
             (normalize_timestamp(video.get("publish_timestamp")) for video in videos),
@@ -502,16 +645,14 @@ class DouyinHiatusAnalyzer:
             "uploader_name": user["nickname"],
             "uploader_id": user["sec_uid"],
             "follower_count": user.get("follower_count"),
-            "total_favorited": user.get("total_favorited", ""),
+            "total_favorited": total_favorited,
+            "total_favorited_source": "public_video_like_sum" if complete_video_sample else "profile_total",
             "total_videos": total_videos,
             "latest_publish_timestamp": latest_publish_timestamp,
             "total_duration_seconds": total_duration_seconds,
             "average_duration_seconds": average_duration_seconds,
             "average_duration_text": seconds_to_duration_text(average_duration_seconds),
-            "average_like_count": self.calculate_average_like_from_profile(
-                user,
-                int(total_like_count / total_videos) if total_videos else 0,
-            ),
+            "average_like_count": average_like_count,
             "average_update_interval_days": calculate_average_update_interval_days(
                 video.get("publish_timestamp") for video in videos
             ),
@@ -523,7 +664,7 @@ class DouyinHiatusAnalyzer:
             "medium_long_video_ratio": format_ratio(medium_long_count, total_videos),
             "long_video_count": long_count,
             "long_video_ratio": format_ratio(long_count, total_videos),
-            "summary_scope": "full",
+            "summary_scope": "full" if complete_video_sample else "partial",
         }
 
     @staticmethod
@@ -543,6 +684,20 @@ class DouyinHiatusAnalyzer:
         if not normalized:
             return ""
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(normalized))
+
+    def _format_progress_expires_at(self, cached_at):
+        normalized = normalize_timestamp(cached_at)
+        if not normalized:
+            return ""
+        expires_at = normalized + int(self.config.precise_cache_max_age_hours) * 3600
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_at))
+
+    def _is_progress_cache_due(self, cached_at):
+        normalized = normalize_timestamp(cached_at)
+        if not normalized:
+            return "是"
+        expires_at = normalized + int(self.config.precise_cache_max_age_hours) * 3600
+        return "是" if time.time() >= expires_at else ""
 
     def infer_cache_modes(self, entry, has_followings_cache=False):
         modes = set()
@@ -635,6 +790,12 @@ class DouyinHiatusAnalyzer:
                     "followings_cache_saved_at": followings_cached_at if uid in followings_by_uid else "",
                     "has_progress_cache": "是" if isinstance(entry, dict) else "",
                     "progress_cached_at": self._format_cached_at(entry.get("cached_at")) if isinstance(entry, dict) else "",
+                    "progress_cache_expires_at": (
+                        self._format_progress_expires_at(entry.get("cached_at")) if isinstance(entry, dict) else ""
+                    ),
+                    "progress_cache_due": (
+                        self._is_progress_cache_due(entry.get("cached_at")) if isinstance(entry, dict) else "是"
+                    ),
                     "summary_scope": (summary.get("summary_scope") if isinstance(summary, dict) else "") or "",
                     "cached_video_count": len(entry.get("videos", []) or []) if isinstance(entry, dict) else 0,
                     "has_latest_video_cache": "是" if latest_video else "",
@@ -675,21 +836,13 @@ class DouyinHiatusAnalyzer:
             latest_video = self.get_latest_video_from_entry(entry)
             if isinstance(entry, dict):
                 videos = entry.get("videos", []) or []
-                summary = entry.get("summary", self.build_empty_summary(user))
-                if not isinstance(summary, dict):
-                    summary = self.build_empty_summary(user)
-                summary = dict(summary)
-                summary["uploader_name"] = user["nickname"]
-                summary["uploader_id"] = user["sec_uid"]
-                summary["follower_count"] = user.get("follower_count")
-                summary["total_favorited"] = user.get("total_favorited", summary.get("total_favorited", ""))
-                if user.get("aweme_count") not in (None, ""):
-                    summary["total_videos"] = user.get("aweme_count")
-                summary = self.normalize_summary_for_mode(user, summary, videos, latest_video)
+                summary = self.build_summary_from_cached_entry(user, entry)
                 if latest_video:
                     result = self.build_result_item(user, summary, latest_video)
                 else:
                     result = self.build_counts_only_result_item(user)
+                    result["total_favorited"] = self.resolve_total_favorited(user, summary)
+                    result["average_like_count"] = self.resolve_average_like_count(user, summary, "")
             else:
                 summary = self.build_counts_only_summary(user)
                 result = self.build_counts_only_result_item(user)
@@ -788,6 +941,7 @@ class DouyinHiatusAnalyzer:
         progress,
         pending_progress_saves,
         processed_count,
+        merge_existing=False,
     ):
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
@@ -800,10 +954,14 @@ class DouyinHiatusAnalyzer:
             key=self._sort_days_since_value,
             reverse=True,
         )
-        save_to_csv(self.config, snapshot_results)
+        save_to_csv(self.config, snapshot_results, merge_existing=merge_existing)
 
         if self.should_export_summary_analysis():
-            save_video_duration_analysis_to_csv(self.config, list(summary_rows))
+            save_video_duration_analysis_to_csv(
+                self.config,
+                list(summary_rows),
+                merge_existing=merge_existing,
+            )
         if self.should_export_duration_analysis():
             save_all_videos_to_csv(self.config, list(all_video_rows))
             save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
@@ -900,20 +1058,51 @@ class DouyinHiatusAnalyzer:
             print("❌ 未能获取到任何抖音关注列表")
             return None
 
+        progress = self.cache_store.load_progress()
+        if progress:
+            print(f"♻️  已加载 {len(progress)} 条抖音缓存")
+
         followings = self.sort_followings_by_follower_count(followings)
         total_followings = len(followings)
         partial_run = self.max_followings is not None and self.max_followings < total_followings
         if partial_run:
-            followings = followings[: self.max_followings]
-            print(
-                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
-                f"本轮仅处理粉丝数前 {len(followings)} 位"
-            )
-            logger.info(
-                "Douyin partial following limit applied | total={} | selected={}",
-                total_followings,
-                len(followings),
-            )
+            if fetch_mode == "counts":
+                followings = followings[: self.max_followings]
+                print(
+                    f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                    f"本轮仅处理粉丝数前 {len(followings)} 位"
+                )
+                logger.info(
+                    "Douyin partial following limit applied | mode=counts | total={} | selected={}",
+                    total_followings,
+                    len(followings),
+                )
+            else:
+                due_followings = []
+                for user in followings:
+                    uid = user.get("sec_uid") if isinstance(user, dict) else None
+                    entry = progress.get(uid) if isinstance(progress, dict) and uid else None
+                    refresh_needed, _ = self.cache_store.should_refresh_cache(
+                        user,
+                        entry,
+                        return_reason=True,
+                        refresh_on_profile_change=False,
+                    )
+                    if refresh_needed:
+                        due_followings.append(user)
+                due_total = len(due_followings)
+                followings = due_followings[: self.max_followings]
+                print(
+                    f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                    f"达到抓取条件={due_total} 位 | 本轮仅处理前 {len(followings)} 位超时或无记录博主"
+                )
+                logger.info(
+                    "Douyin partial following limit applied | mode={} | total={} | due_candidates={} | selected={}",
+                    fetch_mode,
+                    total_followings,
+                    due_total,
+                    len(followings),
+                )
         if followings:
             top_user = followings[0] if isinstance(followings[0], dict) else {}
             print(
@@ -928,10 +1117,6 @@ class DouyinHiatusAnalyzer:
             )
         print("📈 已按粉丝数从高到低排序后开始抓取。")
 
-        progress = self.cache_store.load_progress()
-        if progress:
-            print(f"♻️  已加载 {len(progress)} 条抖音缓存")
-
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
             print("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
@@ -943,6 +1128,9 @@ class DouyinHiatusAnalyzer:
             print(f"🧩 当前为增量模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品并合并到缓存。")
         else:
             print("📚 当前为全量模式：会抓取博主全部作品，并生成完整时长分析。")
+        if fetch_mode != "counts":
+            cache_days = self.config.precise_cache_max_age_hours / 24
+            print(f"🏷️  非基础模式抓取标记已启用：{cache_days:.0f} 天内已抓取博主将复用缓存，不重复进主页。")
         if self.config.enable_video_duration_analysis and not export_duration_analysis:
             print("⏭️  当前模式已跳过全量视频时长分析导出，以降低风控概率。")
 
@@ -974,6 +1162,7 @@ class DouyinHiatusAnalyzer:
                             progress,
                             pending_progress_saves,
                             index - 1,
+                            merge_existing=partial_run,
                         )
                         raise
                     entry = progress.get(user.get("sec_uid")) if isinstance(progress, dict) else None
@@ -1000,6 +1189,7 @@ class DouyinHiatusAnalyzer:
                             progress,
                             pending_progress_saves,
                             index,
+                            merge_existing=partial_run,
                         )
 
             self.display_counts_results(results)
@@ -1048,31 +1238,55 @@ class DouyinHiatusAnalyzer:
                             progress,
                             pending_progress_saves,
                             index - 1,
+                            merge_existing=partial_run,
                         )
                         raise
 
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
-                    try:
-                        self.browser_client.refresh_user_profile_from_homepage(user)
-                        verified_users.append(dict(user))
-                        profile_verified_count += 1
-                    except DouyinRateLimitError as exc:
-                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
-                        self.browser_client.restart(self.config.rate_limit_global_cooldown)
-                    except DouyinServiceError as exc:
-                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
-                        self.browser_client.restart(self.config.service_error_global_cooldown)
-                    except Exception as exc:
-                        print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
+                    refresh_needed, refresh_reason = self.cache_store.should_refresh_cache(
+                        user,
+                        entry,
+                        return_reason=True,
+                        refresh_on_profile_change=False,
+                    )
+                    profile_verified = False
+                    if refresh_needed:
+                        if refresh_reason in refresh_reason_counts:
+                            refresh_reason_counts[refresh_reason] += 1
+                        try:
+                            self.browser_client.refresh_user_profile_from_homepage(user)
+                            verified_users.append(dict(user))
+                            profile_verified = True
+                            profile_verified_count += 1
+                            refreshed_user_count += 1
+                        except DouyinRateLimitError as exc:
+                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
+                            self.browser_client.restart(self.config.rate_limit_global_cooldown)
+                        except DouyinServiceError as exc:
+                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
+                            self.browser_client.restart(self.config.service_error_global_cooldown)
+                        except Exception as exc:
+                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
+                    else:
+                        cache_hit_count += 1
 
                     summary = self.build_summary_from_cached_entry(user, entry)
+                    if (
+                        profile_verified
+                        and user.get("total_favorited") not in (None, "")
+                        and not self.summary_has_precise_public_like_total(summary)
+                    ):
+                        summary["total_favorited"] = user.get("total_favorited")
                     result = self.build_result_from_cached_entry(user, entry)
-                    result["data_source"] = "douyin_profile_verify"
+                    if profile_verified:
+                        result["data_source"] = "douyin_profile_verify"
+                    elif not refresh_needed:
+                        result["data_source"] = "douyin_cache_mark_valid"
                     results.append(result)
                     if self.should_export_summary_analysis():
                         summary_rows.append(summary)
 
-                    if uid:
+                    if uid and profile_verified:
                         videos = entry.get("videos", []) if isinstance(entry, dict) else []
                         latest_video = self.get_latest_video_from_entry(entry)
                         existing_modes = set()
@@ -1101,6 +1315,28 @@ class DouyinHiatusAnalyzer:
                         pending_progress_saves = 0
 
                     if (
+                        profile_verified
+                        and self.config.refresh_batch_size > 0
+                        and refreshed_user_count % self.config.refresh_batch_size == 0
+                    ):
+                        cooldown = self.config.refresh_batch_cooldown
+                        print(
+                            f"⏸️  已连续主页校验 {refreshed_user_count} 位博主，"
+                            f"批次冷却 {cooldown:.0f} 秒后继续..."
+                        )
+                        wait_with_progress(cooldown, "抖音主页校验批次冷却中")
+
+                    if (
+                        profile_verified
+                        and self.config.browser_restart_interval_users > 0
+                        and refreshed_user_count % self.config.browser_restart_interval_users == 0
+                    ):
+                        print(
+                            f"🔧 已主页校验 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
+                        )
+                        self.browser_client.restart(5)
+
+                    if (
                         self.config.intermediate_upload_interval_users > 0
                         and index % self.config.intermediate_upload_interval_users == 0
                     ):
@@ -1112,6 +1348,7 @@ class DouyinHiatusAnalyzer:
                             progress,
                             pending_progress_saves,
                             index,
+                            merge_existing=partial_run,
                         )
                         pending_progress_saves = 0
 
@@ -1135,15 +1372,16 @@ class DouyinHiatusAnalyzer:
             if self.should_export_summary_analysis():
                 exported.append(self.config.video_duration_analysis_csv)
             logger.info(
-                "Douyin verify finished | followings={} | verified={} | results={} | exported={}",
+                "Douyin verify finished | followings={} | verified={} | cache_hits={} | results={} | exported={}",
                 len(followings),
                 profile_verified_count,
+                cache_hit_count,
                 len(results),
                 [str(path) for path in exported],
             )
             print(
                 f"🗂️  抖音 verify 模式已输出：{self._format_output_summary(exported)}，"
-                f"成功校验 {profile_verified_count}/{len(followings)} 位博主"
+                f"本轮进主页校验 {profile_verified_count} 位，复用未到期缓存 {cache_hit_count} 位"
             )
             return results
 
@@ -1160,6 +1398,7 @@ class DouyinHiatusAnalyzer:
                         progress,
                         pending_progress_saves,
                         index - 1,
+                        merge_existing=partial_run,
                     )
                     raise
                 entry = progress.get(user["sec_uid"])
@@ -1174,6 +1413,7 @@ class DouyinHiatusAnalyzer:
                     user,
                     entry,
                     return_reason=True,
+                    refresh_on_profile_change=False,
                 )
                 if refresh_needed:
                     if refresh_reason in refresh_reason_counts:
@@ -1231,7 +1471,9 @@ class DouyinHiatusAnalyzer:
                         summary["uploader_name"] = user["nickname"]
                         summary["uploader_id"] = user["sec_uid"]
                         summary["follower_count"] = user.get("follower_count")
-                        summary["total_favorited"] = user.get("total_favorited", summary.get("total_favorited", ""))
+                        summary = self.apply_precise_public_like_total_from_videos(user, summary, videos)
+                        if not self.summary_has_precise_public_like_total(summary):
+                            summary["total_favorited"] = user.get("total_favorited", summary.get("total_favorited", ""))
                         if user.get("aweme_count") is not None:
                             summary["total_videos"] = user.get("aweme_count")
                         if latest_video:
@@ -1326,6 +1568,7 @@ class DouyinHiatusAnalyzer:
                         progress,
                         pending_progress_saves,
                         index,
+                        merge_existing=partial_run,
                     )
                     pending_progress_saves = 0
 

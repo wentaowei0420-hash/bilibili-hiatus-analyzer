@@ -154,6 +154,41 @@ class CacheStore:
 
         return sorted(removed_uids)
 
+    def prune_non_followed_cache(self):
+        followings_payload = self.load_followings_cache_payload()
+        followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
+        current_uids = {
+            str((item or {}).get("sec_uid") or "").strip()
+            for item in (followings or [])
+            if isinstance(item, dict) and str((item or {}).get("sec_uid") or "").strip()
+        }
+        if not current_uids:
+            return []
+
+        progress = self.load_progress()
+        cached_progress_uids = {
+            str(uid).strip()
+            for uid in (progress or {}).keys()
+            if str(uid).strip()
+        }
+        removed_uids = sorted(cached_progress_uids - current_uids)
+        if not removed_uids:
+            return []
+
+        updated_progress = {
+            key: value
+            for key, value in (progress or {}).items()
+            if str(key).strip() not in removed_uids
+        }
+        if len(updated_progress) != len(progress):
+            self.save_progress(updated_progress)
+
+        self._remove_uploader_rows_from_store(removed_uids)
+        print(
+            f"🧹 检测到 {len(removed_uids)} 位非当前关注博主，已从本地缓存与导出状态中清理。"
+        )
+        return removed_uids
+
     def is_followings_cache_expired(self):
         try:
             with self.config.followings_cache_json.open("r", encoding="utf-8") as cache_file:
@@ -216,7 +251,13 @@ class CacheStore:
             return True
         return time.time() - cached_timestamp >= self.config.precise_cache_max_age_hours * 3600
 
-    def should_refresh_cache(self, current_user, progress_entry, return_reason=False):
+    def should_refresh_cache(
+        self,
+        current_user,
+        progress_entry,
+        return_reason=False,
+        refresh_on_profile_change=True,
+    ):
         def _result(needs_refresh, reason=None):
             return (needs_refresh, reason) if return_reason else needs_refresh
 
@@ -233,19 +274,23 @@ class CacheStore:
         if not isinstance(cached_user, dict):
             cached_user = {}
 
-        current_aweme_count = current_user.get("aweme_count")
-        cached_aweme_count = cached_user.get("aweme_count", summary.get("total_videos"))
-        if current_aweme_count is not None and cached_aweme_count is not None:
-            if int(current_aweme_count) != int(cached_aweme_count):
-                return _result(True, "aweme_count_changed")
+        if refresh_on_profile_change:
+            current_aweme_count = current_user.get("aweme_count")
+            cached_aweme_count = cached_user.get("aweme_count", summary.get("total_videos"))
+            if current_aweme_count is not None and cached_aweme_count is not None:
+                try:
+                    if int(current_aweme_count) != int(cached_aweme_count):
+                        return _result(True, "aweme_count_changed")
+                except (TypeError, ValueError):
+                    pass
 
-        current_latest_publish_timestamp = normalize_timestamp(current_user.get("latest_publish_timestamp"))
-        cached_latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
-        if current_latest_publish_timestamp and (
-            not cached_latest_publish_timestamp
-            or current_latest_publish_timestamp > cached_latest_publish_timestamp
-        ):
-            return _result(True, "latest_publish_timestamp_newer")
+            current_latest_publish_timestamp = normalize_timestamp(current_user.get("latest_publish_timestamp"))
+            cached_latest_publish_timestamp = normalize_timestamp(summary.get("latest_publish_timestamp"))
+            if current_latest_publish_timestamp and (
+                not cached_latest_publish_timestamp
+                or current_latest_publish_timestamp > cached_latest_publish_timestamp
+            ):
+                return _result(True, "latest_publish_timestamp_newer")
         return _result(False, "reuse")
 
     def refresh_result_runtime_fields(self, result):

@@ -286,7 +286,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         followings_cache_max_age_hours=int(
             os.getenv("DOUYIN_FOLLOWINGS_CACHE_MAX_AGE_HOURS", "50")
         ),
-        precise_cache_max_age_hours=int(os.getenv("DOUYIN_CACHE_MAX_AGE_HOURS", "432")),
+        precise_cache_max_age_hours=int(os.getenv("DOUYIN_CACHE_MAX_AGE_HOURS", "480")),
         progress_trim_video_limit=int(os.getenv("DOUYIN_PROGRESS_TRIM_VIDEO_LIMIT", "50")),
         enable_video_duration_analysis=_get_bool(
             "DOUYIN_ENABLE_VIDEO_DURATION_ANALYSIS", True

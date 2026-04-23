@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 
 from bilibili_analyzer.logging_utils import smart_print as print
-from common.export_store import upsert_rows_to_table, write_rows_to_table
+from common.export_store import read_table_to_dataframe, upsert_rows_to_table, write_rows_to_table
 from common.platform_store import (
     replace_summary_rows,
     replace_video_rows_for_uploader,
@@ -18,6 +18,41 @@ def _mapped_rows(fieldnames, headers, rows):
         source = row if isinstance(row, dict) else {}
         mapped_rows.append({headers[field]: source.get(field, "") for field in fieldnames})
     return mapped_rows
+
+
+def _normalize_cell(value):
+    if value is None:
+        return ""
+    try:
+        if value != value:
+            return ""
+    except Exception:
+        pass
+    return value
+
+
+def _write_mapped_csv(path, ordered_headers, rows, error_message):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=ordered_headers, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows or []:
+                source = row if isinstance(row, dict) else {}
+                writer.writerow({header: _normalize_cell(source.get(header, "")) for header in ordered_headers})
+    except Exception as exc:
+        print(f"{error_message}: {exc}")
+
+
+def _load_mapped_rows_from_store(db_path, table_name, ordered_headers):
+    dataframe = read_table_to_dataframe(db_path, table_name)
+    if dataframe is None:
+        return []
+    dataframe = dataframe.reindex(columns=ordered_headers, fill_value="")
+    return [
+        {header: _normalize_cell(row.get(header, "")) for header in ordered_headers}
+        for row in dataframe.to_dict(orient="records")
+    ]
 
 
 def save_to_csv(config, results, merge_existing=False):
@@ -59,7 +94,7 @@ def save_to_csv(config, results, merge_existing=False):
         "video_url": "视频链接",
         "data_source": "数据来源",
     }
-    _write_csv(config.output_csv, fieldnames, headers, results, "保存抖音排行榜CSV失败")
+    ordered_headers = [headers[field] for field in fieldnames]
     if merge_existing:
         upsert_rows_to_table(
             config.export_store_db,
@@ -69,10 +104,18 @@ def save_to_csv(config, results, merge_existing=False):
             results,
             key_field="uploader_id",
         )
+        mapped_rows = _load_mapped_rows_from_store(
+            config.export_store_db,
+            config.export_main_table,
+            ordered_headers,
+        )
+        _write_mapped_csv(config.output_csv, ordered_headers, mapped_rows, "保存抖音排行榜CSV失败")
     else:
+        _write_csv(config.output_csv, fieldnames, headers, results, "保存抖音排行榜CSV失败")
         write_rows_to_table(config.export_store_db, config.export_main_table, fieldnames, headers, results)
-    mapped_rows = _mapped_rows(fieldnames, headers, results)
-    upsert_creator_rows(config.export_store_db, "douyin", mapped_rows)
+        mapped_rows = _mapped_rows(fieldnames, headers, results)
+    incoming_rows = _mapped_rows(fieldnames, headers, results)
+    upsert_creator_rows(config.export_store_db, "douyin", incoming_rows)
     replace_summary_rows(config.export_store_db, "douyin", "main", mapped_rows)
 
 
@@ -166,7 +209,7 @@ def save_video_duration_analysis_to_csv(config, summary_rows, merge_existing=Fal
         "long_video_count": "长视频数量(240s+)",
         "long_video_ratio": "长视频占比",
     }
-    _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存抖音视频时长分析CSV失败")
+    ordered_headers = [headers[field] for field in fieldnames]
     if merge_existing:
         upsert_rows_to_table(
             config.export_store_db,
@@ -176,13 +219,26 @@ def save_video_duration_analysis_to_csv(config, summary_rows, merge_existing=Fal
             summary_rows,
             key_field="uploader_id",
         )
+        mapped_rows = _load_mapped_rows_from_store(
+            config.export_store_db,
+            config.export_analysis_table,
+            ordered_headers,
+        )
+        _write_mapped_csv(
+            config.video_duration_analysis_csv,
+            ordered_headers,
+            mapped_rows,
+            "保存抖音视频时长分析CSV失败",
+        )
     else:
+        _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存抖音视频时长分析CSV失败")
         write_rows_to_table(config.export_store_db, config.export_analysis_table, fieldnames, headers, summary_rows)
+        mapped_rows = _mapped_rows(fieldnames, headers, summary_rows)
     replace_summary_rows(
         config.export_store_db,
         "douyin",
         "analysis",
-        _mapped_rows(fieldnames, headers, summary_rows),
+        mapped_rows,
     )
 
 
@@ -235,6 +291,8 @@ def save_cache_inventory_to_csv(config, cache_rows):
         "followings_cache_saved_at",
         "has_progress_cache",
         "progress_cached_at",
+        "progress_cache_expires_at",
+        "progress_cache_due",
         "summary_scope",
         "cached_video_count",
         "has_latest_video_cache",
@@ -261,6 +319,8 @@ def save_cache_inventory_to_csv(config, cache_rows):
         "followings_cache_saved_at": "关注列表缓存时间",
         "has_progress_cache": "有进度缓存",
         "progress_cached_at": "进度缓存时间",
+        "progress_cache_expires_at": "下次可抓取时间",
+        "progress_cache_due": "是否已到期",
         "summary_scope": "统计范围",
         "cached_video_count": "缓存视频数",
         "has_latest_video_cache": "有最新视频缓存",

@@ -144,6 +144,42 @@ def replace_video_rows_for_uploader(
         conn.commit()
 
 
+def read_video_rows_for_uploader(db_path, platform, uploader_id):
+    db_path = Path(db_path)
+    uploader_id = str(uploader_id or "").strip()
+    if not uploader_id or not db_path.exists():
+        return []
+
+    ensure_platform_schema(db_path, platform)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (_video_table(platform),),
+        )
+        if cursor.fetchone() is None:
+            return []
+        rows = conn.execute(
+            f"""
+            SELECT payload_json
+            FROM "{_video_table(platform)}"
+            WHERE uploader_id=?
+            ORDER BY publish_timestamp DESC
+            """,
+            (uploader_id,),
+        ).fetchall()
+
+    video_rows = []
+    for (payload_json,) in rows:
+        try:
+            payload = json.loads(payload_json)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            video_rows.append(payload)
+    return video_rows
+
+
 def upsert_cache_entries(
     db_path,
     platform,
