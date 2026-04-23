@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -171,7 +172,8 @@ class CacheStore:
             for uid in (progress or {}).keys()
             if str(uid).strip()
         }
-        removed_uids = sorted(cached_progress_uids - current_uids)
+        cached_store_uids = self._load_cached_uploader_ids_from_store()
+        removed_uids = sorted((cached_progress_uids | cached_store_uids) - current_uids)
         if not removed_uids:
             return []
 
@@ -452,3 +454,56 @@ class CacheStore:
             self.config.export_uid_analysis_table,
         ]:
             delete_rows_by_values(self.config.export_store_db, table_name, uploader_ids)
+
+    def _load_cached_uploader_ids_from_store(self):
+        db_path = self.config.export_store_db
+        if not db_path.exists():
+            return set()
+
+        uploader_ids = set()
+        table_targets = [
+            ("douyin_creator_raw", "uploader_id"),
+            ("douyin_video_raw", "uploader_id"),
+            ("douyin_cache_state", "uploader_id"),
+            ("douyin_summary_current", "uploader_id"),
+            (self.config.export_main_table, None),
+            (self.config.export_analysis_table, None),
+            (self.config.export_uid_analysis_table, None),
+        ]
+        candidate_columns = ["UP主UID", "UP涓籙ID", "uploader_id", "target_uid"]
+
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            for table_name, preferred_column in table_targets:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                )
+                if cursor.fetchone() is None:
+                    continue
+
+                target_column = preferred_column
+                if not target_column:
+                    table_info = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                    columns = {str(row[1]) for row in table_info}
+                    target_column = next(
+                        (column for column in candidate_columns if column in columns),
+                        None,
+                    )
+                if not target_column:
+                    continue
+
+                try:
+                    rows = cursor.execute(
+                        f'SELECT DISTINCT "{target_column}" FROM "{table_name}" '
+                        f'WHERE "{target_column}" IS NOT NULL AND TRIM("{target_column}") <> \'\''
+                    ).fetchall()
+                except sqlite3.Error:
+                    continue
+
+                for (value,) in rows:
+                    normalized = str(value or "").strip()
+                    if normalized:
+                        uploader_ids.add(normalized)
+
+        return uploader_ids
