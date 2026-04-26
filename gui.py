@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QFileDialog,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -24,6 +25,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -38,6 +40,120 @@ DEFAULT_DOUYIN_UNFOLLOW_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_un
 DEFAULT_BILIBILI_UID_LIST = ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
 DEFAULT_DOUYIN_UID_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
 GUI_CONFIG_PATH = ROOT_DIR / "data" / "state" / "gui_config.json"
+
+BILIBILI_RUNTIME_FIELDS = [
+    ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
+    ("request_delay", "REQUEST_DELAY", "\u8bf7\u6c42\u57fa\u7840\u95f4\u9694", "int", 0, 3600, 1),
+    ("max_request_delay", "MAX_REQUEST_DELAY", "\u8bf7\u6c42\u6700\u5927\u95f4\u9694", "int", 0, 3600, 1),
+    ("video_analysis_start_delay", "VIDEO_ANALYSIS_START_DELAY", "\u89c6\u9891\u5206\u6790\u542f\u52a8\u7b49\u5f85", "int", 0, 3600, 1),
+    ("batch_cooldown", "BATCH_COOLDOWN", "\u4e3b\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
+    ("long_rate_limit_cooldown", "LONG_RATE_LIMIT_COOLDOWN", "\u9650\u6d41\u957f\u51b7\u5374", "int", 0, 7200, 1),
+    ("rate_limit_retry_before_long_cooldown", "RATE_LIMIT_RETRY_BEFORE_LONG_COOLDOWN", "\u957f\u51b7\u5374\u524d\u91cd\u8bd5\u6b21\u6570", "int", 1, 100, 1),
+    ("max_rate_limit_retries", "MAX_RATE_LIMIT_RETRIES", "\u9650\u6d41\u6700\u5927\u91cd\u8bd5\u6b21\u6570", "int", 1, 100, 1),
+    ("failed_retry_cooldown", "FAILED_RETRY_COOLDOWN", "\u5931\u8d25\u91cd\u8bd5\u51b7\u5374", "int", 0, 7200, 1),
+    ("video_analysis_batch_cooldown", "VIDEO_ANALYSIS_BATCH_COOLDOWN", "\u89c6\u9891\u5206\u6790\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
+]
+
+DOUYIN_RUNTIME_FIELDS = [
+    ("page_load_delay", "DOUYIN_PAGE_LOAD_DELAY", "\u9875\u9762\u52a0\u8f7d\u7b49\u5f85", "float", 0.0, 1200.0, 0.1),
+    ("user_request_interval", "DOUYIN_USER_REQUEST_INTERVAL", "\u7528\u6237\u8bf7\u6c42\u95f4\u9694", "float", 0.0, 1200.0, 0.1),
+    ("request_rate_limit_per_second", "DOUYIN_REQUEST_RATE_LIMIT_PER_SECOND", "\u6bcf\u79d2\u8bf7\u6c42\u4e0a\u9650", "float", 0.1, 100.0, 0.1),
+    ("retry_backoff_base_seconds", "DOUYIN_RETRY_BACKOFF_BASE_SECONDS", "\u91cd\u8bd5\u9000\u907f\u8d77\u59cb\u79d2\u6570", "float", 0.0, 7200.0, 0.5),
+    ("retry_backoff_max_seconds", "DOUYIN_RETRY_BACKOFF_MAX_SECONDS", "\u91cd\u8bd5\u9000\u907f\u6700\u5927\u79d2\u6570", "float", 0.0, 7200.0, 0.5),
+    ("conservative_mode_duration_seconds", "DOUYIN_CONSERVATIVE_MODE_DURATION_SECONDS", "\u4fdd\u5b88\u6a21\u5f0f\u6301\u7eed\u79d2\u6570", "float", 0.0, 7200.0, 1.0),
+    ("refresh_batch_cooldown", "DOUYIN_REFRESH_BATCH_COOLDOWN", "\u5237\u65b0\u6279\u6b21\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("browser_restart_interval_users", "DOUYIN_BROWSER_RESTART_INTERVAL_USERS", "\u6d4f\u89c8\u5668\u91cd\u542f\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
+    ("video_page_load_delay", "DOUYIN_VIDEO_PAGE_LOAD_DELAY", "\u89c6\u9891\u9875\u52a0\u8f7d\u7b49\u5f85", "float", 0.0, 1200.0, 0.1),
+    ("service_error_retry_wait", "DOUYIN_SERVICE_ERROR_RETRY_WAIT", "\u670d\u52a1\u5f02\u5e38\u91cd\u8bd5\u7b49\u5f85", "float", 0.0, 7200.0, 0.5),
+    ("service_error_long_cooldown", "DOUYIN_SERVICE_ERROR_LONG_COOLDOWN", "\u670d\u52a1\u5f02\u5e38\u957f\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("service_error_global_cooldown", "DOUYIN_SERVICE_ERROR_GLOBAL_COOLDOWN", "\u670d\u52a1\u5f02\u5e38\u5168\u5c40\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("rate_limit_retry_wait", "DOUYIN_RATE_LIMIT_RETRY_WAIT", "\u9650\u6d41\u91cd\u8bd5\u7b49\u5f85", "float", 0.0, 7200.0, 0.5),
+    ("rate_limit_long_cooldown", "DOUYIN_RATE_LIMIT_LONG_COOLDOWN", "\u9650\u6d41\u957f\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("rate_limit_global_cooldown", "DOUYIN_RATE_LIMIT_GLOBAL_COOLDOWN", "\u9650\u6d41\u5168\u5c40\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("progress_save_interval_users", "DOUYIN_PROGRESS_SAVE_INTERVAL_USERS", "\u8fdb\u5ea6\u4fdd\u5b58\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
+    ("intermediate_upload_interval_users", "DOUYIN_INTERMEDIATE_UPLOAD_INTERVAL_USERS", "\u4e2d\u95f4\u4e0a\u4f20\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
+    ("unfollow_interval_seconds", "DOUYIN_UNFOLLOW_INTERVAL_SECONDS", "\u53d6\u6d88\u5173\u6ce8\u95f4\u9694\u79d2\u6570", "float", 0.0, 1200.0, 0.1),
+    ("unfollow_batch_cooldown", "DOUYIN_UNFOLLOW_BATCH_COOLDOWN", "\u53d6\u6d88\u5173\u6ce8\u6279\u6b21\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+    ("unfollow_restart_interval", "DOUYIN_UNFOLLOW_RESTART_INTERVAL", "\u53d6\u6d88\u5173\u6ce8\u91cd\u542f\u95f4\u9694", "int", 1, 10000, 1),
+    ("unfollow_failure_cooldown", "DOUYIN_UNFOLLOW_FAILURE_COOLDOWN", "\u53d6\u6d88\u5173\u6ce8\u5931\u8d25\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
+]
+
+BILIBILI_FETCH_ORDER_OPTIONS = [
+    ("\u7c89\u4e1d\u6570", "follower_count"),
+    ("\u89c6\u9891\u603b\u6570", "published_video_count"),
+    ("\u5e73\u5747\u70b9\u8d5e\u6570", "average_like_count"),
+]
+
+DOUYIN_FETCH_ORDER_OPTIONS = [
+    ("\u7c89\u4e1d\u6570", "follower_count"),
+    ("\u89c6\u9891\u603b\u6570", "published_video_count"),
+    ("\u83b7\u8d5e\u603b\u6570", "total_favorited"),
+    ("\u5e73\u5747\u70b9\u8d5e\u6570", "average_like_count"),
+]
+
+FETCH_ORDER_DIRECTION_OPTIONS = [
+    ("\u964d\u5e8f", "desc"),
+    ("\u5347\u5e8f", "asc"),
+]
+
+
+def _fetch_order_option_map(options):
+    return {value: label for label, value in options}
+
+
+def _settings_to_dict(config, fields):
+    values = {}
+    for name, *_rest in fields:
+        values[name] = getattr(config, name)
+    return values
+
+
+def _load_default_bilibili_runtime_settings():
+    from bilibili_analyzer.config import load_analyzer_config
+
+    return _settings_to_dict(load_analyzer_config(), BILIBILI_RUNTIME_FIELDS)
+
+
+def _load_default_douyin_runtime_settings():
+    from douyin_analyzer.config import load_analyzer_config
+
+    return _settings_to_dict(load_analyzer_config(), DOUYIN_RUNTIME_FIELDS)
+
+
+def _coerce_setting_value(value, field_type, fallback):
+    if value is None:
+        return fallback
+    try:
+        return int(value) if field_type == "int" else float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _load_default_fetch_order_settings():
+    return {
+        "bilibili": {"field": "follower_count", "direction": "desc"},
+        "douyin": {"field": "follower_count", "direction": "desc"},
+    }
+
+
+def _normalize_fetch_order_settings(settings):
+    defaults = _load_default_fetch_order_settings()
+    normalized = {}
+    platform_options = {
+        "bilibili": BILIBILI_FETCH_ORDER_OPTIONS,
+        "douyin": DOUYIN_FETCH_ORDER_OPTIONS,
+    }
+    for platform, options in platform_options.items():
+        allowed_fields = set(_fetch_order_option_map(options))
+        current = (settings or {}).get(platform, {}) if isinstance(settings, dict) else {}
+        field = current.get("field")
+        if field not in allowed_fields:
+            field = defaults[platform]["field"]
+        direction = str(current.get("direction") or defaults[platform]["direction"]).strip().lower()
+        if direction not in {"asc", "desc"}:
+            direction = defaults[platform]["direction"]
+        normalized[platform] = {"field": field, "direction": direction}
+    return normalized
 
 
 @dataclass
@@ -54,6 +170,9 @@ class RunConfig:
     unfollow_list_path: Path
     bilibili_uid_list_path: Path
     douyin_uid_list_path: Path
+    bilibili_runtime_settings: dict
+    douyin_runtime_settings: dict
+    fetch_order_settings: dict
 
 
 class SignalWriter:
@@ -106,6 +225,9 @@ class RunnerThread(QThread):
 
     def _run_task(self):
         os.environ["DOUYIN_BROWSER_BACKEND"] = self.config.douyin_backend
+        self._apply_runtime_environment(BILIBILI_RUNTIME_FIELDS, self.config.bilibili_runtime_settings)
+        self._apply_runtime_environment(DOUYIN_RUNTIME_FIELDS, self.config.douyin_runtime_settings)
+        self._apply_fetch_order_environment(self.config.fetch_order_settings)
         bilibili_analysis_mode, bilibili_enable_video_analysis = self._resolve_bilibili_runtime_mode()
         os.environ["ANALYSIS_MODE"] = bilibili_analysis_mode
         os.environ["ENABLE_VIDEO_DURATION_ANALYSIS"] = (
@@ -160,6 +282,20 @@ class RunnerThread(QThread):
             "fallback_main_only": ("fallback", False),
         }
         return mapping.get(mode, ("precise", True))
+
+    def _apply_runtime_environment(self, fields, values):
+        for name, env_name, _label, field_type, _minimum, _maximum, _step in fields:
+            value = _coerce_setting_value(values.get(name), field_type, None)
+            if value is None:
+                continue
+            os.environ[env_name] = str(int(value) if field_type == "int" else float(value))
+
+    def _apply_fetch_order_environment(self, settings):
+        normalized = _normalize_fetch_order_settings(settings)
+        os.environ["BILIBILI_FETCH_ORDER_BY"] = normalized["bilibili"]["field"]
+        os.environ["BILIBILI_FETCH_ORDER_DESC"] = "true" if normalized["bilibili"]["direction"] == "desc" else "false"
+        os.environ["DOUYIN_FETCH_ORDER_BY"] = normalized["douyin"]["field"]
+        os.environ["DOUYIN_FETCH_ORDER_DESC"] = "true" if normalized["douyin"]["direction"] == "desc" else "false"
 
     def _run_bilibili_main(self):
         from bilibili_analyzer.app import run_analysis, run_feishu_upload
@@ -234,22 +370,175 @@ class BilibiliCookieCheckThread(QThread):
             self.checked.emit(False, f"检测失败：{exc}")
 
 
-class AdvancedSettingsDialog(QDialog):
-    def __init__(self, parent, current_paths):
+class RuntimeSettingsDialog(QDialog):
+    def __init__(self, parent, title, fields, current_values):
         super().__init__(parent)
-        self.setWindowTitle("高级设置")
-        self.resize(760, 220)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        layout.addLayout(form)
+        self.setWindowTitle(title)
+        self.resize(760, 620)
+        self._fields = fields
+        self._widgets = {}
 
-        self.unfollow_path_edit = self._path_row(form, "取消关注名单", current_paths["unfollow"])
-        self.bilibili_uid_path_edit = self._path_row(form, "B站 UID 名单", current_paths["bilibili_uid"])
-        self.douyin_uid_path_edit = self._path_row(form, "抖音 UID 名单", current_paths["douyin_uid"])
+        layout = QVBoxLayout(self)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        form = QFormLayout(scroll_content)
+
+        for name, env_name, label, field_type, minimum, maximum, step in fields:
+            if field_type == "int":
+                widget = QSpinBox()
+                widget.setRange(int(minimum), int(maximum))
+                widget.setSingleStep(int(step))
+                widget.setValue(int(_coerce_setting_value(current_values.get(name), field_type, minimum)))
+            else:
+                widget = QDoubleSpinBox()
+                widget.setDecimals(self._decimals_for_step(step))
+                widget.setRange(float(minimum), float(maximum))
+                widget.setSingleStep(float(step))
+                widget.setValue(float(_coerce_setting_value(current_values.get(name), field_type, minimum)))
+            widget.setToolTip(env_name)
+            form.addRow(label, widget)
+            self._widgets[name] = widget
+
+        scroll_area.setWidget(scroll_content)
+        layout.addWidget(scroll_area)
 
         button_row = QHBoxLayout()
-        self.save_button = QPushButton("保存")
-        self.cancel_button = QPushButton("取消")
+        save_button = QPushButton("\u4fdd\u5b58")
+        cancel_button = QPushButton("\u53d6\u6d88")
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(save_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+    def _decimals_for_step(self, step):
+        text = f"{step}".rstrip("0").rstrip(".")
+        if "." not in text:
+            return 0
+        return min(len(text.split(".", 1)[1]), 3)
+
+    def settings(self):
+        values = {}
+        for name, _env_name, _label, field_type, _minimum, _maximum, _step in self._fields:
+            widget = self._widgets[name]
+            values[name] = int(widget.value()) if field_type == "int" else float(widget.value())
+        return values
+
+
+class FetchOrderSettingsDialog(QDialog):
+    def __init__(self, parent, current_settings):
+        super().__init__(parent)
+        self.setWindowTitle("\u6293\u53d6\u987a\u5e8f\u8bbe\u7f6e")
+        self.resize(520, 260)
+        self._settings = _normalize_fetch_order_settings(current_settings)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._build_platform_group("B\u7ad9\u6293\u53d6\u987a\u5e8f", BILIBILI_FETCH_ORDER_OPTIONS, "bilibili"))
+        layout.addWidget(self._build_platform_group("\u6296\u97f3\u6293\u53d6\u987a\u5e8f", DOUYIN_FETCH_ORDER_OPTIONS, "douyin"))
+
+        button_row = QHBoxLayout()
+        save_button = QPushButton("\u4fdd\u5b58")
+        cancel_button = QPushButton("\u53d6\u6d88")
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(save_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+    def _build_platform_group(self, title, options, platform):
+        group = QGroupBox(title)
+        form = QFormLayout(group)
+
+        field_combo = QComboBox()
+        for label, value in options:
+            field_combo.addItem(label, value)
+        self._set_combo_by_data(field_combo, self._settings[platform]["field"])
+        form.addRow("\u6392\u5e8f\u5b57\u6bb5", field_combo)
+
+        direction_combo = QComboBox()
+        for label, value in FETCH_ORDER_DIRECTION_OPTIONS:
+            direction_combo.addItem(label, value)
+        self._set_combo_by_data(direction_combo, self._settings[platform]["direction"])
+        form.addRow("\u6392\u5e8f\u65b9\u5411", direction_combo)
+
+        setattr(self, f"{platform}_field_combo", field_combo)
+        setattr(self, f"{platform}_direction_combo", direction_combo)
+        return group
+
+    def _set_combo_by_data(self, combo, value):
+        for index in range(combo.count()):
+            if combo.itemData(index) == value:
+                combo.setCurrentIndex(index)
+                return
+
+    def settings(self):
+        return {
+            "bilibili": {
+                "field": self.bilibili_field_combo.currentData(),
+                "direction": self.bilibili_direction_combo.currentData(),
+            },
+            "douyin": {
+                "field": self.douyin_field_combo.currentData(),
+                "direction": self.douyin_direction_combo.currentData(),
+            },
+        }
+
+
+class AdvancedSettingsDialog(QDialog):
+    def __init__(self, parent, current_paths, bilibili_runtime_settings, douyin_runtime_settings, fetch_order_settings):
+        super().__init__(parent)
+        self.setWindowTitle("\u9ad8\u7ea7\u8bbe\u7f6e")
+        self.resize(760, 430)
+        self._bilibili_runtime_settings = dict(bilibili_runtime_settings)
+        self._douyin_runtime_settings = dict(douyin_runtime_settings)
+        self._fetch_order_settings = _normalize_fetch_order_settings(fetch_order_settings)
+
+        layout = QVBoxLayout(self)
+
+        path_group = QGroupBox("\u8def\u5f84\u8bbe\u7f6e")
+        path_form = QFormLayout(path_group)
+        self.unfollow_path_edit = self._path_row(path_form, "\u53d6\u6d88\u5173\u6ce8\u540d\u5355", current_paths["unfollow"])
+        self.bilibili_uid_path_edit = self._path_row(path_form, "B\u7ad9 UID \u540d\u5355", current_paths["bilibili_uid"])
+        self.douyin_uid_path_edit = self._path_row(path_form, "\u6296\u97f3 UID \u540d\u5355", current_paths["douyin_uid"])
+        layout.addWidget(path_group)
+
+        runtime_group = QGroupBox("\u51b7\u5374\u4e0e\u9650\u6d41\u8bbe\u7f6e")
+        runtime_layout = QVBoxLayout(runtime_group)
+        self.bilibili_runtime_button = QPushButton("\u8bbe\u7f6e B\u7ad9\u51b7\u5374\u4e0e\u9650\u6d41\u53c2\u6570")
+        self.bilibili_runtime_button.clicked.connect(self._edit_bilibili_runtime_settings)
+        runtime_layout.addWidget(self.bilibili_runtime_button)
+        self.bilibili_runtime_summary = QLabel(f"\u5df2\u914d\u7f6e {len(BILIBILI_RUNTIME_FIELDS)} \u9879\u3002")
+        self.bilibili_runtime_summary.setStyleSheet("color: #666; padding-left: 4px;")
+        runtime_layout.addWidget(self.bilibili_runtime_summary)
+
+        self.douyin_runtime_button = QPushButton("\u8bbe\u7f6e\u6296\u97f3\u51b7\u5374\u4e0e\u9650\u6d41\u53c2\u6570")
+        self.douyin_runtime_button.clicked.connect(self._edit_douyin_runtime_settings)
+        runtime_layout.addWidget(self.douyin_runtime_button)
+        self.douyin_runtime_summary = QLabel(f"\u5df2\u914d\u7f6e {len(DOUYIN_RUNTIME_FIELDS)} \u9879\u3002")
+        self.douyin_runtime_summary.setStyleSheet("color: #666; padding-left: 4px;")
+        runtime_layout.addWidget(self.douyin_runtime_summary)
+        layout.addWidget(runtime_group)
+
+        fetch_order_group = QGroupBox("\u6293\u53d6\u987a\u5e8f\u8bbe\u7f6e")
+        fetch_order_layout = QVBoxLayout(fetch_order_group)
+        self.fetch_order_button = QPushButton("\u8bbe\u7f6e\u6293\u53d6\u987a\u5e8f\u9875")
+        self.fetch_order_button.clicked.connect(self._edit_fetch_order_settings)
+        fetch_order_layout.addWidget(self.fetch_order_button)
+        self.fetch_order_summary = QLabel()
+        self.fetch_order_summary.setWordWrap(True)
+        self.fetch_order_summary.setStyleSheet("color: #666; padding-left: 4px;")
+        fetch_order_layout.addWidget(self.fetch_order_summary)
+        layout.addWidget(fetch_order_group)
+
+        self._refresh_fetch_order_summary()
+
+        button_row = QHBoxLayout()
+        self.save_button = QPushButton("\u4fdd\u5b58")
+        self.cancel_button = QPushButton("\u53d6\u6d88")
         self.save_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         button_row.addStretch(1)
@@ -260,7 +549,7 @@ class AdvancedSettingsDialog(QDialog):
     def _path_row(self, form, label, value):
         row = QHBoxLayout()
         edit = QLineEdit(str(value))
-        browse_button = QPushButton("选择")
+        browse_button = QPushButton("\u9009\u62e9")
         browse_button.clicked.connect(lambda: self._browse_file(edit))
         row.addWidget(edit, stretch=1)
         row.addWidget(browse_button)
@@ -268,9 +557,44 @@ class AdvancedSettingsDialog(QDialog):
         return edit
 
     def _browse_file(self, edit):
-        selected, _ = QFileDialog.getOpenFileName(self, "选择名单文件", str(ROOT_DIR), "Text Files (*.txt);;All Files (*)")
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "\u9009\u62e9\u540d\u5355\u6587\u4ef6",
+            str(ROOT_DIR),
+            "Text Files (*.txt);;All Files (*)",
+        )
         if selected:
             edit.setText(selected)
+
+    def _open_runtime_dialog(self, title, fields, current_values):
+        dialog = RuntimeSettingsDialog(self, title, fields, current_values)
+        if dialog.exec_() == QDialog.Accepted:
+            return dialog.settings()
+        return None
+
+    def _edit_bilibili_runtime_settings(self):
+        values = self._open_runtime_dialog("B\u7ad9\u51b7\u5374\u4e0e\u9650\u6d41\u53c2\u6570", BILIBILI_RUNTIME_FIELDS, self._bilibili_runtime_settings)
+        if values is not None:
+            self._bilibili_runtime_settings = values
+
+    def _edit_douyin_runtime_settings(self):
+        values = self._open_runtime_dialog("\u6296\u97f3\u51b7\u5374\u4e0e\u9650\u6d41\u53c2\u6570", DOUYIN_RUNTIME_FIELDS, self._douyin_runtime_settings)
+        if values is not None:
+            self._douyin_runtime_settings = values
+
+    def _edit_fetch_order_settings(self):
+        dialog = FetchOrderSettingsDialog(self, self._fetch_order_settings)
+        if dialog.exec_() == QDialog.Accepted:
+            self._fetch_order_settings = _normalize_fetch_order_settings(dialog.settings())
+            self._refresh_fetch_order_summary()
+
+    def _refresh_fetch_order_summary(self):
+        bilibili_labels = _fetch_order_option_map(BILIBILI_FETCH_ORDER_OPTIONS)
+        douyin_labels = _fetch_order_option_map(DOUYIN_FETCH_ORDER_OPTIONS)
+        direction_labels = _fetch_order_option_map(FETCH_ORDER_DIRECTION_OPTIONS)
+        bilibili_text = f"B\u7ad9\uff1a\u6309 {bilibili_labels[self._fetch_order_settings['bilibili']['field']]} {direction_labels[self._fetch_order_settings['bilibili']['direction']]}"
+        douyin_text = f"\u6296\u97f3\uff1a\u6309 {douyin_labels[self._fetch_order_settings['douyin']['field']]} {direction_labels[self._fetch_order_settings['douyin']['direction']]}"
+        self.fetch_order_summary.setText(bilibili_text + "\n" + douyin_text)
 
     def paths(self):
         return {
@@ -278,6 +602,15 @@ class AdvancedSettingsDialog(QDialog):
             "bilibili_uid": self.bilibili_uid_path_edit.text(),
             "douyin_uid": self.douyin_uid_path_edit.text(),
         }
+
+    def bilibili_runtime_settings(self):
+        return dict(self._bilibili_runtime_settings)
+
+    def douyin_runtime_settings(self):
+        return dict(self._douyin_runtime_settings)
+
+    def fetch_order_settings(self):
+        return _normalize_fetch_order_settings(self._fetch_order_settings)
 
 
 class DouyinStatsDialog(QDialog):
@@ -457,6 +790,283 @@ class DouyinStatsDialog(QDialog):
             )
 
 
+class DouyinStatsDialogV2(QDialog):
+    MODE_ROWS = [
+        ("verify", "主页校验模式"),
+        ("monitor", "监控模式"),
+        ("full", "完整模式"),
+    ]
+    CREATOR_VIDEO_BUCKETS = [
+        ("0~50", 0, 50),
+        ("51~300", 51, 300),
+        ("301~500", 301, 500),
+        ("501~1000", 501, 1000),
+        ("1001以上", 1001, None),
+    ]
+    VIDEO_DURATION_BUCKETS = [
+        ("0~20s", 0, 20),
+        ("21~60s", 21, 60),
+        ("61s以上", 61, None),
+    ]
+
+    def __init__(self, parent=None, high_like_threshold=10000):
+        super().__init__(parent)
+        self.high_like_threshold = int(high_like_threshold or 10000)
+        self.setWindowTitle("抖音统计")
+        self.resize(720, 560)
+
+        layout = QVBoxLayout(self)
+
+        self.summary_label = QLabel("正在读取抖音缓存统计...")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("padding: 4px 2px; color: #444;")
+        layout.addWidget(self.summary_label)
+
+        stats_group = QGroupBox("模式完成度")
+        stats_grid = QGridLayout(stats_group)
+        stats_grid.addWidget(QLabel("模式"), 0, 0)
+        stats_grid.addWidget(QLabel("已抓取博主数量"), 0, 1)
+        stats_grid.addWidget(QLabel("完成百分比"), 0, 2)
+
+        self.mode_count_labels = {}
+        self.mode_percent_labels = {}
+        for row_index, (mode, label) in enumerate(self.MODE_ROWS, start=1):
+            title_label = QLabel(label)
+            count_label = QLabel("-")
+            percent_label = QLabel("-")
+            count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            percent_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            stats_grid.addWidget(title_label, row_index, 0)
+            stats_grid.addWidget(count_label, row_index, 1)
+            stats_grid.addWidget(percent_label, row_index, 2)
+            self.mode_count_labels[mode] = count_label
+            self.mode_percent_labels[mode] = percent_label
+        layout.addWidget(stats_group)
+
+        video_group = QGroupBox("视频缓存统计")
+        video_grid = QGridLayout(video_group)
+        video_grid.addWidget(QLabel("指标"), 0, 0)
+        video_grid.addWidget(QLabel("数量"), 0, 1)
+        video_grid.addWidget(QLabel("占比"), 0, 2)
+
+        video_grid.addWidget(QLabel("当前缓存视频数量"), 1, 0)
+        self.cached_video_count_label = QLabel("-")
+        self.cached_video_ratio_label = QLabel("100.00%")
+        self.cached_video_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cached_video_ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        video_grid.addWidget(self.cached_video_count_label, 1, 1)
+        video_grid.addWidget(self.cached_video_ratio_label, 1, 2)
+
+        video_grid.addWidget(QLabel(f"高赞视频数量（>{self.high_like_threshold}）"), 2, 0)
+        self.high_like_video_count_label = QLabel("-")
+        self.high_like_video_ratio_label = QLabel("-")
+        self.high_like_video_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.high_like_video_ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        video_grid.addWidget(self.high_like_video_count_label, 2, 1)
+        video_grid.addWidget(self.high_like_video_ratio_label, 2, 2)
+        layout.addWidget(video_group)
+
+        creator_group = QGroupBox("博主视频数分布")
+        creator_grid = QGridLayout(creator_group)
+        creator_grid.addWidget(QLabel("区间"), 0, 0)
+        creator_grid.addWidget(QLabel("博主数量"), 0, 1)
+        creator_grid.addWidget(QLabel("占比"), 0, 2)
+
+        self.creator_bucket_count_labels = {}
+        self.creator_bucket_ratio_labels = {}
+        for row_index, (label, _, _) in enumerate(self.CREATOR_VIDEO_BUCKETS, start=1):
+            range_label = QLabel(label)
+            count_label = QLabel("-")
+            ratio_label = QLabel("-")
+            count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            creator_grid.addWidget(range_label, row_index, 0)
+            creator_grid.addWidget(count_label, row_index, 1)
+            creator_grid.addWidget(ratio_label, row_index, 2)
+            self.creator_bucket_count_labels[label] = count_label
+            self.creator_bucket_ratio_labels[label] = ratio_label
+        layout.addWidget(creator_group)
+
+        duration_group = QGroupBox("缓存视频时长分布")
+        duration_grid = QGridLayout(duration_group)
+        duration_grid.addWidget(QLabel("区间"), 0, 0)
+        duration_grid.addWidget(QLabel("视频数量"), 0, 1)
+        duration_grid.addWidget(QLabel("占比"), 0, 2)
+
+        self.duration_bucket_count_labels = {}
+        self.duration_bucket_ratio_labels = {}
+        for row_index, (label, _, _) in enumerate(self.VIDEO_DURATION_BUCKETS, start=1):
+            range_label = QLabel(label)
+            count_label = QLabel("-")
+            ratio_label = QLabel("-")
+            count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            ratio_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            duration_grid.addWidget(range_label, row_index, 0)
+            duration_grid.addWidget(count_label, row_index, 1)
+            duration_grid.addWidget(ratio_label, row_index, 2)
+            self.duration_bucket_count_labels[label] = count_label
+            self.duration_bucket_ratio_labels[label] = ratio_label
+        layout.addWidget(duration_group)
+
+        self.refresh_info_label = QLabel("")
+        self.refresh_info_label.setStyleSheet("padding: 2px 2px; color: #666;")
+        layout.addWidget(self.refresh_info_label)
+
+        button_row = QHBoxLayout()
+        self.refresh_button = QPushButton("刷新数据")
+        self.close_button = QPushButton("关闭")
+        self.refresh_button.clicked.connect(self.refresh_stats)
+        self.close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(self.refresh_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+        self.refresh_stats()
+
+    @staticmethod
+    def _safe_int(value, default=0):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _bucket_match(value, lower, upper):
+        if value < lower:
+            return False
+        if upper is None:
+            return True
+        return value <= upper
+
+    def refresh_stats(self):
+        try:
+            from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
+            from douyin_analyzer.cache import CacheStore
+            from douyin_analyzer.config import load_analyzer_config
+
+            config = load_analyzer_config()
+            cache_store = CacheStore(config)
+            analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
+
+            followings_payload = cache_store.load_followings_cache_payload()
+            progress = cache_store.load_progress()
+            cache_rows = analyzer.build_cache_inventory_rows(followings_payload, progress)
+            active_rows = [
+                row for row in cache_rows
+                if str((row or {}).get("has_followings_cache", "")).strip() == "是"
+            ]
+            total_followings = len(active_rows)
+            followings_cached_at = analyzer._format_cached_at(
+                (followings_payload or {}).get("cached_at") if isinstance(followings_payload, dict) else ""
+            )
+
+            for mode, _ in self.MODE_ROWS:
+                flag_key = f"has_{mode}_cache"
+                captured_count = sum(
+                    1 for row in active_rows
+                    if str((row or {}).get(flag_key, "")).strip() == "是"
+                )
+                percent = (captured_count / total_followings * 100) if total_followings else 0
+                self.mode_count_labels[mode].setText(str(captured_count))
+                self.mode_percent_labels[mode].setText(f"{percent:.2f}%")
+
+            creator_bucket_counts = {label: 0 for label, _, _ in self.CREATOR_VIDEO_BUCKETS}
+            for row in active_rows:
+                published_video_count = self._safe_int((row or {}).get("published_video_count"), 0)
+                for label, lower, upper in self.CREATOR_VIDEO_BUCKETS:
+                    if self._bucket_match(published_video_count, lower, upper):
+                        creator_bucket_counts[label] += 1
+                        break
+
+            active_uids = {
+                str((row or {}).get("uploader_id") or "").strip()
+                for row in active_rows
+                if str((row or {}).get("uploader_id") or "").strip()
+            }
+            cached_video_count = 0
+            high_like_video_count = 0
+            duration_bucket_counts = {label: 0 for label, _, _ in self.VIDEO_DURATION_BUCKETS}
+            seen_video_ids = set()
+            for uid, entry in (progress or {}).items():
+                if str(uid).strip() not in active_uids or not isinstance(entry, dict):
+                    continue
+                for video in entry.get("videos", []) or []:
+                    if not isinstance(video, dict):
+                        continue
+                    video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
+                    dedupe_key = video_id or f"{uid}:{len(seen_video_ids)}"
+                    if dedupe_key in seen_video_ids:
+                        continue
+                    seen_video_ids.add(dedupe_key)
+                    cached_video_count += 1
+
+                    like_count = self._safe_int(video.get("like_count"), 0)
+                    if like_count > self.high_like_threshold:
+                        high_like_video_count += 1
+
+                    duration_seconds = self._safe_int(video.get("duration_seconds"), 0)
+                    for label, lower, upper in self.VIDEO_DURATION_BUCKETS:
+                        if self._bucket_match(duration_seconds, lower, upper):
+                            duration_bucket_counts[label] += 1
+                            break
+
+            high_like_ratio = (
+                high_like_video_count / cached_video_count * 100
+                if cached_video_count
+                else 0
+            )
+            self.cached_video_count_label.setText(str(cached_video_count))
+            self.cached_video_ratio_label.setText("100.00%" if cached_video_count else "0.00%")
+            self.high_like_video_count_label.setText(str(high_like_video_count))
+            self.high_like_video_ratio_label.setText(f"{high_like_ratio:.2f}%")
+
+            for label, _, _ in self.CREATOR_VIDEO_BUCKETS:
+                bucket_count = creator_bucket_counts.get(label, 0)
+                bucket_ratio = (bucket_count / total_followings * 100) if total_followings else 0
+                self.creator_bucket_count_labels[label].setText(str(bucket_count))
+                self.creator_bucket_ratio_labels[label].setText(f"{bucket_ratio:.2f}%")
+
+            for label, _, _ in self.VIDEO_DURATION_BUCKETS:
+                bucket_count = duration_bucket_counts.get(label, 0)
+                bucket_ratio = (bucket_count / cached_video_count * 100) if cached_video_count else 0
+                self.duration_bucket_count_labels[label].setText(str(bucket_count))
+                self.duration_bucket_ratio_labels[label].setText(f"{bucket_ratio:.2f}%")
+
+            if total_followings:
+                self.summary_label.setText(
+                    f"当前关注博主总数：{total_followings} 位\n"
+                    f"关注列表缓存时间：{followings_cached_at or '暂无'}\n"
+                    f"进度缓存条目：{len(progress or {})} 条"
+                )
+            else:
+                self.summary_label.setText(
+                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看统计信息。"
+                )
+
+            self.refresh_info_label.setText(
+                f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except Exception as exc:
+            self.summary_label.setText(f"读取抖音统计失败：{exc}")
+            for mode, _ in self.MODE_ROWS:
+                self.mode_count_labels[mode].setText("-")
+                self.mode_percent_labels[mode].setText("-")
+            self.cached_video_count_label.setText("-")
+            self.cached_video_ratio_label.setText("-")
+            self.high_like_video_count_label.setText("-")
+            self.high_like_video_ratio_label.setText("-")
+            for label, _, _ in self.CREATOR_VIDEO_BUCKETS:
+                self.creator_bucket_count_labels[label].setText("-")
+                self.creator_bucket_ratio_labels[label].setText("-")
+            for label, _, _ in self.VIDEO_DURATION_BUCKETS:
+                self.duration_bucket_count_labels[label].setText("-")
+                self.duration_bucket_ratio_labels[label].setText("-")
+            self.refresh_info_label.setText(
+                f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+
 class MainWindow(QMainWindow):
     BILIBILI_MODE_OPTIONS = [
         ("精确模式（主榜 + 视频分析）", "precise_full"),
@@ -487,6 +1097,9 @@ class MainWindow(QMainWindow):
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
         self.douyin_uid_list_path = str(DEFAULT_DOUYIN_UID_LIST)
+        self.bilibili_runtime_settings = _load_default_bilibili_runtime_settings()
+        self.douyin_runtime_settings = _load_default_douyin_runtime_settings()
+        self.fetch_order_settings = _load_default_fetch_order_settings()
         self.setWindowTitle("")
         self.resize(1100, 760)
         self._build_ui()
@@ -670,6 +1283,9 @@ class MainWindow(QMainWindow):
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
             bilibili_uid_list_path=Path(self.bilibili_uid_list_path).expanduser(),
             douyin_uid_list_path=Path(self.douyin_uid_list_path).expanduser(),
+            bilibili_runtime_settings=dict(self.bilibili_runtime_settings),
+            douyin_runtime_settings=dict(self.douyin_runtime_settings),
+            fetch_order_settings=_normalize_fetch_order_settings(self.fetch_order_settings),
         )
 
     def _combo_index_by_data(self, combo, value):
@@ -693,6 +1309,9 @@ class MainWindow(QMainWindow):
             "unfollow_list_path": self.unfollow_list_path,
             "bilibili_uid_list_path": self.bilibili_uid_list_path,
             "douyin_uid_list_path": self.douyin_uid_list_path,
+            "bilibili_runtime_settings": self.bilibili_runtime_settings,
+            "douyin_runtime_settings": self.douyin_runtime_settings,
+            "fetch_order_settings": self.fetch_order_settings,
         }
 
     def _save_gui_config(self):
@@ -734,6 +1353,27 @@ class MainWindow(QMainWindow):
         self.unfollow_list_path = data.get("unfollow_list_path") or str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = data.get("bilibili_uid_list_path") or str(DEFAULT_BILIBILI_UID_LIST)
         self.douyin_uid_list_path = data.get("douyin_uid_list_path") or str(DEFAULT_DOUYIN_UID_LIST)
+
+        saved_bilibili = data.get("bilibili_runtime_settings", {}) or {}
+        for name, _env_name, _label, field_type, _minimum, _maximum, _step in BILIBILI_RUNTIME_FIELDS:
+            self.bilibili_runtime_settings[name] = _coerce_setting_value(
+                saved_bilibili.get(name),
+                field_type,
+                self.bilibili_runtime_settings.get(name),
+            )
+
+        saved_douyin = data.get("douyin_runtime_settings", {}) or {}
+        for name, _env_name, _label, field_type, _minimum, _maximum, _step in DOUYIN_RUNTIME_FIELDS:
+            self.douyin_runtime_settings[name] = _coerce_setting_value(
+                saved_douyin.get(name),
+                field_type,
+                self.douyin_runtime_settings.get(name),
+            )
+
+        self.fetch_order_settings = _normalize_fetch_order_settings(
+            data.get("fetch_order_settings", self.fetch_order_settings)
+        )
+
         self.config_locked = bool(data.get("locked", False))
 
     def _open_advanced_settings(self):
@@ -744,14 +1384,20 @@ class MainWindow(QMainWindow):
                 "bilibili_uid": self.bilibili_uid_list_path,
                 "douyin_uid": self.douyin_uid_list_path,
             },
+            dict(self.bilibili_runtime_settings),
+            dict(self.douyin_runtime_settings),
+            _normalize_fetch_order_settings(self.fetch_order_settings),
         )
         if dialog.exec_() == QDialog.Accepted:
             paths = dialog.paths()
             self.unfollow_list_path = paths["unfollow"]
             self.bilibili_uid_list_path = paths["bilibili_uid"]
             self.douyin_uid_list_path = paths["douyin_uid"]
+            self.bilibili_runtime_settings = dialog.bilibili_runtime_settings()
+            self.douyin_runtime_settings = dialog.douyin_runtime_settings()
+            self.fetch_order_settings = dialog.fetch_order_settings()
             self._save_gui_config()
-            self._append_log("高级设置已保存。")
+            self._append_log("\u9ad8\u7ea7\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002")
 
     def _toggle_config_lock(self):
         if self.config_locked:
@@ -765,7 +1411,7 @@ class MainWindow(QMainWindow):
         self._sync_visible_options()
 
     def _open_douyin_stats(self):
-        dialog = DouyinStatsDialog(self, high_like_threshold=self.high_like_spin.value())
+        dialog = DouyinStatsDialogV2(self, high_like_threshold=self.high_like_spin.value())
         dialog.exec_()
 
     def _start(self):

@@ -1,3 +1,4 @@
+import os
 import time
 
 from loguru import logger
@@ -13,10 +14,15 @@ from bilibili_analyzer.logging_utils import (
     wait_with_progress,
 )
 
-from .browser_client import DouyinRateLimitError, DouyinServiceError
+from .browser_client import (
+    DouyinFullFetchValidationError,
+    DouyinRateLimitError,
+    DouyinServiceError,
+)
 from .exporters import (
     save_all_videos_to_csv,
     save_cache_inventory_to_csv,
+    save_full_fetch_mismatch_to_csv,
     save_to_csv,
     save_video_duration_analysis_to_csv,
     save_video_duration_report,
@@ -49,22 +55,49 @@ class DouyinHiatusAnalyzer:
         if self.max_followings is not None and self.max_followings <= 0:
             self.max_followings = None
 
-    @staticmethod
-    def sort_followings_by_follower_count(followings):
-        def follower_sort_key(user):
-            raw_count = 0
-            if isinstance(user, dict):
-                raw_count = user.get("follower_count") or 0
-            try:
-                count = int(raw_count)
-            except (TypeError, ValueError):
-                count = 0
-            nickname = ""
-            if isinstance(user, dict):
-                nickname = str(user.get("nickname") or "")
-            return (-count, nickname)
+    FETCH_ORDER_LABELS = {
+        "follower_count": "\u7c89\u4e1d\u6570",
+        "published_video_count": "\u89c6\u9891\u603b\u6570",
+        "total_favorited": "\u83b7\u8d5e\u603b\u6570",
+        "average_like_count": "\u5e73\u5747\u70b9\u8d5e\u6570",
+    }
 
-        return sorted(followings or [], key=follower_sort_key)
+    @staticmethod
+    def _env_flag(name, default=True):
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def get_following_fetch_order(self):
+        field = str(os.getenv("DOUYIN_FETCH_ORDER_BY", "follower_count") or "follower_count").strip()
+        if field not in self.FETCH_ORDER_LABELS:
+            field = "follower_count"
+        descending = self._env_flag("DOUYIN_FETCH_ORDER_DESC", True)
+        return field, descending, self.FETCH_ORDER_LABELS[field]
+
+    def _resolve_following_sort_value(self, user, field):
+        user = user if isinstance(user, dict) else {}
+        if field == "published_video_count":
+            return self._safe_int(user.get("aweme_count") or user.get("published_video_count") or user.get("total_videos"), 0)
+        if field == "total_favorited":
+            return self._safe_int(user.get("total_favorited"), 0)
+        if field == "average_like_count":
+            return self._safe_int(self.calculate_average_like_from_profile(user, 0), 0)
+        return self._safe_int(user.get("follower_count"), 0)
+
+    def sort_followings_by_follower_count(self, followings):
+        field, descending, _label = self.get_following_fetch_order()
+
+        def sort_key(user):
+            user = user if isinstance(user, dict) else {}
+            value = self._resolve_following_sort_value(user, field)
+            nickname = str(user.get("nickname") or "")
+            uid = str(user.get("sec_uid") or "")
+            primary = -value if descending else value
+            return (primary, nickname, uid)
+
+        return sorted(followings or [], key=sort_key)
 
     def get_fetch_mode(self):
         if self.config.fetch_mode in {"counts", "verify", "monitor", "delta", "full"}:
@@ -117,6 +150,38 @@ class DouyinHiatusAnalyzer:
         )
         return any(marker in message for marker in integrity_markers)
 
+    @staticmethod
+    def _is_full_fetch_validation_error(error):
+        message = str(error or "")
+        validation_markers = (
+            "全量抓取作品数量校验失败",
+            "全量抓取未滚动到底",
+            "全量抓取未检测到底部结束标记",
+            "页面未出现“暂时没有更多了”",
+        )
+        return any(marker in message for marker in validation_markers)
+
+    @staticmethod
+    def build_full_fetch_mismatch_row(user, error, retry_count):
+        expected_count = 0
+        actual_count = 0
+        no_more_marker_seen = ""
+        if isinstance(error, DouyinFullFetchValidationError):
+            expected_count = int(error.expected_count or 0)
+            actual_count = int(error.actual_count or 0)
+            no_more_marker_seen = "是" if error.no_more_marker_seen else ""
+        return {
+            "uploader_name": (user or {}).get("nickname", ""),
+            "uploader_id": (user or {}).get("sec_uid", ""),
+            "uploader_homepage": (user or {}).get("homepage", ""),
+            "expected_video_count": expected_count,
+            "actual_video_count": actual_count,
+            "retry_count": int(retry_count or 0),
+            "no_more_marker_seen": no_more_marker_seen,
+            "last_error": str(error or ""),
+            "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
     def should_export_duration_analysis(self):
         return self.config.enable_video_duration_analysis and self.get_fetch_mode() == "full"
 
@@ -131,6 +196,86 @@ class DouyinHiatusAnalyzer:
             return int(float(value))
         except (TypeError, ValueError):
             return default
+
+    def is_zero_video_candidate(self, user):
+        return isinstance(user, dict) and self._safe_int(user.get("aweme_count"), -1) == 0
+
+    def is_empty_video_profile_confirmed(self, user):
+        return self.is_zero_video_candidate(user) and bool((user or {}).get("_empty_video_page_confirmed"))
+
+    @staticmethod
+    def _remove_user_from_memory_collection(collection, user):
+        if not isinstance(collection, list) or not isinstance(user, dict):
+            return
+
+        target_uid = str(user.get("sec_uid") or "").strip()
+        target_homepage = str(user.get("homepage") or "").strip()
+        kept_items = []
+        for item in collection:
+            if not isinstance(item, dict):
+                kept_items.append(item)
+                continue
+            current_uid = str(item.get("sec_uid") or "").strip()
+            current_homepage = str(item.get("homepage") or "").strip()
+            if (target_uid and current_uid == target_uid) or (target_homepage and current_homepage == target_homepage):
+                continue
+            kept_items.append(item)
+        collection[:] = kept_items
+
+    def handle_empty_video_profile(self, user, progress=None, cached_followings=None, verified_users=None):
+        if not self.is_empty_video_profile_confirmed(user):
+            return False
+        if self.browser_client is None:
+            return False
+
+        nickname = str((user or {}).get("nickname") or (user or {}).get("sec_uid") or "unknown")
+        homepage = self.browser_client.normalize_homepage_url((user or {}).get("homepage", ""))
+        if not homepage:
+            return False
+
+        print(f"🧹 {nickname} 主页已确认作品清空，立即执行取消关注并清理缓存。")
+        try:
+            unfollow_result = self.browser_client.unfollow_user_by_homepage(homepage)
+        except Exception as exc:
+            print(f"⚠️  {nickname} 自动取消关注失败，暂不清理缓存: {exc}")
+            logger.warning(
+                "Douyin auto unfollow failed for empty profile | uid={} | homepage={} | error={}",
+                user.get("sec_uid"),
+                homepage,
+                exc,
+            )
+            return False
+
+        status = str((unfollow_result or {}).get("status") or "")
+        if status not in {"unfollowed", "skipped"}:
+            print(f"⚠️  {nickname} 自动取消关注未成功，暂不清理缓存: {unfollow_result}")
+            logger.warning(
+                "Douyin auto unfollow did not complete for empty profile | uid={} | homepage={} | result={}",
+                user.get("sec_uid"),
+                homepage,
+                unfollow_result,
+            )
+            return False
+
+        removed_uids = self.cache_store.remove_unfollowed_user(
+            homepage=homepage,
+            uploader_id=(user or {}).get("sec_uid", ""),
+        )
+        if isinstance(progress, dict):
+            progress.pop(str((user or {}).get("sec_uid") or "").strip(), None)
+        self._remove_user_from_memory_collection(cached_followings, user)
+        self._remove_user_from_memory_collection(verified_users, user)
+
+        logger.info(
+            "Douyin empty profile auto unfollowed and cache cleared | uid={} | removed_uids={}",
+            user.get("sec_uid"),
+            removed_uids,
+        )
+        print(
+            f"✅ {nickname} 已完成自动取消关注，并清理本地缓存"
+            f"{'：' + ', '.join(removed_uids) if removed_uids else ''}"
+        )
+        return True
 
     def calculate_average_like_from_profile(self, user, fallback=""):
         total_favorited = self._safe_int((user or {}).get("total_favorited"), 0)
@@ -617,7 +762,7 @@ class DouyinHiatusAnalyzer:
             return self.build_empty_summary(user)
 
         total_videos = len(videos)
-        complete_video_sample = self.get_fetch_mode() == "full" or self.has_complete_video_sample(user, videos)
+        complete_video_sample = bool((user or {}).get("_full_fetch_validated")) or self.has_complete_video_sample(user, videos)
         short_count = sum(1 for video in videos if video["duration_category"] == SHORT_VIDEO_LABEL)
         medium_count = sum(1 for video in videos if video["duration_category"] == MEDIUM_VIDEO_LABEL)
         medium_long_count = sum(
@@ -1009,11 +1154,13 @@ class DouyinHiatusAnalyzer:
             len(cached_followings or []),
             self.config.intermediate_upload_interval_users,
         )
+        monitor_refresh_followings = fetch_mode == "monitor"
+        enable_profile_change_refresh = fetch_mode == "monitor"
         # 关注列表决定“当前仍在关注的博主集合”，因此普通运行也必须优先刷新；
         # 否则用户手动取关后，未过期的旧缓存会让已取关博主持续残留在主表中。
         use_followings_cache = fetch_mode in self.modes_requiring_basic_cache()
 
-        if use_followings_cache:
+        if use_followings_cache and not monitor_refresh_followings:
             if not cached_followings:
                 raise RuntimeError("抖音非基础模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
             followings = cached_followings
@@ -1026,6 +1173,45 @@ class DouyinHiatusAnalyzer:
                 fetch_mode,
                 len(followings),
             )
+        elif use_followings_cache and monitor_refresh_followings:
+            if not cached_followings:
+                raise RuntimeError("抖音监控模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
+            try:
+                print(
+                    f"🧭 监控模式将先刷新关注缓存，用于比较最新发布时间 | 本地缓存={len(cached_followings)} 条"
+                )
+                followings = self.browser_client.get_followings()
+                if followings:
+                    self.cache_store.save_followings_cache(followings)
+                    cached_followings = followings
+                    print(
+                        f"🧭 监控模式关注缓存已刷新 | 已写入缓存={len(followings)} 条 | 后续将据此判断是否需要进主页"
+                    )
+                    logger.info(
+                        "Douyin monitor followings refreshed for publish timestamp compare | rows={}",
+                        len(followings),
+                    )
+                else:
+                    followings = cached_followings
+                    print(
+                        f"⚠️  监控模式未拿到新的关注列表数据，已回退本地缓存继续运行 | 缓存条数={len(followings)}"
+                    )
+                    logger.warning(
+                        "Douyin monitor followings refresh returned empty; fallback cached rows={}",
+                        len(followings),
+                    )
+            except Exception as exc:
+                if self._is_following_integrity_error(exc):
+                    raise
+                followings = cached_followings
+                print(
+                    f"⚠️  监控模式刷新关注缓存失败，已回退本地缓存继续运行 | 缓存条数={len(followings)} | 原因={exc}"
+                )
+                logger.warning(
+                    "Douyin monitor followings refresh failed; fallback cached rows={} | error={}",
+                    len(followings),
+                    exc,
+                )
         else:
             try:
                 print(
@@ -1062,6 +1248,7 @@ class DouyinHiatusAnalyzer:
         if progress:
             print(f"♻️  已加载 {len(progress)} 条抖音缓存")
 
+        order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)
         total_followings = len(followings)
         partial_run = self.max_followings is not None and self.max_followings < total_followings
@@ -1069,8 +1256,8 @@ class DouyinHiatusAnalyzer:
             if fetch_mode == "counts":
                 followings = followings[: self.max_followings]
                 print(
-                    f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
-                    f"本轮仅处理粉丝数前 {len(followings)} 位"
+                    f"\U0001f9e9 \u90e8\u5206\u6293\u53d6\u6a21\u5f0f\u5df2\u751f\u6548 | \u5168\u90e8\u5173\u6ce8={total_followings} \u4f4d | "
+                    f"\u672c\u8f6e\u4ec5\u5904\u7406\u6392\u5e8f\u9760\u524d\u7684 {len(followings)} \u4f4d"
                 )
                 logger.info(
                     "Douyin partial following limit applied | mode=counts | total={} | selected={}",
@@ -1086,15 +1273,15 @@ class DouyinHiatusAnalyzer:
                         user,
                         entry,
                         return_reason=True,
-                        refresh_on_profile_change=False,
+                        refresh_on_profile_change=enable_profile_change_refresh,
                     )
                     if refresh_needed:
                         due_followings.append(user)
                 due_total = len(due_followings)
                 followings = due_followings[: self.max_followings]
                 print(
-                    f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
-                    f"达到抓取条件={due_total} 位 | 本轮仅处理前 {len(followings)} 位超时或无记录博主"
+                    f"\U0001f9e9 \u90e8\u5206\u6293\u53d6\u6a21\u5f0f\u5df2\u751f\u6548 | \u5168\u90e8\u5173\u6ce8={total_followings} \u4f4d | "
+                    f"\u8fbe\u5230\u6293\u53d6\u6761\u4ef6={due_total} \u4f4d | \u672c\u8f6e\u4ec5\u5904\u7406\u6392\u5e8f\u9760\u524d\u7684 {len(followings)} \u4f4d\u8d85\u65f6\u6216\u65e0\u8bb0\u5f55\u535a\u4e3b"
                 )
                 logger.info(
                     "Douyin partial following limit applied | mode={} | total={} | due_candidates={} | selected={}",
@@ -1105,17 +1292,21 @@ class DouyinHiatusAnalyzer:
                 )
         if followings:
             top_user = followings[0] if isinstance(followings[0], dict) else {}
+            top_metric = self._resolve_following_sort_value(top_user, order_field)
             print(
-                f"🧭 关注列表准备完成 | 本轮处理={len(followings)} 位 | "
-                f"粉丝最高={top_user.get('nickname', '')}({top_user.get('follower_count', 0)})"
+                f"\U0001f4ca \u5173\u6ce8\u5217\u8868\u51c6\u5907\u5b8c\u6210 | \u672c\u8f6e\u5904\u7406={len(followings)} \u4f4d | "
+                f"{order_label}\u6700\u9760\u524d={top_user.get('nickname', '')}({top_metric})"
             )
             logger.info(
-                "Douyin followings ready | rows={} | top_nickname={} | top_followers={}",
+                "Douyin followings ready | rows={} | top_nickname={} | top_metric={} | order_field={}",
                 len(followings),
                 top_user.get("nickname", ""),
-                top_user.get("follower_count", 0),
+                top_metric,
+                order_field,
             )
-        print("📈 已按粉丝数从高到低排序后开始抓取。")
+        print(
+            f"\U0001f4f1 \u5df2\u6309{order_label}{'\u4ece\u9ad8\u5230\u4f4e' if order_desc else '\u4ece\u4f4e\u5230\u9ad8'}\u6392\u5e8f\u540e\u5f00\u59cb\u6293\u53d6\u3002"
+        )
 
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
@@ -1137,6 +1328,7 @@ class DouyinHiatusAnalyzer:
         results = []
         all_video_rows = []
         summary_rows = []
+        full_fetch_mismatch_rows = []
         pending_progress_saves = 0
         refreshed_user_count = 0
         cache_hit_count = 0
@@ -1146,6 +1338,7 @@ class DouyinHiatusAnalyzer:
             "missing_summary": 0,
             "aweme_count_changed": 0,
             "latest_publish_timestamp_newer": 0,
+            "zero_aweme_count_candidate": 0,
         }
 
         if fetch_mode == "counts":
@@ -1170,6 +1363,20 @@ class DouyinHiatusAnalyzer:
                         cached_user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
                         if user.get("total_favorited") in (None, "") and cached_user.get("total_favorited") not in (None, ""):
                             user["total_favorited"] = cached_user.get("total_favorited")
+                    if self.is_zero_video_candidate(user):
+                        try:
+                            self.browser_client.refresh_user_profile_from_homepage(user)
+                        except (DouyinRateLimitError, DouyinServiceError) as exc:
+                            print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认失败，暂时保留: {exc}")
+                        except Exception as exc:
+                            print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认异常，暂时保留: {exc}")
+                        if self.handle_empty_video_profile(
+                            user,
+                            progress=progress,
+                            cached_followings=cached_followings,
+                        ):
+                            progress_bar.advance(task_id)
+                            continue
                     summary = self.build_summary_from_cached_entry(user, entry)
                     result = self.build_result_from_cached_entry(user, entry)
                     results.append(result)
@@ -1249,6 +1456,9 @@ class DouyinHiatusAnalyzer:
                         return_reason=True,
                         refresh_on_profile_change=False,
                     )
+                    if self.is_zero_video_candidate(user) and not refresh_needed:
+                        refresh_needed = True
+                        refresh_reason = "zero_aweme_count_candidate"
                     profile_verified = False
                     if refresh_needed:
                         if refresh_reason in refresh_reason_counts:
@@ -1269,6 +1479,15 @@ class DouyinHiatusAnalyzer:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
                     else:
                         cache_hit_count += 1
+
+                    if profile_verified and self.handle_empty_video_profile(
+                        user,
+                        progress=progress,
+                        cached_followings=cached_followings,
+                        verified_users=verified_users,
+                    ):
+                        progress_bar.advance(task_id)
+                        continue
 
                     summary = self.build_summary_from_cached_entry(user, entry)
                     if (
@@ -1413,14 +1632,50 @@ class DouyinHiatusAnalyzer:
                     user,
                     entry,
                     return_reason=True,
-                    refresh_on_profile_change=False,
+                    refresh_on_profile_change=enable_profile_change_refresh,
                 )
+                if self.is_zero_video_candidate(user) and not refresh_needed:
+                    refresh_needed = True
+                    refresh_reason = "zero_aweme_count_candidate"
                 if refresh_needed:
                     if refresh_reason in refresh_reason_counts:
                         refresh_reason_counts[refresh_reason] += 1
                     try:
                         if fetch_mode == "full":
-                            videos = self.browser_client.get_all_videos_for_user(user)
+                            user["_full_fetch_validated"] = False
+                            videos = []
+                            full_fetch_validation_error = None
+                            full_fetch_attempts = 0
+                            for full_fetch_attempts in range(1, 3):
+                                try:
+                                    retry_videos = self.browser_client.get_all_videos_for_user(user)
+                                    videos = self.merge_videos(videos, retry_videos)
+                                    user["_full_fetch_validated"] = True
+                                    full_fetch_validation_error = None
+                                    break
+                                except DouyinFullFetchValidationError as exc:
+                                    videos = self.merge_videos(videos, exc.videos)
+                                    latest_video = self.get_latest_video_from_videos(videos)
+                                    full_fetch_validation_error = exc
+                                    print(
+                                        f"⚠️  {user['nickname']} 全量数量校验未通过 "
+                                        f"({exc.actual_count}/{exc.expected_count or '未知'})：{exc}"
+                                    )
+                                    if full_fetch_attempts < 2:
+                                        print(f"🔁 正在重新进入 {user['nickname']} 主页执行第 2 次全量抓取校验...")
+                                        continue
+                                    user["_full_fetch_validated"] = False
+                                    full_fetch_mismatch_rows.append(
+                                        self.build_full_fetch_mismatch_row(
+                                            user,
+                                            exc,
+                                            full_fetch_attempts,
+                                        )
+                                    )
+                                    print(
+                                        f"📝 {user['nickname']} 全量两次抓取后作品数仍未对齐，"
+                                        f"已记录到 {self.config.full_fetch_mismatch_csv.name}，继续下一个博主。"
+                                    )
                             latest_video = self.get_latest_video_from_videos(videos)
                         else:
                             recent_videos = self.browser_client.get_recent_videos_for_user(
@@ -1464,6 +1719,14 @@ class DouyinHiatusAnalyzer:
                             progress_bar.advance(task_id)
                             continue
 
+                    if self.handle_empty_video_profile(
+                        user,
+                        progress=progress,
+                        cached_followings=cached_followings,
+                    ):
+                        progress_bar.advance(task_id)
+                        continue
+
                     if fetch_mode == "full":
                         summary = self.build_video_duration_summary(user, videos)
                     elif entry and isinstance(entry.get("summary"), dict):
@@ -1494,9 +1757,14 @@ class DouyinHiatusAnalyzer:
                     if fetch_mode in {"monitor", "delta", "full"}:
                         existing_modes.add(fetch_mode)
 
+                    progress_user = {
+                        key: value
+                        for key, value in user.items()
+                        if not str(key).startswith("_")
+                    }
                     progress[user["sec_uid"]] = {
                         "cached_at": int(time.time()),
-                        "user": user,
+                        "user": progress_user,
                         "videos": videos,
                         "summary": summary,
                         "latest_video": latest_video,
@@ -1595,6 +1863,7 @@ class DouyinHiatusAnalyzer:
                         f"摘要缺失: {refresh_reason_counts['missing_summary']}",
                         f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
                         f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
+                        f"作品为 0 待确认: {refresh_reason_counts['zero_aweme_count_candidate']}",
                     ],
                     border_style="blue",
                 )
@@ -1613,6 +1882,8 @@ class DouyinHiatusAnalyzer:
                 progress,
             ),
         )
+        if fetch_mode == "full":
+            save_full_fetch_mismatch_to_csv(self.config, full_fetch_mismatch_rows)
         if export_duration_analysis:
             save_all_videos_to_csv(self.config, all_video_rows)
             save_video_duration_report(self.config, summary_rows, len(all_video_rows))
@@ -1620,6 +1891,8 @@ class DouyinHiatusAnalyzer:
         exported = [self.config.output_csv, self.config.cache_inventory_csv]
         if self.should_export_summary_analysis():
             exported.append(self.config.video_duration_analysis_csv)
+        if fetch_mode == "full":
+            exported.append(self.config.full_fetch_mismatch_csv)
         if export_duration_analysis:
             exported.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
         logger.info(

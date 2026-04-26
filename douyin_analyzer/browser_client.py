@@ -28,6 +28,23 @@ class DouyinRateLimitError(RuntimeError):
     pass
 
 
+class DouyinFullFetchValidationError(RuntimeError):
+    def __init__(
+        self,
+        message,
+        *,
+        videos=None,
+        expected_count=0,
+        actual_count=0,
+        no_more_marker_seen=False,
+    ):
+        super().__init__(message)
+        self.videos = list(videos or [])
+        self.expected_count = int(expected_count or 0)
+        self.actual_count = int(actual_count or 0)
+        self.no_more_marker_seen = bool(no_more_marker_seen)
+
+
 class DouyinBrowserClient:
     def __init__(self, config):
         self.config = config
@@ -710,6 +727,8 @@ class DouyinBrowserClient:
             if self._page_has_service_error():
                 raise DouyinServiceError("抖音主页出现服务异常")
 
+            expected_video_count = self._extract_profile_video_count_from_dom()
+            self._annotate_empty_video_profile_state(user, expected_video_count)
             total_favorited = self._extract_total_favorited_from_dom()
             if total_favorited:
                 user["total_favorited"] = total_favorited
@@ -723,6 +742,7 @@ class DouyinBrowserClient:
                     raise DouyinServiceError("抖音主页接口出现服务异常")
                 self._update_user_profile_from_packet(user, data)
 
+            self._annotate_empty_video_profile_state(user, user.get("aweme_count"))
             total_favorited = self._extract_total_favorited_from_dom()
             if total_favorited:
                 user["total_favorited"] = total_favorited
@@ -741,6 +761,10 @@ class DouyinBrowserClient:
             videos_by_id = {}
             empty_rounds = 0
             stagnant_rounds = 0
+            full_mode = limit is None
+            full_mode_guard_rounds = max(self.config.video_empty_round_limit * 4, 8)
+            no_more_marker_seen = False
+            zero_video_page_confirmed = False
             page.listen.start([self.config.post_api_pattern, self.config.video_detail_api_pattern])
             try:
                 self._open_page(user["homepage"], self.config.video_page_load_delay)
@@ -748,19 +772,31 @@ class DouyinBrowserClient:
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
+                expected_video_count = self._extract_profile_video_count_from_dom()
+                zero_video_page_confirmed = self._annotate_empty_video_profile_state(user, expected_video_count)
                 total_favorited = self._extract_total_favorited_from_dom()
                 if total_favorited:
                     user["total_favorited"] = total_favorited
+                if full_mode:
+                    if expected_video_count == 0 and zero_video_page_confirmed:
+                        logger.info(
+                            "Douyin full fetch detected empty video page | uid={} | expected=0",
+                            user.get("sec_uid"),
+                        )
 
-                while empty_rounds < self.config.video_empty_round_limit:
+                while True:
+                    if limit and len(videos_by_id) >= limit:
+                        break
                     if self._page_has_rate_limit():
                         raise RuntimeError("rate_limit")
                     self._scroll_video_page_fast()
+                    no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
                     packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
                     if packets:
                         empty_rounds = 0
                         new_videos = 0
                         should_stop = False
+                        received_has_more_false = False
                         for packet in packets:
                             data = self._extract_packet_body(packet)
                             if self._packet_has_rate_limit(data):
@@ -775,28 +811,84 @@ class DouyinBrowserClient:
                                     videos_by_id[video["aweme_id"]] = video
                                 elif video:
                                     videos_by_id[video["aweme_id"]] = video
+                            zero_video_page_confirmed = zero_video_page_confirmed or self._annotate_empty_video_profile_state(
+                                user,
+                                user.get("aweme_count"),
+                            )
                             if limit and len(videos_by_id) >= limit:
                                 should_stop = True
                                 break
                             if data.get("has_more") in (0, False):
-                                should_stop = True
-                                break
+                                received_has_more_false = True
 
                         if new_videos == 0:
                             stagnant_rounds += 1
                         else:
                             stagnant_rounds = 0
 
-                        if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
-                            break
+                        if not full_mode:
+                            if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
+                                break
+                        else:
+                            no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
+                            if expected_video_count == 0 and len(videos_by_id) == 0:
+                                zero_video_page_confirmed = zero_video_page_confirmed or self._page_has_empty_video_state(expected_video_count)
+                                if zero_video_page_confirmed:
+                                    break
+                            if no_more_marker_seen:
+                                break
+                            if received_has_more_false:
+                                logger.info(
+                                    "Douyin full fetch received has_more=false but keeps scrolling until no-more marker | uid={} | collected={} | expected={}",
+                                    user.get("sec_uid"),
+                                    len(videos_by_id),
+                                    expected_video_count or 0,
+                                )
+                            if stagnant_rounds >= full_mode_guard_rounds:
+                                raise DouyinFullFetchValidationError(
+                                    f"抖音全量抓取未检测到底部结束标记：主页显示作品 {expected_video_count or '未知'} 个，"
+                                    f"当前已抓取 {len(videos_by_id)} 个，页面未出现“暂时没有更多了”。"
+                                    ,
+                                    videos=sorted(
+                                        videos_by_id.values(),
+                                        key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
+                                        reverse=True,
+                                    ),
+                                    expected_count=expected_video_count,
+                                    actual_count=len(videos_by_id),
+                                    no_more_marker_seen=no_more_marker_seen,
+                                )
                     else:
                         if self._page_has_rate_limit():
                             raise RuntimeError("rate_limit")
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
-                        if empty_rounds >= self.config.video_empty_round_limit:
-                            break
+                        if not full_mode:
+                            if empty_rounds >= self.config.video_empty_round_limit:
+                                break
+                        else:
+                            no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
+                            if expected_video_count == 0 and len(videos_by_id) == 0:
+                                zero_video_page_confirmed = zero_video_page_confirmed or self._page_has_empty_video_state(expected_video_count)
+                                if zero_video_page_confirmed:
+                                    break
+                            if no_more_marker_seen:
+                                break
+                            if empty_rounds >= full_mode_guard_rounds:
+                                raise DouyinFullFetchValidationError(
+                                    f"抖音全量抓取未检测到底部结束标记：主页显示作品 {expected_video_count or '未知'} 个，"
+                                    f"当前已抓取 {len(videos_by_id)} 个，页面未出现“暂时没有更多了”。"
+                                    ,
+                                    videos=sorted(
+                                        videos_by_id.values(),
+                                        key=lambda item: normalize_timestamp(item.get("publish_timestamp")),
+                                        reverse=True,
+                                    ),
+                                    expected_count=expected_video_count,
+                                    actual_count=len(videos_by_id),
+                                    no_more_marker_seen=no_more_marker_seen,
+                                )
 
                 videos = sorted(
                     videos_by_id.values(),
@@ -818,6 +910,30 @@ class DouyinBrowserClient:
                     )
                 if limit:
                     videos = videos[:limit]
+                if full_mode:
+                    expected_video_count = int(user.get("aweme_count") or 0)
+                    if expected_video_count == 0 and len(videos) == 0 and zero_video_page_confirmed:
+                        no_more_marker_seen = True
+                    if not no_more_marker_seen:
+                        raise DouyinFullFetchValidationError(
+                            f"抖音全量抓取未滚动到底：主页显示作品 {expected_video_count or '未知'} 个，"
+                            f"当前已抓取 {len(videos)} 个，页面未出现“暂时没有更多了”。"
+                            ,
+                            videos=videos,
+                            expected_count=expected_video_count,
+                            actual_count=len(videos),
+                            no_more_marker_seen=no_more_marker_seen,
+                        )
+                    if expected_video_count > 0 and len(videos) != expected_video_count:
+                        raise DouyinFullFetchValidationError(
+                            f"抖音全量抓取作品数量校验失败：主页显示作品 {expected_video_count} 个，"
+                            f"实际抓取到 {len(videos)} 个。"
+                            ,
+                            videos=videos,
+                            expected_count=expected_video_count,
+                            actual_count=len(videos),
+                            no_more_marker_seen=no_more_marker_seen,
+                        )
                 self.service_error_streak = 0
                 self.rate_limit_streak = 0
                 self.rate_limiter.record_success()
@@ -876,6 +992,40 @@ class DouyinBrowserClient:
             return self.start().run_js("return document.body ? document.body.innerText : '';") or ""
         except Exception:
             return ""
+
+    def _annotate_empty_video_profile_state(self, user, expected_video_count=None):
+        if not isinstance(user, dict):
+            return False
+
+        normalized_count = expected_video_count
+        try:
+            if normalized_count in (None, ""):
+                normalized_count = user.get("aweme_count")
+            if normalized_count not in (None, ""):
+                normalized_count = int(normalized_count)
+        except (TypeError, ValueError):
+            normalized_count = None
+
+        if normalized_count == 0:
+            user["aweme_count"] = 0
+        elif isinstance(normalized_count, int) and normalized_count > 0:
+            user["aweme_count"] = normalized_count
+
+        confirmed = bool(normalized_count == 0 and self._page_has_empty_video_state(normalized_count))
+        user["_empty_video_page_confirmed"] = confirmed
+        return confirmed
+
+    def _page_has_empty_video_state(self, expected_video_count=None):
+        if expected_video_count not in (None, "", 0):
+            return False
+        body_text = self._page_body_text()
+        empty_markers = (
+            "暂无作品",
+            "还没有作品",
+            "暂时没有作品",
+            "没有作品",
+        )
+        return any(marker in body_text for marker in empty_markers)
 
     @staticmethod
     def _extract_awemes_from_packet_body(data):
@@ -1185,6 +1335,121 @@ class DouyinBrowserClient:
         body_text = self._page_body_text()
         match = re.search(r"\u83b7\u8d5e\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
         return parse_view_count(match.group(1)) if match else 0
+
+    def _extract_profile_video_count_from_dom(self):
+        script = r"""
+        const worksText = '\u4f5c\u54c1';
+        const parseCount = (raw) => {
+          const text = String(raw || '').trim().toLowerCase();
+          const match = text.match(/([\d.]+)\s*(\u4ebf|\u4e07|\u5343|w)?/i);
+          if (!match) return 0;
+          let value = Number(match[1]);
+          if (!Number.isFinite(value)) return 0;
+          const unit = match[2] || '';
+          if (unit === '\u4ebf') value *= 100000000;
+          if (unit === '\u4e07' || unit === 'w') value *= 10000;
+          if (unit === '\u5343') value *= 1000;
+          return Math.round(value);
+        };
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            const match = text.match(/\u4f5c\u54c1\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)/i);
+            return {rect, text, count: match ? parseCount(match[1]) : 0};
+          })
+          .filter(item =>
+            item.count > 0 &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.left >= 0 &&
+            item.rect.left < window.innerWidth * 0.6 &&
+            item.rect.top >= 80 &&
+            item.rect.top <= 420
+          )
+          .map(item => {
+            let score = 0;
+            if (item.text.includes(worksText)) score += 30;
+            if (item.rect.top >= 120 && item.rect.top <= 260) score += 12;
+            if (item.rect.left <= 420) score += 10;
+            if (item.text.length <= 80) score += 8;
+            if (item.text.includes('\u63a8\u8350')) score += 6;
+            if (item.text.includes('\u559c\u6b22')) score += 6;
+            return {...item, score};
+          })
+          .sort((a, b) => b.score - a.score);
+        if (candidates.length) {
+          return {
+            count: candidates[0].count,
+            text: candidates[0].text.slice(0, 80),
+            rect: {
+              left: Math.round(candidates[0].rect.left),
+              top: Math.round(candidates[0].rect.top),
+              width: Math.round(candidates[0].rect.width),
+              height: Math.round(candidates[0].rect.height)
+            }
+          };
+        }
+        return {count: 0, source: 'not_found'};
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"count": 0, "source": "unsupported_page_backend"}
+            if isinstance(result, dict) and int(result.get("count") or 0) > 0:
+                logger.info("Douyin profile video count DOM parse | result={}", result)
+                return int(result.get("count") or 0)
+        except Exception as exc:
+            logger.warning("Douyin profile video count DOM parse failed | error={}", exc)
+
+        body_text = self._page_body_text()
+        match = re.search(r"\u4f5c\u54c1\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
+        return parse_view_count(match.group(1)) if match else 0
+
+    def _video_page_has_no_more_marker(self):
+        script = r"""
+        const noMoreText = '\u6682\u65f6\u6ca1\u6709\u66f4\u591a\u4e86';
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            return {rect, text};
+          })
+          .filter(item =>
+            item.text.includes(noMoreText) &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.top < window.innerHeight + 500 &&
+            item.rect.bottom > -100
+          )
+          .sort((a, b) => b.rect.top - a.rect.top);
+        if (candidates.length) {
+          return {
+            seen: true,
+            text: candidates[0].text.slice(0, 40),
+            top: Math.round(candidates[0].rect.top)
+          };
+        }
+        return {seen: false};
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                result = {"seen": False}
+            if isinstance(result, dict) and result.get("seen"):
+                logger.info("Douyin video no-more marker detected | result={}", result)
+                return True
+        except Exception as exc:
+            logger.warning("Douyin video no-more marker check failed | error={}", exc)
+        return "\u6682\u65f6\u6ca1\u6709\u66f4\u591a\u4e86" in self._page_body_text()
 
     def _extract_following_count_from_dom(self):
         script = r"""

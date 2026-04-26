@@ -331,6 +331,32 @@ def save_cache_inventory_to_csv(config, cache_rows):
     _write_csv(config.cache_inventory_csv, fieldnames, headers, cache_rows, "保存抖音缓存清单CSV失败")
 
 
+def save_full_fetch_mismatch_to_csv(config, mismatch_rows):
+    fieldnames = [
+        "uploader_name",
+        "uploader_id",
+        "uploader_homepage",
+        "expected_video_count",
+        "actual_video_count",
+        "retry_count",
+        "no_more_marker_seen",
+        "last_error",
+        "fetched_at",
+    ]
+    headers = {
+        "uploader_name": "UP主姓名",
+        "uploader_id": "UP主UID",
+        "uploader_homepage": "UP主页链接",
+        "expected_video_count": "主页作品数",
+        "actual_video_count": "实际抓取数",
+        "retry_count": "抓取次数",
+        "no_more_marker_seen": "是否出现暂时没有更多了",
+        "last_error": "最后校验结果",
+        "fetched_at": "记录时间",
+    }
+    _write_csv(config.full_fetch_mismatch_csv, fieldnames, headers, mismatch_rows, "保存抖音全量数量不一致CSV失败")
+
+
 def _write_csv(path, fieldnames, headers, rows, error_message):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

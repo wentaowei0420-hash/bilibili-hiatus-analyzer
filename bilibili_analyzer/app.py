@@ -1,4 +1,5 @@
 import csv
+import os
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -42,59 +43,80 @@ def load_uid_targets(list_path):
     return list(dict.fromkeys(targets))
 
 
-def remember_follower_count(follower_index, uid, count):
+def _parse_bool_env(name, default=True):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _remember_bilibili_uid_metrics(metric_index, uid, *, follower_count=None, published_video_count=None, average_like_count=None):
     normalized_uid = str(uid or "").strip()
-    parsed_count = parse_view_count(count)
-    if not normalized_uid or parsed_count <= 0:
+    if not normalized_uid:
         return
-    follower_index[normalized_uid] = max(parsed_count, follower_index.get(normalized_uid, 0))
+    entry = metric_index.setdefault(
+        normalized_uid,
+        {"follower_count": 0, "published_video_count": 0, "average_like_count": 0},
+    )
+    if follower_count is not None:
+        entry["follower_count"] = max(parse_view_count(entry.get("follower_count", 0)), parse_view_count(follower_count))
+    if published_video_count is not None:
+        entry["published_video_count"] = max(parse_view_count(entry.get("published_video_count", 0)), parse_view_count(published_video_count))
+    if average_like_count is not None:
+        entry["average_like_count"] = max(parse_view_count(entry.get("average_like_count", 0)), parse_view_count(average_like_count))
 
 
-def load_bilibili_follower_count_index(config, cache_store):
-    follower_index = {}
+def load_bilibili_uid_order_index(cache_store):
+    metric_index = {}
 
-    for result in cache_store.load_precise_progress().values():
+    for uid, result in (cache_store.load_precise_progress() or {}).items():
         if not isinstance(result, dict):
             continue
-        remember_follower_count(
-            follower_index,
-            result.get("uploader_id"),
-            result.get("follower_count"),
+        _remember_bilibili_uid_metrics(
+            metric_index,
+            result.get("uploader_id") or uid,
+            follower_count=result.get("follower_count"),
+            published_video_count=result.get("published_video_count"),
+            average_like_count=result.get("average_like_count"),
         )
 
-    for entry in cache_store.load_video_duration_progress().values():
+    for uid, entry in (cache_store.load_video_duration_progress() or {}).items():
         if not isinstance(entry, dict):
             continue
         following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
         summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
-        remember_follower_count(
-            follower_index,
-            following.get("mid") or summary.get("uploader_id"),
-            following.get("follower_count") or summary.get("follower_count"),
+        _remember_bilibili_uid_metrics(
+            metric_index,
+            (following or {}).get("mid") or summary.get("uploader_id") or uid,
+            follower_count=(following or {}).get("follower_count") or summary.get("follower_count"),
+            published_video_count=summary.get("total_videos") or summary.get("published_video_count"),
+            average_like_count=summary.get("average_like_count"),
         )
 
-    for path in (config.output_csv, config.video_duration_analysis_csv):
-        if not path.exists():
-            continue
-        try:
-            with path.open("r", newline="", encoding="utf-8-sig") as csvfile:
-                for row in csv.DictReader(csvfile):
-                    remember_follower_count(
-                        follower_index,
-                        row.get("UP主UID") or row.get("uploader_id") or row.get("uploader_id"),
-                        row.get("粉丝数") or row.get("follower_count"),
-                    )
-        except Exception:
-            continue
-
-    return follower_index
+    return metric_index
 
 
-def sort_uid_targets_by_follower_count(targets, follower_index):
-    return sorted(
-        targets,
-        key=lambda uid: -parse_view_count(follower_index.get(str(uid), 0)),
-    )
+def get_bilibili_uid_fetch_order():
+    labels = {
+        "follower_count": "\u7c89\u4e1d\u6570",
+        "published_video_count": "\u89c6\u9891\u603b\u6570",
+        "average_like_count": "\u5e73\u5747\u70b9\u8d5e\u6570",
+    }
+    field = str(os.getenv("BILIBILI_FETCH_ORDER_BY", "follower_count") or "follower_count").strip()
+    if field not in labels:
+        field = "follower_count"
+    descending = _parse_bool_env("BILIBILI_FETCH_ORDER_DESC", True)
+    return field, descending, labels[field]
+
+
+def sort_uid_targets_by_follower_count(targets, metric_index, order_field="follower_count", descending=True):
+    def sort_key(uid):
+        metrics = (metric_index.get(str(uid), {}) or {})
+        value = parse_view_count(metrics.get(order_field, 0))
+        primary = -value if descending else value
+        return (primary, str(uid))
+
+    return sorted(targets, key=sort_key)
 
 
 def write_uid_fetch_outputs(config, video_rows, summary_rows):
@@ -270,22 +292,22 @@ def run_analysis(trigger_upload=True, max_followings=None):
                 border_style="cyan",
             )
         )
-        run_feishu_upload()
+        run_feishu_upload(prune_missing=True)
 
     return results
 
 
 def run_feishu_upload(prune_missing=True):
     config = load_feishu_config()
-    setup_logging(config.log_dir, "feishu_upload")
+    setup_logging(config.log_dir, "bilibili_feishu_upload")
     uploader = FeishuUploader(config)
     uploader.run(prune_missing=prune_missing)
+    return True
 
 
 def run_uid_analysis_upload(csv_path, target_uids=None):
     config = load_feishu_config()
     setup_logging(config.log_dir, "bilibili_uid_analysis_upload")
-    _show_uid_analysis_status_panel(config, csv_path, target_uids=target_uids)
     uploader = FeishuUploader(config)
     uploader.run_single_table(
         config.export_uid_analysis_table,
@@ -294,52 +316,6 @@ def run_uid_analysis_upload(csv_path, target_uids=None):
         sheet_index=config.analysis_sheet_index,
         upload_state_json=config.analysis_upload_state_json,
         panel_title="Bilibili UID Analysis Synced",
-    )
-
-
-def _load_uid_analysis_dataframe(config):
-    dataframe = read_latest_snapshot_to_dataframe(config.export_store_db, config.export_uid_analysis_table)
-    source = "sqlite snapshot"
-    if dataframe is None:
-        dataframe = read_table_to_dataframe(config.export_store_db, config.export_uid_analysis_table)
-        source = "sqlite current"
-    return dataframe, source
-
-
-def _show_uid_analysis_status_panel(config, csv_path, target_uids=None):
-    dataframe, source = _load_uid_analysis_dataframe(config)
-
-    lines = [
-        f"Target sheet: {config.analysis_sheet_title}",
-        f"SQLite table: {config.export_uid_analysis_table}",
-        f"Source: {source if dataframe is not None else 'csv fallback pending'}",
-    ]
-
-    if dataframe is not None:
-        lines.append(f"Prepared rows: {len(dataframe.index)}")
-        lines.append(f"Prepared columns: {len(dataframe.columns)}")
-    else:
-        lines.append("Prepared rows: 0")
-        lines.append("Prepared columns: 0")
-
-    if target_uids is not None:
-        target_uid_set = {str(uid).strip() for uid in target_uids if str(uid).strip()}
-        matched_count = 0
-        if dataframe is not None and "UP主UID" in dataframe.columns:
-            matched_count = dataframe["UP主UID"].astype(str).str.strip().isin(target_uid_set).sum()
-        lines.append(f"Target UID count: {len(target_uid_set)}")
-        lines.append(f"Matched in SQLite: {matched_count}")
-
-    csv_path = Path(csv_path)
-    lines.append(f"Fallback CSV: {csv_path.name}")
-    lines.append(f"CSV exists: {'yes' if csv_path.exists() else 'no'}")
-
-    get_console().print(
-        create_summary_panel(
-            "Bilibili UID Analysis Ready",
-            lines,
-            border_style="cyan",
-        )
     )
 
 
@@ -356,34 +332,46 @@ def run_fetch_uid_videos(list_path, max_targets=None):
     client = BilibiliHttpClient(config)
     api = BilibiliApi(config, client)
     cache_store = CacheStore(config)
-    follower_index = load_bilibili_follower_count_index(config, cache_store)
-    missing_followers = [uid for uid in targets if uid not in follower_index]
-    if missing_followers:
-        with create_progress(transient=False) as progress:
-            task_id = progress.add_task("Load Bilibili UID follower counts", total=len(missing_followers))
-            for uid in missing_followers:
-                relation_stat = api.get_uploader_relation_stat(uid, f"UID_{uid}")
-                remember_follower_count(follower_index, uid, relation_stat.get("follower_count", 0))
-                progress.advance(task_id)
+    order_index = load_bilibili_uid_order_index(cache_store)
+    order_field, order_desc, order_label = get_bilibili_uid_fetch_order()
 
-    targets = sort_uid_targets_by_follower_count(targets, follower_index)
+    if order_field == "follower_count":
+        missing_followers = [
+            uid for uid in targets
+            if parse_view_count((order_index.get(str(uid), {}) or {}).get("follower_count", 0)) <= 0
+        ]
+        if missing_followers:
+            with create_progress(transient=False) as progress:
+                task_id = progress.add_task("Load Bilibili UID follower counts", total=len(missing_followers))
+                for uid in missing_followers:
+                    relation_stat = api.get_uploader_relation_stat(uid, f"UID_{uid}")
+                    _remember_bilibili_uid_metrics(order_index, uid, follower_count=relation_stat.get("follower_count", 0))
+                    progress.advance(task_id)
+
+    targets = sort_uid_targets_by_follower_count(targets, order_index, order_field, order_desc)
     if max_targets is not None:
         targets = targets[:max(0, int(max_targets))]
     if not targets:
         get_console().print(create_summary_panel("Bilibili UID Fetch", ["Selected UID count is 0."], border_style="yellow"))
         return []
 
+    source_line = (
+        "????: ????/???? + B???????"
+        if order_field == "follower_count"
+        else "????: ????/?????????? 0 ??"
+    )
     get_console().print(
         create_summary_panel(
             "Bilibili UID Order",
             [
-                "已按粉丝数从高到低排序后开始抓取。",
-                f"排序来源: 本地缓存/历史结果 + B站粉丝统计接口",
+                f"??{order_label}{'????' if order_desc else '????'}????????",
+                source_line,
                 f"Selected UID count: {len(targets)} / {total_targets}",
             ],
             border_style="cyan",
         )
     )
+
     analyzer = BilibiliHiatusAnalyzer(config, api, cache_store)
     all_video_rows = []
     summary_rows = []
@@ -398,16 +386,19 @@ def run_fetch_uid_videos(list_path, max_targets=None):
                 write_uid_fetch_outputs(config, all_video_rows, summary_rows)
                 write_uid_analysis_output(config, analysis_rows)
                 raise
+
             progress.update(task_id, description=f"Fetch Bilibili UID videos | current UID: {uid}")
             fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            following = {
+                "mid": uid,
+                "uname": f"UID_{uid}",
+                "follower_count": (order_index.get(str(uid), {}) or {}).get("follower_count", ""),
+            }
             try:
                 videos = api.get_all_videos_for_up(uid, f"UID_{uid}")
                 all_video_rows.extend(videos)
-                following = {
-                    "mid": uid,
-                    "uname": videos[0].get("uploader_name", f"UID_{uid}") if videos else f"UID_{uid}",
-                    "follower_count": follower_index.get(str(uid), ""),
-                }
+                if videos:
+                    following["uname"] = videos[0].get("uploader_name", following["uname"])
                 analysis_rows.append(analyzer.build_video_duration_summary(following, videos))
                 summary_rows.append(
                     {
@@ -422,20 +413,11 @@ def run_fetch_uid_videos(list_path, max_targets=None):
                     }
                 )
             except Exception as exc:
-                analysis_rows.append(
-                    analyzer.build_video_duration_summary(
-                        {
-                            "mid": uid,
-                            "uname": f"UID_{uid}",
-                            "follower_count": follower_index.get(str(uid), ""),
-                        },
-                        [],
-                    )
-                )
+                analysis_rows.append(analyzer.build_video_duration_summary(following, []))
                 summary_rows.append(
                     {
                         "target_uid": uid,
-                        "uploader_name": f"UID_{uid}",
+                        "uploader_name": following["uname"],
                         "uploader_homepage": f"https://space.bilibili.com/{uid}",
                         "video_count": 0,
                         "status": "failed",

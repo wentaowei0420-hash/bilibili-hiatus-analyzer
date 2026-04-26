@@ -5,7 +5,12 @@ from loguru import logger
 
 from bilibili_analyzer.logging_utils import create_progress, smart_print as print, wait_with_progress
 
-from .browser_client import DouyinBrowserClient, DouyinRateLimitError, DouyinServiceError
+from .browser_client import (
+    DouyinBrowserClient,
+    DouyinFullFetchValidationError,
+    DouyinRateLimitError,
+    DouyinServiceError,
+)
 from .utils import parse_view_count
 
 try:
@@ -269,6 +274,8 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             if self._page_has_service_error():
                 raise DouyinServiceError("抖音主页出现服务异常")
 
+            expected_video_count = self._extract_profile_video_count_from_dom()
+            self._annotate_empty_video_profile_state(user, expected_video_count)
             total_favorited = self._extract_total_favorited_from_dom()
             if total_favorited:
                 user["total_favorited"] = total_favorited
@@ -281,6 +288,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     raise DouyinServiceError("抖音主页接口出现服务异常")
                 self._update_user_profile_from_packet(user, data)
 
+            self._annotate_empty_video_profile_state(user, user.get("aweme_count"))
             total_favorited = self._extract_total_favorited_from_dom()
             if total_favorited:
                 user["total_favorited"] = total_favorited
@@ -432,34 +440,74 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             collected, handler = self._create_response_collector(
                 [self.config.post_api_pattern, self.config.video_detail_api_pattern]
             )
+            full_mode = limit is None
             try:
                 self._open_page(user["homepage"], self.config.video_page_load_delay)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
+                expected_video_count = self._extract_profile_video_count_from_dom()
+                zero_video_page_confirmed = self._annotate_empty_video_profile_state(user, expected_video_count)
                 total_favorited = self._extract_total_favorited_from_dom()
                 if total_favorited:
                     user["total_favorited"] = total_favorited
+                if full_mode:
+                    if expected_video_count == 0 and zero_video_page_confirmed:
+                        logger.info(
+                            "Douyin full fetch detected empty video page | backend=playwright | uid={} | expected=0",
+                            user.get("sec_uid"),
+                        )
 
                 videos_by_id = {}
                 empty_rounds = 0
                 stagnant_rounds = 0
+                full_mode_guard_rounds = max(self.config.video_empty_round_limit * 4, 8)
+                no_more_marker_seen = False
 
-                while empty_rounds < self.config.video_empty_round_limit:
+                while True:
+                    if limit and len(videos_by_id) >= limit:
+                        break
                     if self._page_has_rate_limit():
                         raise RuntimeError("rate_limit")
                     self._scroll_video_page_fast()
+                    no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
                     packets = self._drain_response_collector(collected, self.config.video_packet_timeout)
                     if not packets:
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
+                        if not full_mode:
+                            if empty_rounds >= self.config.video_empty_round_limit:
+                                break
+                        else:
+                            no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
+                            if expected_video_count == 0 and len(videos_by_id) == 0:
+                                zero_video_page_confirmed = zero_video_page_confirmed or self._page_has_empty_video_state(expected_video_count)
+                                if zero_video_page_confirmed:
+                                    break
+                            if no_more_marker_seen:
+                                break
+                            if empty_rounds >= full_mode_guard_rounds:
+                                raise DouyinFullFetchValidationError(
+                                    f"抖音全量抓取未检测到底部结束标记：主页显示作品 {expected_video_count or '未知'} 个，"
+                                    f"当前已抓取 {len(videos_by_id)} 个，页面未出现“暂时没有更多了”。"
+                                    ,
+                                    videos=sorted(
+                                        videos_by_id.values(),
+                                        key=lambda item: item.get("publish_timestamp") or 0,
+                                        reverse=True,
+                                    ),
+                                    expected_count=expected_video_count,
+                                    actual_count=len(videos_by_id),
+                                    no_more_marker_seen=no_more_marker_seen,
+                                )
                         continue
 
                     empty_rounds = 0
                     new_videos = 0
                     should_stop = False
+                    received_has_more_false = False
                     for data in packets:
                         if self._packet_has_rate_limit(data):
                             raise RuntimeError("rate_limit")
@@ -473,16 +521,49 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                                 videos_by_id[video["aweme_id"]] = video
                             elif video:
                                 videos_by_id[video["aweme_id"]] = video
+                        zero_video_page_confirmed = zero_video_page_confirmed or self._annotate_empty_video_profile_state(
+                            user,
+                            user.get("aweme_count"),
+                        )
                         if limit and len(videos_by_id) >= limit:
                             should_stop = True
                             break
                         if data.get("has_more") in (0, False):
-                            should_stop = True
-                            break
+                            received_has_more_false = True
 
                     stagnant_rounds = stagnant_rounds + 1 if new_videos == 0 else 0
-                    if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
-                        break
+                    if not full_mode:
+                        if should_stop or stagnant_rounds >= self.config.video_empty_round_limit:
+                            break
+                    else:
+                        no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
+                        if expected_video_count == 0 and len(videos_by_id) == 0:
+                            zero_video_page_confirmed = zero_video_page_confirmed or self._page_has_empty_video_state(expected_video_count)
+                            if zero_video_page_confirmed:
+                                break
+                        if no_more_marker_seen:
+                            break
+                        if received_has_more_false:
+                            logger.info(
+                                "Douyin full fetch received has_more=false but keeps scrolling until no-more marker | backend=playwright | uid={} | collected={} | expected={}",
+                                user.get("sec_uid"),
+                                len(videos_by_id),
+                                expected_video_count or 0,
+                            )
+                        if stagnant_rounds >= full_mode_guard_rounds:
+                            raise DouyinFullFetchValidationError(
+                                f"抖音全量抓取未检测到底部结束标记：主页显示作品 {expected_video_count or '未知'} 个，"
+                                f"当前已抓取 {len(videos_by_id)} 个，页面未出现“暂时没有更多了”。"
+                                ,
+                                videos=sorted(
+                                    videos_by_id.values(),
+                                    key=lambda item: item.get("publish_timestamp") or 0,
+                                    reverse=True,
+                                ),
+                                expected_count=expected_video_count,
+                                actual_count=len(videos_by_id),
+                                no_more_marker_seen=no_more_marker_seen,
+                            )
 
                 videos = sorted(
                     videos_by_id.values(),
@@ -501,10 +582,34 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                         videos_by_id.values(),
                         key=lambda item: item.get("publish_timestamp") or 0,
                         reverse=True,
-                    )
+                )
 
                 if limit:
                     videos = videos[:limit]
+                if full_mode:
+                    expected_video_count = int(user.get("aweme_count") or 0)
+                    if expected_video_count == 0 and len(videos) == 0 and zero_video_page_confirmed:
+                        no_more_marker_seen = True
+                    if not no_more_marker_seen:
+                        raise DouyinFullFetchValidationError(
+                            f"抖音全量抓取未滚动到底：主页显示作品 {expected_video_count or '未知'} 个，"
+                            f"当前已抓取 {len(videos)} 个，页面未出现“暂时没有更多了”。"
+                            ,
+                            videos=videos,
+                            expected_count=expected_video_count,
+                            actual_count=len(videos),
+                            no_more_marker_seen=no_more_marker_seen,
+                        )
+                    if expected_video_count > 0 and len(videos) != expected_video_count:
+                        raise DouyinFullFetchValidationError(
+                            f"抖音全量抓取作品数量校验失败：主页显示作品 {expected_video_count} 个，"
+                            f"实际抓取到 {len(videos)} 个。"
+                            ,
+                            videos=videos,
+                            expected_count=expected_video_count,
+                            actual_count=len(videos),
+                            no_more_marker_seen=no_more_marker_seen,
+                        )
                 self.service_error_streak = 0
                 self.rate_limit_streak = 0
                 self.rate_limiter.record_success()

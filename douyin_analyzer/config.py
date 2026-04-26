@@ -45,6 +45,7 @@ class DouyinAnalyzerConfig:
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
     cache_inventory_csv: Path
+    full_fetch_mismatch_csv: Path
     export_store_db: Path
     export_main_table: str
     export_analysis_table: str
@@ -206,6 +207,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         video_duration_analysis_csv=output_dir / "douyin_video_duration_analysis.csv",
         video_duration_report_md=output_dir / "douyin_video_duration_report.md",
         cache_inventory_csv=output_dir / "douyin_cache_inventory.csv",
+        full_fetch_mismatch_csv=output_dir / "douyin_full_fetch_mismatch.csv",
         export_store_db=state_dir / "douyin_export_store.db",
         export_main_table="main_sheet_current",
         export_analysis_table="analysis_sheet_current",

@@ -1,3 +1,4 @@
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,6 +50,12 @@ class BilibiliHiatusAnalyzer:
         if self.max_followings is not None and self.max_followings <= 0:
             self.max_followings = None
 
+    FETCH_ORDER_LABELS = {
+        "follower_count": "\u7c89\u4e1d\u6570",
+        "published_video_count": "\u89c6\u9891\u603b\u6570",
+        "average_like_count": "\u5e73\u5747\u70b9\u8d5e\u6570",
+    }
+
     @staticmethod
     def _safe_int(value, default=0):
         try:
@@ -58,14 +65,84 @@ class BilibiliHiatusAnalyzer:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _env_flag(name, default=True):
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
     @classmethod
-    def sort_followings_by_follower_count(cls, followings):
-        return sorted(
-            followings or [],
-            key=lambda following: -cls._safe_int(
-                (following or {}).get("follower_count") if isinstance(following, dict) else 0
-            ),
-        )
+    def get_following_fetch_order(cls):
+        field = str(os.getenv("BILIBILI_FETCH_ORDER_BY", "follower_count") or "follower_count").strip()
+        if field not in cls.FETCH_ORDER_LABELS:
+            field = "follower_count"
+        descending = cls._env_flag("BILIBILI_FETCH_ORDER_DESC", True)
+        return field, descending, cls.FETCH_ORDER_LABELS[field]
+
+    def _build_following_metric_index(self):
+        metric_index = {}
+
+        precise_progress = self.cache_store.load_precise_progress()
+        for mid, result in (precise_progress or {}).items():
+            if not isinstance(result, dict):
+                continue
+            key = str(result.get("uploader_id") or mid or "").strip()
+            if not key:
+                continue
+            item = metric_index.setdefault(key, {})
+            item["follower_count"] = max(self._safe_int(item.get("follower_count"), 0), self._safe_int(result.get("follower_count"), 0))
+            item["published_video_count"] = max(self._safe_int(item.get("published_video_count"), 0), self._safe_int(result.get("published_video_count"), 0))
+            item["average_like_count"] = max(self._safe_int(item.get("average_like_count"), 0), self._safe_int(result.get("average_like_count"), 0))
+
+        duration_progress = self.cache_store.load_video_duration_progress()
+        for mid, entry in (duration_progress or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
+            summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
+            key = str((following or {}).get("mid") or summary.get("uploader_id") or mid or "").strip()
+            if not key:
+                continue
+            item = metric_index.setdefault(key, {})
+            item["follower_count"] = max(
+                self._safe_int(item.get("follower_count"), 0),
+                self._safe_int((following or {}).get("follower_count") or summary.get("follower_count"), 0),
+            )
+            item["published_video_count"] = max(
+                self._safe_int(item.get("published_video_count"), 0),
+                self._safe_int(summary.get("total_videos") or summary.get("published_video_count"), 0),
+            )
+            item["average_like_count"] = max(
+                self._safe_int(item.get("average_like_count"), 0),
+                self._safe_int(summary.get("average_like_count"), 0),
+            )
+
+        return metric_index
+
+    def _resolve_following_sort_value(self, following, field, metric_index):
+        following = following if isinstance(following, dict) else {}
+        mid = str(following.get("mid") or "").strip()
+        cached = metric_index.get(mid, {}) if mid else {}
+        if field == "published_video_count":
+            return self._safe_int(cached.get("published_video_count"), 0)
+        if field == "average_like_count":
+            return self._safe_int(cached.get("average_like_count"), 0)
+        return self._safe_int(following.get("follower_count") or cached.get("follower_count"), 0)
+
+    def sort_followings_by_follower_count(self, followings):
+        field, descending, _label = self.get_following_fetch_order()
+        metric_index = self._build_following_metric_index()
+
+        def sort_key(following):
+            following = following if isinstance(following, dict) else {}
+            value = self._resolve_following_sort_value(following, field, metric_index)
+            name = str(following.get("uname") or "")
+            mid = str(following.get("mid") or "")
+            primary = -value if descending else value
+            return (primary, name, mid)
+
+        return sorted(followings or [], key=sort_key)
 
     def build_result_item(self, video_info):
         days_since = calculate_days_since(video_info["upload_timestamp"])
@@ -520,20 +597,15 @@ class BilibiliHiatusAnalyzer:
         all_video_rows = []
         summary_rows = []
         for following in followings:
+            check_stop()
             entry = duration_progress.get(str(following.get("mid")))
-            if not entry:
+            if not isinstance(entry, dict):
                 continue
-            all_video_rows.extend(entry.get("videos", []))
-            summary = self.populate_duration_summary_defaults(
-                entry.get("summary", {}),
-                entry.get("videos", []),
-            )
-            entry["summary"] = summary
-            summary_rows.append(summary)
-
-        if not summary_rows:
-            print("⚠️  未生成任何视频时长分析结果。")
-            return duration_progress
+            videos = entry.get("videos", []) if isinstance(entry.get("videos"), list) else []
+            summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
+            all_video_rows.extend(videos)
+            if summary:
+                summary_rows.append(summary)
 
         save_all_videos_to_csv(self.config, all_video_rows)
         save_video_duration_analysis_to_csv(self.config, summary_rows)
@@ -610,16 +682,19 @@ class BilibiliHiatusAnalyzer:
                 following.get("uname", "UP主"),
             )
             following["follower_count"] = relation_stat.get("follower_count", 0)
+        order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)
         total_followings = len(followings)
         partial_run = self.max_followings is not None and self.max_followings < total_followings
         if partial_run:
             followings = followings[: self.max_followings]
             print(
-                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
-                f"本轮仅处理粉丝数前 {len(followings)} 位"
+                f"?? ????????? | ????={total_followings} ? | "
+                f"?????????? {len(followings)} ?"
             )
-        print("📈 已按粉丝数从高到低排序后开始处理。")
+        print(
+            f"?? ??{order_label}{'????' if order_desc else '????'}????????"
+        )
 
         cached_video_results = self.cache_store.load_precise_progress()
         if cached_video_results:

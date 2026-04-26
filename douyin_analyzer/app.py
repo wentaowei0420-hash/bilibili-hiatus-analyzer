@@ -1,4 +1,5 @@
 import csv
+import os
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -102,11 +103,47 @@ def load_douyin_uid_profile_index(cache_store):
     return profile_index
 
 
-def sort_uid_targets_by_follower_count(targets, profile_index):
-    return sorted(
-        targets,
-        key=lambda uid: -parse_view_count((profile_index.get(str(uid), {}) or {}).get("follower_count")),
-    )
+def _parse_bool_env(name, default=True):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_douyin_uid_fetch_order():
+    labels = {
+        "follower_count": "\u7c89\u4e1d\u6570",
+        "published_video_count": "\u89c6\u9891\u603b\u6570",
+        "total_favorited": "\u83b7\u8d5e\u603b\u6570",
+        "average_like_count": "\u5e73\u5747\u70b9\u8d5e\u6570",
+    }
+    field = str(os.getenv("DOUYIN_FETCH_ORDER_BY", "follower_count") or "follower_count").strip()
+    if field not in labels:
+        field = "follower_count"
+    descending = _parse_bool_env("DOUYIN_FETCH_ORDER_DESC", True)
+    return field, descending, labels[field]
+
+
+def _resolve_douyin_profile_sort_value(profile, field):
+    profile = profile if isinstance(profile, dict) else {}
+    if field == "published_video_count":
+        return parse_view_count(profile.get("aweme_count") or profile.get("published_video_count") or profile.get("total_videos"))
+    if field == "total_favorited":
+        return parse_view_count(profile.get("total_favorited"))
+    if field == "average_like_count":
+        total_favorited = parse_view_count(profile.get("total_favorited"))
+        video_count = parse_view_count(profile.get("aweme_count") or profile.get("published_video_count") or profile.get("total_videos"))
+        return int(total_favorited / video_count) if total_favorited > 0 and video_count > 0 else 0
+    return parse_view_count(profile.get("follower_count"))
+
+
+def sort_uid_targets_by_follower_count(targets, profile_index, order_field="follower_count", descending=True):
+    def sort_key(uid):
+        value = _resolve_douyin_profile_sort_value((profile_index.get(str(uid), {}) or {}), order_field)
+        primary = -value if descending else value
+        return (primary, str(uid))
+
+    return sorted(targets, key=sort_key)
 
 
 def write_uid_fetch_outputs(config, video_rows, summary_rows):
@@ -624,7 +661,8 @@ def run_fetch_uid_videos(list_path, max_targets=None):
     total_targets = len(targets)
     cache_store = CacheStore(config)
     profile_index = load_douyin_uid_profile_index(cache_store)
-    targets = sort_uid_targets_by_follower_count(targets, profile_index)
+    order_field, order_desc, order_label = get_douyin_uid_fetch_order()
+    targets = sort_uid_targets_by_follower_count(targets, profile_index, order_field, order_desc)
     if max_targets is not None:
         targets = targets[:max(0, int(max_targets))]
     if not targets:
@@ -635,8 +673,8 @@ def run_fetch_uid_videos(list_path, max_targets=None):
         create_summary_panel(
             "Douyin UID Order",
             [
-                "已按粉丝数从高到低排序后开始抓取。",
-                "排序来源: 抖音关注列表缓存/历史抓取缓存；未知粉丝数会排在后面。",
+                f"\u5df2\u6309{order_label}{'\u4ece\u9ad8\u5230\u4f4e' if order_desc else '\u4ece\u4f4e\u5230\u9ad8'}\u6392\u5e8f\u540e\u5f00\u59cb\u6293\u53d6\u3002",
+                "\u6392\u5e8f\u6765\u6e90: \u6296\u97f3\u5173\u6ce8\u5217\u8868\u7f13\u5b58/\u5386\u53f2\u6293\u53d6\u7f13\u5b58\uff0c\u7f3a\u5931\u6307\u6807\u6309 0 \u5904\u7406\u3002",
                 f"Selected UID count: {len(targets)} / {total_targets}",
             ],
             border_style="cyan",
