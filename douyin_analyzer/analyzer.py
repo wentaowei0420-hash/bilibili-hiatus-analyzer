@@ -1144,6 +1144,63 @@ class DouyinHiatusAnalyzer:
             except Exception as exc:
                 print(f"⚠️  阶段性飞书上传失败，但分析会继续执行: {exc}")
 
+    def append_fetch_manifest_record(
+        self,
+        user,
+        fetch_status,
+        video_count=0,
+        latest_video=None,
+        result=None,
+        refresh_reason="",
+        message="",
+    ):
+        latest_video = latest_video if isinstance(latest_video, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        self.cache_store.append_fetch_manifest(
+            {
+                "mode": self.get_fetch_mode(),
+                "uploader_id": (user or {}).get("sec_uid") or result.get("uploader_id") or "",
+                "uploader_name": (user or {}).get("nickname") or result.get("uploader_name") or "",
+                "homepage": (user or {}).get("homepage") or result.get("uploader_homepage") or "",
+                "fetch_status": fetch_status,
+                "refresh_reason": refresh_reason or "",
+                "video_count": video_count,
+                "latest_video_id": latest_video.get("aweme_id") or latest_video.get("video_id") or "",
+                "latest_publish_timestamp": normalize_timestamp(latest_video.get("publish_timestamp")),
+                "result_source": result.get("data_source") or "",
+                "message": message or "",
+            }
+        )
+
+    def failed_profile_key_matches(self, user, failed_keys):
+        if not failed_keys:
+            return False
+        uid = str((user or {}).get("sec_uid") or "").strip()
+        homepage = self.cache_store._normalize_homepage_url((user or {}).get("homepage", ""))
+        return (uid and f"uid:{uid}" in failed_keys) or (
+            homepage and f"homepage:{homepage}" in failed_keys
+        )
+
+    def build_failed_profile_skipped_result_item(self, user):
+        result = self.build_fetch_failed_result_item(user)
+        result["data_source"] = "failed_profile_skipped"
+        return result
+
+    def record_profile_failure(self, user, exc, stage):
+        self.cache_store.append_failed_profile(
+            user,
+            reason=str(exc),
+            stage=stage,
+            mode=self.get_fetch_mode(),
+        )
+        self.append_fetch_manifest_record(
+            user,
+            "failed",
+            video_count=0,
+            refresh_reason=stage,
+            message=str(exc),
+        )
+
     def analyze_hiatus(self):
         self.browser_client.ensure_login()
         fetch_mode = self.get_fetch_mode()
@@ -1340,6 +1397,17 @@ class DouyinHiatusAnalyzer:
             "latest_publish_timestamp_newer": 0,
             "zero_aweme_count_candidate": 0,
         }
+        failed_profile_keys = (
+            self.cache_store.load_failed_profile_keys(fetch_mode)
+            if getattr(self.config, "skip_failed_profiles", False)
+            else set()
+        )
+        failed_profile_skip_count = 0
+        if failed_profile_keys:
+            print(
+                f"🧯 已启用失败博主跳过：{len(failed_profile_keys)} 个失败标记在有效期内，"
+                f"有效期={self.config.failed_profile_skip_max_age_hours} 小时"
+            )
 
         if fetch_mode == "counts":
             with create_progress() as progress_bar:
@@ -1358,6 +1426,20 @@ class DouyinHiatusAnalyzer:
                             merge_existing=partial_run,
                         )
                         raise
+                    if self.failed_profile_key_matches(user, failed_profile_keys):
+                        failed_profile_skip_count += 1
+                        result = self.build_failed_profile_skipped_result_item(user)
+                        results.append(result)
+                        if self.should_export_summary_analysis():
+                            summary_rows.append(self.build_counts_only_summary(user))
+                        self.append_fetch_manifest_record(
+                            user,
+                            "failed_profile_skipped",
+                            result=result,
+                            message="matched_failed_profiles_csv",
+                        )
+                        progress_bar.advance(task_id)
+                        continue
                     entry = progress.get(user.get("sec_uid")) if isinstance(progress, dict) else None
                     if isinstance(entry, dict):
                         cached_user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
@@ -1368,8 +1450,10 @@ class DouyinHiatusAnalyzer:
                             self.browser_client.refresh_user_profile_from_homepage(user)
                         except (DouyinRateLimitError, DouyinServiceError) as exc:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认失败，暂时保留: {exc}")
+                            self.record_profile_failure(user, exc, "counts_empty_confirm")
                         except Exception as exc:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认异常，暂时保留: {exc}")
+                            self.record_profile_failure(user, exc, "counts_empty_confirm")
                         if self.handle_empty_video_profile(
                             user,
                             progress=progress,
@@ -1449,6 +1533,21 @@ class DouyinHiatusAnalyzer:
                         )
                         raise
 
+                    if self.failed_profile_key_matches(user, failed_profile_keys):
+                        failed_profile_skip_count += 1
+                        result = self.build_failed_profile_skipped_result_item(user)
+                        results.append(result)
+                        if self.should_export_summary_analysis():
+                            summary_rows.append(self.build_counts_only_summary(user))
+                        self.append_fetch_manifest_record(
+                            user,
+                            "failed_profile_skipped",
+                            result=result,
+                            message="matched_failed_profiles_csv",
+                        )
+                        progress_bar.advance(task_id)
+                        continue
+
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
                     refresh_needed, refresh_reason = self.cache_store.should_refresh_cache(
                         user,
@@ -1471,12 +1570,15 @@ class DouyinHiatusAnalyzer:
                             refreshed_user_count += 1
                         except DouyinRateLimitError as exc:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
+                            self.record_profile_failure(user, exc, "verify_rate_limit")
                             self.browser_client.restart(self.config.rate_limit_global_cooldown)
                         except DouyinServiceError as exc:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
+                            self.record_profile_failure(user, exc, "verify_service_error")
                             self.browser_client.restart(self.config.service_error_global_cooldown)
                         except Exception as exc:
                             print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
+                            self.record_profile_failure(user, exc, "verify_profile")
                     else:
                         cache_hit_count += 1
 
@@ -1486,6 +1588,14 @@ class DouyinHiatusAnalyzer:
                         cached_followings=cached_followings,
                         verified_users=verified_users,
                     ):
+                        self.append_fetch_manifest_record(
+                            user,
+                            "empty_profile_unfollowed",
+                            video_count=0,
+                            latest_video=None,
+                            refresh_reason=refresh_reason,
+                            message="empty_video_profile_confirmed",
+                        )
                         progress_bar.advance(task_id)
                         continue
 
@@ -1501,6 +1611,15 @@ class DouyinHiatusAnalyzer:
                         result["data_source"] = "douyin_profile_verify"
                     elif not refresh_needed:
                         result["data_source"] = "douyin_cache_mark_valid"
+                    verify_videos = entry.get("videos", []) if isinstance(entry, dict) else []
+                    self.append_fetch_manifest_record(
+                        user,
+                        "profile_verified" if profile_verified else "cache_hit",
+                        video_count=len(verify_videos or []),
+                        latest_video=self.get_latest_video_from_entry(entry),
+                        result=result,
+                        refresh_reason=refresh_reason,
+                    )
                     results.append(result)
                     if self.should_export_summary_analysis():
                         summary_rows.append(summary)
@@ -1525,6 +1644,10 @@ class DouyinHiatusAnalyzer:
                             "last_fetch_mode": fetch_mode,
                             "cache_modes": sorted(existing_modes),
                         }
+                        self.cache_store.upsert_video_state_from_progress_entries(
+                            {uid: progress[uid]},
+                            source_mode=fetch_mode,
+                        )
                         pending_progress_saves += 1
 
                     progress_bar.advance(task_id)
@@ -1620,6 +1743,22 @@ class DouyinHiatusAnalyzer:
                         merge_existing=partial_run,
                     )
                     raise
+
+                if self.failed_profile_key_matches(user, failed_profile_keys):
+                    failed_profile_skip_count += 1
+                    result = self.build_failed_profile_skipped_result_item(user)
+                    results.append(result)
+                    if self.should_export_summary_analysis():
+                        summary_rows.append(self.build_counts_only_summary(user))
+                    self.append_fetch_manifest_record(
+                        user,
+                        "failed_profile_skipped",
+                        result=result,
+                        message="matched_failed_profiles_csv",
+                    )
+                    progress_bar.advance(task_id)
+                    continue
+
                 entry = progress.get(user["sec_uid"])
                 if entry and isinstance(entry.get("user"), dict):
                     user.setdefault("follower_count", entry["user"].get("follower_count"))
@@ -1696,6 +1835,7 @@ class DouyinHiatusAnalyzer:
                             videos = entry.get("videos", [])
                             latest_video = self.get_latest_video_from_entry(entry)
                         else:
+                            self.record_profile_failure(user, exc, "fetch_rate_limit")
                             results.append(self.build_fetch_failed_result_item(user))
                             progress_bar.advance(task_id)
                             continue
@@ -1706,6 +1846,7 @@ class DouyinHiatusAnalyzer:
                             videos = entry.get("videos", [])
                             latest_video = self.get_latest_video_from_entry(entry)
                         else:
+                            self.record_profile_failure(user, exc, "fetch_service_error")
                             results.append(self.build_fetch_failed_result_item(user))
                             progress_bar.advance(task_id)
                             continue
@@ -1715,6 +1856,7 @@ class DouyinHiatusAnalyzer:
                             videos = entry.get("videos", [])
                             latest_video = self.get_latest_video_from_entry(entry)
                         else:
+                            self.record_profile_failure(user, exc, "fetch_profile")
                             results.append(self.build_fetch_failed_result_item(user))
                             progress_bar.advance(task_id)
                             continue
@@ -1724,6 +1866,14 @@ class DouyinHiatusAnalyzer:
                         progress=progress,
                         cached_followings=cached_followings,
                     ):
+                        self.append_fetch_manifest_record(
+                            user,
+                            "empty_profile_unfollowed",
+                            video_count=0,
+                            latest_video=None,
+                            refresh_reason=refresh_reason,
+                            message="empty_video_profile_confirmed",
+                        )
                         progress_bar.advance(task_id)
                         continue
 
@@ -1771,6 +1921,10 @@ class DouyinHiatusAnalyzer:
                         "last_fetch_mode": fetch_mode,
                         "cache_modes": sorted(existing_modes),
                     }
+                    self.cache_store.upsert_video_state_from_progress_entries(
+                        {user["sec_uid"]: progress[user["sec_uid"]]},
+                        source_mode=fetch_mode,
+                    )
                     refreshed_user_count += 1
                     pending_progress_saves += 1
 
@@ -1816,6 +1970,14 @@ class DouyinHiatusAnalyzer:
                     result = self.build_no_video_result_item(user)
 
                 self.cache_store.refresh_result_runtime_fields(result)
+                self.append_fetch_manifest_record(
+                    user,
+                    "refreshed" if refresh_needed else "cache_hit",
+                    video_count=len(videos or []),
+                    latest_video=latest_video,
+                    result=result,
+                    refresh_reason=refresh_reason,
+                )
                 results.append(result)
 
                 if self.should_export_summary_analysis():
@@ -1864,6 +2026,7 @@ class DouyinHiatusAnalyzer:
                         f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
                         f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
                         f"作品为 0 待确认: {refresh_reason_counts['zero_aweme_count_candidate']}",
+                        f"失败名单跳过: {failed_profile_skip_count}",
                     ],
                     border_style="blue",
                 )

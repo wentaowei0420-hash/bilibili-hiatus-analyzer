@@ -144,6 +144,7 @@ runtime/chrome_data/
 runtime/edge_data/
 
 # Project local outputs / state / history
+data/state/gui_config.json
 data/bilibili/output/
 data/bilibili/state/
 data/bilibili/state/cache/
@@ -162,3 +163,21 @@ data/history/
 bilibili_hiatus_ranking.csv
 *.csv
 !examples/example_output.csv
+
+# Integrated Douyin downloader local runtime/data
+douyin-downloader-main/.codex_tmp/
+douyin-downloader-main/.cookies.json
+douyin-downloader-main/.omx/
+douyin-downloader-main/Downloaded/
+douyin-downloader-main/Transcripts/
+douyin-downloader-main/logs/
+douyin-downloader-main/*.log
+douyin-downloader-main/config*.yml
+!douyin-downloader-main/config.example.yml
+douyin-downloader-main/config/cookies.json
+douyin-downloader-main/dy_downloader.db
+douyin-downloader-main/*.db
+douyin-downloader-main/*.sqlite
+douyin-downloader-main/*.sqlite3
+douyin-downloader-main/douyin_cached_high_like_videos*.csv
+douyin-downloader-main/urls.txt

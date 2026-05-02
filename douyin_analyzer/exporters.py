@@ -1,8 +1,8 @@
-import csv
 from datetime import datetime
 
 from bilibili_analyzer.logging_utils import smart_print as print
 from common.export_store import read_table_to_dataframe, upsert_rows_to_table, write_rows_to_table
+from common.file_io import atomic_write_csv, atomic_write_text
 from common.platform_store import (
     replace_summary_rows,
     replace_video_rows_for_uploader,
@@ -33,13 +33,11 @@ def _normalize_cell(value):
 
 def _write_mapped_csv(path, ordered_headers, rows, error_message):
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=ordered_headers, extrasaction="ignore")
-            writer.writeheader()
-            for row in rows or []:
-                source = row if isinstance(row, dict) else {}
-                writer.writerow({header: _normalize_cell(source.get(header, "")) for header in ordered_headers})
+        normalized_rows = []
+        for row in rows or []:
+            source = row if isinstance(row, dict) else {}
+            normalized_rows.append({header: _normalize_cell(source.get(header, "")) for header in ordered_headers})
+        atomic_write_csv(path, ordered_headers, normalized_rows)
     except Exception as exc:
         print(f"{error_message}: {exc}")
 
@@ -244,7 +242,6 @@ def save_video_duration_analysis_to_csv(config, summary_rows, merge_existing=Fal
 
 def save_video_duration_report(config, summary_rows, total_video_count):
     try:
-        config.video_duration_report_md.parent.mkdir(parents=True, exist_ok=True)
         total_up_count = len(summary_rows)
         short_total = sum(row["short_video_count"] for row in summary_rows)
         medium_total = sum(row["medium_video_count"] for row in summary_rows)
@@ -265,8 +262,7 @@ def save_video_duration_report(config, summary_rows, total_video_count):
             f"- 中长视频(60~240s): {medium_long_total} ({format_ratio(medium_long_total, total_video_count)})",
             f"- 长视频(240s+): {long_total} ({format_ratio(long_total, total_video_count)})",
         ]
-        with config.video_duration_report_md.open("w", encoding="utf-8") as report_file:
-            report_file.write("\n".join(lines))
+        atomic_write_text(config.video_duration_report_md, "\n".join(lines), encoding="utf-8")
     except Exception as exc:
         print(f"保存抖音视频时长报告失败: {exc}")
 
@@ -359,10 +355,6 @@ def save_full_fetch_mismatch_to_csv(config, mismatch_rows):
 
 def _write_csv(path, fieldnames, headers, rows, error_message):
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8-sig") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writerow(headers)
-            writer.writerows(rows)
+        atomic_write_csv(path, fieldnames, rows, header_row=headers)
     except Exception as exc:
         print(f"{error_message}: {exc}")

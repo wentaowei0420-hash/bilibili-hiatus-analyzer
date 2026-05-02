@@ -18,6 +18,10 @@ def _video_table(platform):
     return f"{platform}_video_raw"
 
 
+def _video_state_table(platform):
+    return f"{platform}_video_state"
+
+
 def _cache_table(platform):
     return f"{platform}_cache_state"
 
@@ -54,6 +58,33 @@ def ensure_platform_schema(db_path, platform):
         )
         conn.execute(
             f"""
+            CREATE TABLE IF NOT EXISTS "{_video_state_table(platform)}" (
+                video_id TEXT PRIMARY KEY,
+                uploader_id TEXT,
+                uploader_name TEXT,
+                publish_timestamp INTEGER,
+                like_count INTEGER,
+                duration_seconds INTEGER,
+                source_mode TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                is_available INTEGER NOT NULL DEFAULT 1,
+                payload_json TEXT NOT NULL,
+                metadata_json TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{platform}_video_state_uploader" '
+            f'ON "{_video_state_table(platform)}" (uploader_id)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{platform}_video_state_publish" '
+            f'ON "{_video_state_table(platform)}" (publish_timestamp)'
+        )
+        conn.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS "{_cache_table(platform)}" (
                 cache_key TEXT PRIMARY KEY,
                 cache_type TEXT NOT NULL,
@@ -79,6 +110,15 @@ def ensure_platform_schema(db_path, platform):
         conn.commit()
 
 
+def _safe_int(value, default=None):
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def upsert_creator_rows(db_path, platform, rows, uploader_id_column="UP主UID", source_mode="current"):
     ensure_platform_schema(db_path, platform)
     now_text = _now_text()
@@ -100,6 +140,98 @@ def upsert_creator_rows(db_path, platform, rows, uploader_id_column="UP主UID", 
                 (uploader_id, json.dumps(row, ensure_ascii=False), now_text, source_mode),
             )
         conn.commit()
+
+
+def upsert_video_state_rows(
+    db_path,
+    platform,
+    rows,
+    video_id_column="aweme_id",
+    uploader_id_column="uploader_id",
+    uploader_name_column="uploader_name",
+    source_mode="current",
+):
+    ensure_platform_schema(db_path, platform)
+    now_text = _now_text()
+    with sqlite3.connect(db_path) as conn:
+        for row in rows or []:
+            row = row if isinstance(row, dict) else {}
+            video_id = str(row.get(video_id_column) or row.get("video_id") or row.get("aweme_id") or "").strip()
+            if not video_id:
+                continue
+            uploader_id = str(row.get(uploader_id_column) or row.get("author_id") or "").strip()
+            uploader_name = str(row.get(uploader_name_column) or row.get("author_name") or "").strip()
+            publish_timestamp = _safe_int(row.get("publish_timestamp") or row.get("create_time"))
+            like_count = _safe_int(row.get("like_count"), 0)
+            duration_seconds = _safe_int(row.get("duration_seconds"))
+            metadata = row.get("metadata")
+            metadata_json = json.dumps(metadata, ensure_ascii=False) if isinstance(metadata, (dict, list)) else None
+            conn.execute(
+                f"""
+                INSERT INTO "{_video_state_table(platform)}" (
+                    video_id,
+                    uploader_id,
+                    uploader_name,
+                    publish_timestamp,
+                    like_count,
+                    duration_seconds,
+                    source_mode,
+                    first_seen_at,
+                    last_seen_at,
+                    is_available,
+                    payload_json,
+                    metadata_json,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(video_id) DO UPDATE SET
+                    uploader_id=COALESCE(NULLIF(excluded.uploader_id, ''), "{_video_state_table(platform)}".uploader_id),
+                    uploader_name=COALESCE(NULLIF(excluded.uploader_name, ''), "{_video_state_table(platform)}".uploader_name),
+                    publish_timestamp=COALESCE(excluded.publish_timestamp, "{_video_state_table(platform)}".publish_timestamp),
+                    like_count=COALESCE(excluded.like_count, "{_video_state_table(platform)}".like_count),
+                    duration_seconds=COALESCE(excluded.duration_seconds, "{_video_state_table(platform)}".duration_seconds),
+                    source_mode=COALESCE(NULLIF(excluded.source_mode, ''), "{_video_state_table(platform)}".source_mode),
+                    last_seen_at=excluded.last_seen_at,
+                    is_available=1,
+                    payload_json=excluded.payload_json,
+                    metadata_json=COALESCE(excluded.metadata_json, "{_video_state_table(platform)}".metadata_json),
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    video_id,
+                    uploader_id,
+                    uploader_name,
+                    publish_timestamp,
+                    like_count,
+                    duration_seconds,
+                    source_mode,
+                    now_text,
+                    now_text,
+                    json.dumps(row, ensure_ascii=False),
+                    metadata_json,
+                    now_text,
+                ),
+            )
+        conn.commit()
+
+
+def read_latest_video_state_timestamp(db_path, platform, uploader_id):
+    db_path = Path(db_path)
+    uploader_id = str(uploader_id or "").strip()
+    if not uploader_id or not db_path.exists():
+        return None
+
+    ensure_platform_schema(db_path, platform)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            f"""
+            SELECT MAX(publish_timestamp)
+            FROM "{_video_state_table(platform)}"
+            WHERE uploader_id=? AND is_available=1
+            """,
+            (uploader_id,),
+        ).fetchone()
+    return row[0] if row and row[0] is not None else None
 
 
 def replace_video_rows_for_uploader(
@@ -142,6 +274,14 @@ def replace_video_rows_for_uploader(
                 ),
             )
         conn.commit()
+    upsert_video_state_rows(
+        db_path,
+        platform,
+        rows,
+        video_id_column=video_id_column,
+        uploader_id_column="uploader_id",
+        source_mode="video_raw",
+    )
 
 
 def read_video_rows_for_uploader(db_path, platform, uploader_id):
@@ -280,6 +420,7 @@ def delete_uploader_rows(db_path, platform, uploader_ids):
         statements = [
             (f'DELETE FROM "{_creator_table(platform)}" WHERE uploader_id IN ({placeholders})', uploader_ids),
             (f'DELETE FROM "{_video_table(platform)}" WHERE uploader_id IN ({placeholders})', uploader_ids),
+            (f'DELETE FROM "{_video_state_table(platform)}" WHERE uploader_id IN ({placeholders})', uploader_ids),
             (
                 f'DELETE FROM "{_cache_table(platform)}" WHERE uploader_id IN ({placeholders}) OR cache_key IN ({placeholders})',
                 uploader_ids + uploader_ids,

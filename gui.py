@@ -1,6 +1,9 @@
 import os
 import json
+import shutil
+import subprocess
 import sys
+import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -32,6 +35,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from common.file_io import atomic_write_json
 from common.runtime_control import OperationCancelled, clear_stop, request_stop
 
 
@@ -40,6 +44,12 @@ DEFAULT_DOUYIN_UNFOLLOW_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_un
 DEFAULT_BILIBILI_UID_LIST = ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
 DEFAULT_DOUYIN_UID_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
 GUI_CONFIG_PATH = ROOT_DIR / "data" / "state" / "gui_config.json"
+DEFAULT_DOUYIN_DOWNLOADER_ROOT = ROOT_DIR / "douyin-downloader-main"
+EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
+    os.getenv("DOUYIN_DOWNLOADER_ROOT", str(DEFAULT_DOUYIN_DOWNLOADER_ROOT))
+)
+EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
+EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
 
 BILIBILI_RUNTIME_FIELDS = [
     ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
@@ -1200,6 +1210,8 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.high_like_export_button = QPushButton("导出高赞视频")
         self.high_like_export_button.clicked.connect(self._start_high_like_export)
+        self.video_download_button = QPushButton("视频下载")
+        self.video_download_button.clicked.connect(self._open_video_downloader_gui)
         self.unfollow_cleanup_button = QPushButton("清理非当前关注缓存")
         self.unfollow_cleanup_button.clicked.connect(self._start_douyin_non_followed_cache_cleanup)
         self.douyin_stats_button = QPushButton("抖音统计")
@@ -1215,6 +1227,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.high_like_export_button)
+        button_row.addWidget(self.video_download_button)
         button_row.addWidget(self.unfollow_cleanup_button)
         button_row.addWidget(self.douyin_stats_button)
         button_row.addWidget(self.cookie_check_button)
@@ -1315,9 +1328,7 @@ class MainWindow(QMainWindow):
         }
 
     def _save_gui_config(self):
-        GUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with GUI_CONFIG_PATH.open("w", encoding="utf-8") as config_file:
-            json.dump(self._snapshot_gui_config(), config_file, ensure_ascii=False, indent=2)
+        atomic_write_json(GUI_CONFIG_PATH, self._snapshot_gui_config(), indent=2)
 
     def _load_gui_config(self):
         if not GUI_CONFIG_PATH.exists():
@@ -1461,6 +1472,83 @@ class MainWindow(QMainWindow):
         self.worker.log_line.connect(self._append_log)
         self.worker.done.connect(self._on_done)
         self.worker.start()
+
+    def _video_downloader_launch_commands(self):
+        commands = []
+        seen = set()
+
+        def add_command(parts):
+            key = tuple(str(part) for part in parts)
+            if not key or key in seen:
+                return
+            seen.add(key)
+            commands.append(list(key))
+
+        python_executable = Path(sys.executable) if sys.executable else None
+        if python_executable and python_executable.exists():
+            if python_executable.name.lower() == "python.exe":
+                pythonw = python_executable.with_name("pythonw.exe")
+                if pythonw.exists():
+                    add_command([str(pythonw), str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
+            add_command([str(python_executable), str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
+
+        for launcher in ("pyw", "py", "pythonw", "python"):
+            resolved = shutil.which(launcher)
+            if resolved:
+                add_command([resolved, str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
+
+        return commands
+
+    def _open_video_downloader_gui(self):
+        if not EXTERNAL_DOUYIN_DOWNLOADER_RUNNER.exists():
+            self._show_error_dialog(
+                "下载器不存在",
+                f"未找到下载器启动文件：\n{EXTERNAL_DOUYIN_DOWNLOADER_RUNNER}",
+            )
+            return
+
+        launch_errors = []
+        creationflags = 0
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            creationflags |= subprocess.DETACHED_PROCESS
+
+        for command in self._video_downloader_launch_commands():
+            log_file = None
+            try:
+                EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG.parent.mkdir(parents=True, exist_ok=True)
+                log_file = EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG.open("a", encoding="utf-8")
+                log_file.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {' '.join(command)}\n")
+                log_file.flush()
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(EXTERNAL_DOUYIN_DOWNLOADER_ROOT),
+                    creationflags=creationflags,
+                    stdout=log_file,
+                    stderr=log_file,
+                )
+                time.sleep(0.8)
+                if process.poll() is not None:
+                    log_file.close()
+                    launch_errors.append(
+                        f"{' '.join(command)} -> 进程立即退出，详见 {EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG}"
+                    )
+                    continue
+                log_file.close()
+                self._append_log(
+                    f"已启动视频下载界面：{EXTERNAL_DOUYIN_DOWNLOADER_RUNNER} --gui"
+                )
+                return
+            except Exception as exc:
+                launch_errors.append(f"{' '.join(command)} -> {exc}")
+                if log_file is not None and not log_file.closed:
+                    log_file.close()
+
+        message = "无法启动固定视频下载界面。"
+        if launch_errors:
+            message += "\n\n已尝试：\n" + "\n".join(launch_errors[:5])
+        self._show_error_dialog("启动失败", message)
 
     def _start_douyin_non_followed_cache_cleanup(self):
         if self.worker and self.worker.isRunning():

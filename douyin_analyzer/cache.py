@@ -1,4 +1,5 @@
 import hashlib
+import csv
 import json
 import sqlite3
 import time
@@ -7,7 +8,8 @@ from urllib.parse import urlparse
 
 from bilibili_analyzer.logging_utils import smart_print as print
 from common.export_store import delete_rows_by_values
-from common.platform_store import delete_uploader_rows, upsert_cache_entries
+from common.file_io import atomic_write_json
+from common.platform_store import delete_uploader_rows, upsert_cache_entries, upsert_video_state_rows
 
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date
 
@@ -246,6 +248,84 @@ class CacheStore:
             uploader_id_getter=lambda key, payload: (((payload or {}).get("user", {}) or {}).get("sec_uid") or key),
             cached_at_getter=lambda payload: (payload or {}).get("cached_at", ""),
         )
+    def append_fetch_manifest(self, record):
+        manifest_path = getattr(self.config, "fetch_manifest_jsonl", None)
+        if not manifest_path:
+            return
+        payload = dict(record or {})
+        payload.setdefault("recorded_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with manifest_path.open("a", encoding="utf-8") as manifest_file:
+                manifest_file.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            print(f"写入抖音抓取清单失败: {exc}")
+
+    def append_failed_profile(self, user, reason, stage="", mode=None):
+        path = getattr(self.config, "failed_profiles_csv", None)
+        if not path:
+            return
+        row = {
+            "failed_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": mode or self.config.fetch_mode,
+            "stage": stage or "",
+            "uploader_id": (user or {}).get("sec_uid", ""),
+            "uploader_name": (user or {}).get("nickname", ""),
+            "homepage": (user or {}).get("homepage", ""),
+            "reason": str(reason or ""),
+        }
+        fieldnames = [
+            "failed_time",
+            "mode",
+            "stage",
+            "uploader_id",
+            "uploader_name",
+            "homepage",
+            "reason",
+        ]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not path.exists() or path.stat().st_size == 0
+            with path.open("a", encoding="utf-8-sig", newline="") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as exc:
+            print(f"写入抖音失败博主CSV失败: {exc}")
+
+    def load_failed_profile_keys(self, mode=None, max_age_hours=None):
+        path = getattr(self.config, "failed_profiles_csv", None)
+        if not path or not path.exists():
+            return set()
+        mode = str(mode or self.config.fetch_mode or "").strip()
+        max_age_hours = (
+            max_age_hours
+            if max_age_hours is not None
+            else getattr(self.config, "failed_profile_skip_max_age_hours", 24)
+        )
+        cutoff = time.time() - max(0, float(max_age_hours or 0)) * 3600 if max_age_hours else None
+        keys = set()
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as csvfile:
+                for row in csv.DictReader(csvfile):
+                    row = row if isinstance(row, dict) else {}
+                    row_mode = str(row.get("mode") or "").strip()
+                    if mode and row_mode and row_mode != mode:
+                        continue
+                    if cutoff:
+                        failed_ts = self._parse_failed_time(row.get("failed_time"))
+                        if failed_ts and failed_ts < cutoff:
+                            continue
+                    uploader_id = str(row.get("uploader_id") or "").strip()
+                    homepage = self._normalize_homepage_url(row.get("homepage", ""))
+                    if uploader_id:
+                        keys.add(f"uid:{uploader_id}")
+                    if homepage:
+                        keys.add(f"homepage:{homepage}")
+        except Exception as exc:
+            print(f"读取抖音失败博主CSV失败，将不跳过失败记录: {exc}")
+        return keys
 
     def is_cache_expired(self, cached_at):
         cached_timestamp = normalize_timestamp(cached_at)
@@ -381,8 +461,12 @@ class CacheStore:
                 entry_filename = self._entry_filename(key)
                 expected_filenames.add(entry_filename)
                 entry_path = directory / entry_filename
-                with entry_path.open("w", encoding="utf-8") as entry_file:
-                    json.dump(entries.get(key), entry_file, ensure_ascii=False, separators=(",", ":"))
+                atomic_write_json(
+                    entry_path,
+                    entries.get(key),
+                    encoding="utf-8",
+                    separators=(",", ":"),
+                )
 
             for existing_file in directory.glob("*.json"):
                 if existing_file.name not in expected_filenames:
@@ -394,9 +478,7 @@ class CacheStore:
                 "storage": "split",
                 "keys": keys,
             }
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            with manifest_path.open("w", encoding="utf-8") as cache_file:
-                json.dump(manifest_payload, cache_file, ensure_ascii=False, indent=2)
+            atomic_write_json(manifest_path, manifest_payload, encoding="utf-8", indent=2)
         except Exception as exc:
             print(f"{error_message}: {exc}")
 
@@ -409,8 +491,12 @@ class CacheStore:
                 entry_filename = self._entry_filename(key)
                 expected_filenames.add(entry_filename)
                 entry_path = directory / entry_filename
-                with entry_path.open("w", encoding="utf-8") as entry_file:
-                    json.dump(progress[key], entry_file, ensure_ascii=False, separators=(",", ":"))
+                atomic_write_json(
+                    entry_path,
+                    progress[key],
+                    encoding="utf-8",
+                    separators=(",", ":"),
+                )
 
             for existing_file in directory.glob("*.json"):
                 if existing_file.name not in expected_filenames:
@@ -421,11 +507,21 @@ class CacheStore:
                 "storage": "split",
                 "keys": keys,
             }
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            with manifest_path.open("w", encoding="utf-8") as progress_file:
-                json.dump(manifest_payload, progress_file, ensure_ascii=False, indent=2)
+            atomic_write_json(manifest_path, manifest_payload, encoding="utf-8", indent=2)
         except Exception as exc:
             print(f"{error_message}: {exc}")
+
+    @staticmethod
+    def _parse_failed_time(value):
+        value = str(value or "").strip()
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(value[:19], fmt).timestamp()
+            except ValueError:
+                continue
+        return normalize_timestamp(value)
 
     @staticmethod
     def _normalize_homepage_url(homepage):
@@ -454,6 +550,32 @@ class CacheStore:
             self.config.export_uid_analysis_table,
         ]:
             delete_rows_by_values(self.config.export_store_db, table_name, uploader_ids)
+
+    def upsert_video_state_from_progress_entries(self, progress, source_mode=None):
+        video_rows = []
+        for uid, entry in (progress or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
+            uploader_id = str(user.get("sec_uid") or uid or "").strip()
+            uploader_name = user.get("nickname") or user.get("uploader_name") or ""
+            for video in entry.get("videos", []) or []:
+                if not isinstance(video, dict):
+                    continue
+                row = dict(video)
+                row.setdefault("uploader_id", uploader_id)
+                row.setdefault("uploader_name", uploader_name)
+                video_rows.append(row)
+        if video_rows:
+            upsert_video_state_rows(
+                self.config.export_store_db,
+                "douyin",
+                video_rows,
+                video_id_column="aweme_id",
+                uploader_id_column="uploader_id",
+                uploader_name_column="uploader_name",
+                source_mode=source_mode or self.config.fetch_mode,
+            )
 
     def _load_cached_uploader_ids_from_store(self):
         db_path = self.config.export_store_db

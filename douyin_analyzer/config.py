@@ -41,6 +41,10 @@ class DouyinAnalyzerConfig:
     following_api_pattern: str
     post_api_pattern: str
     output_csv: Path
+    high_like_export_mirror_csv: Path
+    high_like_failed_csv: Path
+    downloader_db_path: Path
+    fetch_manifest_jsonl: Path
     all_videos_csv: Path
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
@@ -54,6 +58,7 @@ class DouyinAnalyzerConfig:
     followings_cache_dir: Path
     progress_json: Path
     progress_dir: Path
+    failed_profiles_csv: Path
     fetch_mode: str
     recent_video_limit: int
     page_load_delay: float
@@ -90,6 +95,8 @@ class DouyinAnalyzerConfig:
     intermediate_upload_interval_users: int
     followings_cache_max_age_hours: int
     precise_cache_max_age_hours: int
+    skip_failed_profiles: bool
+    failed_profile_skip_max_age_hours: int
     progress_trim_video_limit: int
     enable_video_duration_analysis: bool
     unfollow_interval_seconds: float
@@ -168,6 +175,9 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
     data_dir = root_dir / "data" / "douyin"
     output_dir = data_dir / "output"
     state_dir = data_dir / "state"
+    downloader_root = Path(
+        os.getenv("DOUYIN_DOWNLOADER_ROOT", str(root_dir / "douyin-downloader-main"))
+    )
     fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "monitor")).strip().lower()
     try:
         recent_video_limit = (
@@ -203,6 +213,19 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         ),
         post_api_pattern=os.getenv("DOUYIN_POST_API_PATTERN", "aweme/v1/web/aweme/post/"),
         output_csv=output_dir / "douyin_hiatus_ranking.csv",
+        high_like_export_mirror_csv=_resolve_path_env(
+            "DOUYIN_HIGH_LIKE_EXPORT_MIRROR_PATH",
+            downloader_root / "douyin_cached_high_like_videos.csv",
+        ),
+        high_like_failed_csv=_resolve_path_env(
+            "DOUYIN_HIGH_LIKE_FAILED_PATH",
+            downloader_root / "douyin_cached_high_like_videos_failed.csv",
+        ),
+        downloader_db_path=_resolve_path_env(
+            "DOUYIN_DOWNLOADER_DB_PATH",
+            downloader_root / "dy_downloader.db",
+        ),
+        fetch_manifest_jsonl=state_dir / "douyin_fetch_manifest.jsonl",
         all_videos_csv=output_dir / "douyin_all_videos.csv",
         video_duration_analysis_csv=output_dir / "douyin_video_duration_analysis.csv",
         video_duration_report_md=output_dir / "douyin_video_duration_report.md",
@@ -216,6 +239,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         followings_cache_dir=state_dir / "cache" / "followings",
         progress_json=state_dir / "douyin_progress.json",
         progress_dir=state_dir / "cache" / "progress",
+        failed_profiles_csv=output_dir / "douyin_failed_profiles.csv",
         fetch_mode=fetch_mode,
         recent_video_limit=recent_video_limit,
         page_load_delay=float(os.getenv("DOUYIN_PAGE_LOAD_DELAY", "1.2")),
@@ -289,6 +313,10 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
             os.getenv("DOUYIN_FOLLOWINGS_CACHE_MAX_AGE_HOURS", "50")
         ),
         precise_cache_max_age_hours=int(os.getenv("DOUYIN_CACHE_MAX_AGE_HOURS", "480")),
+        skip_failed_profiles=_get_bool("DOUYIN_SKIP_FAILED_PROFILES", False),
+        failed_profile_skip_max_age_hours=int(
+            os.getenv("DOUYIN_FAILED_PROFILE_SKIP_MAX_AGE_HOURS", "24")
+        ),
         progress_trim_video_limit=int(os.getenv("DOUYIN_PROGRESS_TRIM_VIDEO_LIMIT", "50")),
         enable_video_duration_analysis=_get_bool(
             "DOUYIN_ENABLE_VIDEO_DURATION_ANALYSIS", True
