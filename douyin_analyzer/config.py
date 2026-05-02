@@ -36,6 +36,7 @@ class DouyinAnalyzerConfig:
     browser_name: str
     browser_binary_path: Path
     browser_user_data_path: Path
+    browser_disk_cache_size_mb: int
     home_url: str
     self_user_url: str
     following_api_pattern: str
@@ -205,6 +206,10 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
                 str(_default_browser_user_data_path(runtime_dir, browser_name)),
             )
         ),
+        browser_disk_cache_size_mb=max(
+            0,
+            int(os.getenv("DOUYIN_BROWSER_DISK_CACHE_SIZE_MB", "128")),
+        ),
         home_url="https://www.douyin.com/",
         self_user_url="https://www.douyin.com/user/self",
         following_api_pattern=os.getenv(
@@ -223,7 +228,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         ),
         downloader_db_path=_resolve_path_env(
             "DOUYIN_DOWNLOADER_DB_PATH",
-            downloader_root / "dy_downloader.db",
+            state_dir / "douyin_export_store.db",
         ),
         fetch_manifest_jsonl=state_dir / "douyin_fetch_manifest.jsonl",
         all_videos_csv=output_dir / "douyin_all_videos.csv",

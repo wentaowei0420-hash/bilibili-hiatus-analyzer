@@ -32,7 +32,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rate_limit": 2,
     "proxy": "",
     "database": True,
-    "database_path": "dy_downloader.db",
+    "database_path": "../data/douyin/state/douyin_export_store.db",
     "progress": {
         "quiet_logs": True,
     },

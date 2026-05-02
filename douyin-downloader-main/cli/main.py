@@ -33,6 +33,22 @@ def _as_bool(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+def _download_history_config_summary(config: ConfigLoader) -> dict[str, Any]:
+    raw_config = config.config if isinstance(config.config, dict) else {}
+    links = raw_config.get("link")
+    return {
+        "path": raw_config.get("path"),
+        "mode": raw_config.get("mode"),
+        "number": raw_config.get("number"),
+        "thread": raw_config.get("thread"),
+        "retry_times": raw_config.get("retry_times"),
+        "rate_limit": raw_config.get("rate_limit"),
+        "database_path": raw_config.get("database_path"),
+        "folderstyle": raw_config.get("folderstyle"),
+        "link_count": len(links) if isinstance(links, list) else 0,
+    }
+
+
 def _dedupe_urls(urls: list[str]) -> list[str]:
     deduped = []
     seen = set()
@@ -263,18 +279,14 @@ async def download_url(
             progress_reporter.advance_step(
                 "记录历史",
                 "写入数据库历史" if (result and database) else "数据库未启用，跳过",
-            )
+        )
         if result and database:
-            safe_config = {
-                k: v for k, v in config.config.items()
-                if k not in ("cookies", "cookie", "transcript")
-            }
             await database.add_history({
                 'url': original_url,
                 'url_type': parsed['type'],
                 'total_count': result.total,
                 'success_count': result.success,
-                'config': json.dumps(safe_config, ensure_ascii=False),
+                'config': json.dumps(_download_history_config_summary(config), ensure_ascii=False),
             })
 
         if progress_reporter:

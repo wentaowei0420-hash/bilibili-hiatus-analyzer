@@ -95,6 +95,10 @@ class DouyinBrowserClient:
                 pass
         co.set_argument("--mute-audio")
         co.set_argument("--start-maximized")
+        cache_bytes = max(0, int(getattr(self.config, "browser_disk_cache_size_mb", 128) or 0)) * 1024 * 1024
+        if cache_bytes:
+            co.set_argument(f"--disk-cache-size={cache_bytes}")
+            co.set_argument(f"--media-cache-size={cache_bytes}")
         co.set_user_data_path(str(self.config.browser_user_data_path))
         self.page = ChromiumPage(co)
         self._prepare_window_after_launch()

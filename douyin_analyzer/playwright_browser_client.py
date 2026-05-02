@@ -78,10 +78,18 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             )
 
         self._playwright = sync_playwright().start()
+        cache_bytes = max(0, int(getattr(self.config, "browser_disk_cache_size_mb", 128) or 0)) * 1024 * 1024
+        browser_args = ["--mute-audio", "--start-maximized"]
+        if cache_bytes:
+            browser_args.extend([
+                f"--disk-cache-size={cache_bytes}",
+                f"--media-cache-size={cache_bytes}",
+            ])
+
         launch_kwargs = {
             "user_data_dir": str(self.config.browser_user_data_path),
             "headless": False,
-            "args": ["--mute-audio", "--start-maximized"],
+            "args": browser_args,
         }
         if getattr(self.config, "browser_binary_path", None):
             launch_kwargs["executable_path"] = str(self.config.browser_binary_path)

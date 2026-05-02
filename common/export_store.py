@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import pandas as pd
 
 SNAPSHOT_META_TABLE = "_sheet_current_meta"
 SNAPSHOT_HISTORY_TABLE = "_sheet_snapshots"
+DEFAULT_SNAPSHOT_RETENTION = 3
 
 
 def _normalize_rows(fieldnames, headers, rows):
@@ -52,6 +54,45 @@ def _ensure_snapshot_tables(conn):
             payload_json TEXT NOT NULL
         )
         """
+    )
+
+
+def _snapshot_retention_limit():
+    try:
+        return max(0, int(os.getenv("EXPORT_STORE_SNAPSHOT_RETENTION", str(DEFAULT_SNAPSHOT_RETENTION))))
+    except (TypeError, ValueError):
+        return DEFAULT_SNAPSHOT_RETENTION
+
+
+def _prune_snapshot_history(conn, table_name):
+    retention = _snapshot_retention_limit()
+    if retention <= 0:
+        conn.execute(
+            f'DELETE FROM "{SNAPSHOT_HISTORY_TABLE}" WHERE sheet_name=?',
+            (table_name,),
+        )
+        return
+
+    keep_rows = conn.execute(
+        f"""
+        SELECT id
+        FROM "{SNAPSHOT_HISTORY_TABLE}"
+        WHERE sheet_name=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (table_name, retention),
+    ).fetchall()
+    keep_ids = [row[0] for row in keep_rows]
+    if not keep_ids:
+        return
+    placeholders = ",".join("?" for _ in keep_ids)
+    conn.execute(
+        f"""
+        DELETE FROM "{SNAPSHOT_HISTORY_TABLE}"
+        WHERE sheet_name=? AND id NOT IN ({placeholders})
+        """,
+        [table_name, *keep_ids],
     )
 
 
@@ -108,6 +149,7 @@ def write_dataframe_to_table(db_path, table_name, dataframe):
                     payload_json,
                 ),
             )
+        _prune_snapshot_history(conn, table_name)
         conn.commit()
 
 
