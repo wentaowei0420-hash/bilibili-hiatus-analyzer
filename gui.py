@@ -13,7 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from PyQt5.QtCore import QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QThread, Qt, QUrl, pyqtSignal
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +34,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -397,6 +399,19 @@ class BilibiliCookieCheckThread(QThread):
             self.checked.emit(False, f"未登录：{message}")
         except Exception as exc:
             self.checked.emit(False, f"检测失败：{exc}")
+
+
+class RatingRefreshThread(QThread):
+    done = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from douyin_analyzer.app import run_score_creators_from_cache
+
+            output_path = run_score_creators_from_cache()
+            self.done.emit(True, f"评分数据已更新：{output_path}")
+        except Exception as exc:
+            self.done.emit(False, f"评分数据刷新失败：{exc}")
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -1096,104 +1111,174 @@ class DouyinStatsDialogV2(QDialog):
             )
 
 
+SORT_ROLE = Qt.UserRole + 1
+
+
+class SortableTableWidgetItem(QTableWidgetItem):
+    def __lt__(self, other):
+        left = self.data(SORT_ROLE)
+        right = other.data(SORT_ROLE) if other is not None else None
+        if left is not None and right is not None:
+            return left < right
+        return super().__lt__(other)
+
+
 class DouyinRatingOverviewDialog(QDialog):
     CREATOR_TABLE = "creator_score_current"
     VIDEO_TABLE = "video_score_current"
+    ELIGIBLE_UID_TABLE = "_rating_eligible_uids"
     GRADE_ORDER = ("S", "A", "B", "C", "D")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("抖音评分概览")
-        self.resize(1040, 720)
+        self.resize(1280, 820)
+        self.setMinimumSize(1120, 720)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+            }
+            QTabBar::tab {
+                font-size: 15px;
+                padding: 9px 22px;
+                min-width: 112px;
+                min-height: 28px;
+            }
+            QTabWidget::pane {
+                top: -1px;
+                border: 1px solid #d8dde6;
+            }
+            QTableWidget {
+                font-size: 15px;
+                gridline-color: #d8dde6;
+                selection-background-color: #dbeafe;
+                selection-color: #111827;
+                alternate-background-color: #f7f8fb;
+            }
+            QHeaderView::section {
+                font-size: 15px;
+                font-weight: 700;
+                padding: 8px 10px;
+                background: #f1f5f9;
+                border: 1px solid #d8dde6;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 7px 16px;
+                min-height: 30px;
+            }
+            """
+        )
 
         from douyin_analyzer.config import load_analyzer_config
 
         self.config = load_analyzer_config()
         self.db_path = Path(self.config.export_store_db)
-        self.csv_paths = {
-            "up_score": Path(self.config.creator_score_csv),
-            "video_score": Path(self.config.video_score_csv),
-            "up_summary": Path(self.config.compact_creator_csv),
-            "video_summary": Path(self.config.compact_video_csv),
-        }
+        self.refresh_worker = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
 
         self.summary_label = QLabel("正在读取评分数据...")
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("padding: 4px 2px; color: #444;")
+        self.summary_label.setMinimumHeight(54)
+        self.summary_label.setStyleSheet(
+            "padding: 10px 12px; color: #263241; background: #f8fafc; "
+            "border: 1px solid #d8dde6; border-radius: 8px; font-size: 14px;"
+        )
         layout.addWidget(self.summary_label)
 
         summary_group = QGroupBox("等级分布")
         summary_grid = QGridLayout(summary_group)
+        summary_grid.setContentsMargins(14, 14, 14, 14)
+        summary_grid.setHorizontalSpacing(28)
+        summary_grid.setVerticalSpacing(12)
         headers = ["对象", "总数", "S", "A", "B", "C", "D", "低/中置信度"]
         for column, header in enumerate(headers):
             label = QLabel(header)
-            label.setStyleSheet("font-weight: 700;")
+            label.setStyleSheet("font-weight: 700; font-size: 15px; color: #111827;")
             summary_grid.addWidget(label, 0, column)
 
         self.summary_cells = {}
         for row, key in enumerate(("creator", "video"), start=1):
             title = "UP主" if key == "creator" else "视频"
-            summary_grid.addWidget(QLabel(title), row, 0)
+            title_label = QLabel(title)
+            title_label.setStyleSheet("font-weight: 700; font-size: 15px; color: #111827;")
+            summary_grid.addWidget(title_label, row, 0)
             for column, name in enumerate(("total", *self.GRADE_ORDER, "low_confidence"), start=1):
                 cell = QLabel("-")
                 cell.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                cell.setMinimumWidth(72)
+                cell.setStyleSheet("font-size: 16px; font-weight: 600; color: #111827;")
                 summary_grid.addWidget(cell, row, column)
                 self.summary_cells[(key, name)] = cell
         layout.addWidget(summary_group)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(False)
+        self.tabs.setStyleSheet(
+            """
+            QTabBar {
+                min-height: 48px;
+            }
+            QTabBar::tab {
+                margin-top: 6px;
+                margin-right: 4px;
+            }
+            """
+        )
         self.creator_top_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "粉丝数", "视频数", "评分原因"]
+            ["UP主", "等级", "分数", "置信度", "粉丝数", "作品数(缓存)", "UP主主页链接"]
         )
         self.creator_low_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "评分原因"]
+            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "UP主主页链接"]
         )
         self.video_top_table = self._make_table(
-            ["视频标题", "UP主", "等级", "分数", "置信度", "点赞数", "下载状态", "评分原因"]
+            ["视频标题", "UP主", "等级", "分数", "置信度", "点赞数", "下载状态", "视频链接"]
         )
         self.video_watch_table = self._make_table(
-            ["视频标题", "UP主", "等级", "分数", "置信度", "缺失指标", "评分原因"]
+            ["视频标题", "UP主", "等级", "分数", "置信度", "缺失指标", "视频链接"]
         )
-        self.tabs.addTab(self.creator_top_table, "高分UP")
+        self.tabs.addTab(self.creator_top_table, "抖音排行表")
         self.tabs.addTab(self.creator_low_table, "低分/风险UP")
         self.tabs.addTab(self.video_top_table, "高分视频")
         self.tabs.addTab(self.video_watch_table, "待观察视频")
         layout.addWidget(self.tabs, stretch=1)
 
         self.refresh_info_label = QLabel("")
-        self.refresh_info_label.setStyleSheet("padding: 2px 2px; color: #666;")
+        self.refresh_info_label.setStyleSheet("padding: 4px 2px; color: #666; font-size: 13px;")
         layout.addWidget(self.refresh_info_label)
 
         button_row = QHBoxLayout()
+        button_row.setSpacing(10)
         self.refresh_button = QPushButton("刷新")
-        self.open_creator_score_button = QPushButton("打开UP评分CSV")
-        self.open_video_score_button = QPushButton("打开视频评分CSV")
-        self.open_creator_summary_button = QPushButton("打开UP精简表")
-        self.open_video_summary_button = QPushButton("打开视频精简表")
         self.close_button = QPushButton("关闭")
 
-        self.refresh_button.clicked.connect(self.refresh_data)
-        self.open_creator_score_button.clicked.connect(lambda: self._open_path("up_score"))
-        self.open_video_score_button.clicked.connect(lambda: self._open_path("video_score"))
-        self.open_creator_summary_button.clicked.connect(lambda: self._open_path("up_summary"))
-        self.open_video_summary_button.clicked.connect(lambda: self._open_path("video_summary"))
+        self.refresh_button.clicked.connect(self.refresh_scores)
         self.close_button.clicked.connect(self.accept)
 
         button_row.addStretch(1)
         button_row.addWidget(self.refresh_button)
-        button_row.addWidget(self.open_creator_score_button)
-        button_row.addWidget(self.open_video_score_button)
-        button_row.addWidget(self.open_creator_summary_button)
-        button_row.addWidget(self.open_video_summary_button)
         button_row.addWidget(self.close_button)
         layout.addLayout(button_row)
 
         self.refresh_data()
 
-    @staticmethod
-    def _make_table(headers):
+    def _make_table(self, headers):
         table = QTableWidget()
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -1201,8 +1286,18 @@ class DouyinRatingOverviewDialog(QDialog):
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setWordWrap(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
+        table.setShowGrid(True)
+        table.setSortingEnabled(True)
+        table.itemClicked.connect(self._open_link_item)
+        table.verticalHeader().setDefaultSectionSize(42)
+        table.verticalHeader().setMinimumSectionSize(38)
+        table.horizontalHeader().setMinimumHeight(42)
+        table.horizontalHeader().setMinimumSectionSize(70)
+        for column, header in enumerate(headers):
+            if column == len(headers) - 1 or header in {"UP主主页链接", "视频链接", "视频标题"}:
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+            else:
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         table.verticalHeader().setVisible(False)
         return table
 
@@ -1223,11 +1318,38 @@ class DouyinRatingOverviewDialog(QDialog):
         text = str(value)
         return text if len(text) <= 120 else text[:117] + "..."
 
-    def _grade_counts(self, conn, table, column):
+    @staticmethod
+    def _sort_value(header_text, value):
+        text = "" if value is None else str(value).strip()
+        if header_text == "等级":
+            return {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}.get(text.upper(), 0)
+        if header_text == "置信度":
+            return {"很高": 5, "高": 4, "中": 3, "低": 2, "很低": 1}.get(text, 0)
+        if header_text in {
+            "分数",
+            "粉丝数",
+            "作品数(缓存)",
+            "点赞数",
+            "未更新天数",
+            "低等级比例",
+        }:
+            try:
+                return float(text.replace(",", ""))
+            except ValueError:
+                return -1
+        return text.lower()
+
+    def _grade_counts(self, conn, table, column, eligible_only=False):
         counts = {grade: 0 for grade in self.GRADE_ORDER}
         total = 0
+        source = f'"{table}" AS s'
+        join = (
+            f' JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid'
+            if eligible_only
+            else ""
+        )
         for grade, count in conn.execute(
-            f'SELECT "{column}", COUNT(*) FROM {table} GROUP BY "{column}"'
+            f'SELECT s."{column}", COUNT(*) FROM {source}{join} GROUP BY s."{column}"'
         ):
             grade_text = str(grade or "").strip().upper()
             if grade_text in counts:
@@ -1235,26 +1357,99 @@ class DouyinRatingOverviewDialog(QDialog):
             total += int(count or 0)
         return total, counts
 
-    def _confidence_count(self, conn, table, column, values):
+    def _confidence_count(self, conn, table, column, values, eligible_only=False):
         placeholders = ",".join("?" for _ in values)
+        source = f'"{table}" AS s'
+        join = (
+            f' JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid'
+            if eligible_only
+            else ""
+        )
         row = conn.execute(
-            f'SELECT COUNT(*) FROM {table} WHERE "{column}" IN ({placeholders})',
+            f'SELECT COUNT(*) FROM {source}{join} WHERE s."{column}" IN ({placeholders})',
             tuple(values),
         ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def _prepare_eligible_uid_filter(self, conn):
+        conn.execute(f'DROP TABLE IF EXISTS "{self.ELIGIBLE_UID_TABLE}"')
+        conn.execute(f'CREATE TEMP TABLE "{self.ELIGIBLE_UID_TABLE}" (uid TEXT PRIMARY KEY)')
+        if not self._table_exists(conn, "cache_inventory_current"):
+            return False, 0
+
+        columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("cache_inventory_current")')
+        }
+        if "UP主UID" not in columns or "有full缓存" not in columns:
+            return False, 0
+
+        rows = conn.execute(
+            '''
+            SELECT "UP主UID"
+            FROM cache_inventory_current
+            WHERE TRIM(COALESCE("UP主UID", "")) != ""
+              AND LOWER(TRIM(COALESCE("有full缓存", ""))) IN ('是', 'yes', 'true', '1', 'y')
+            '''
+        ).fetchall()
+        uids = [(str(row[0]).strip(),) for row in rows if str(row[0] or "").strip()]
+        if uids:
+            conn.executemany(
+                f'INSERT OR IGNORE INTO "{self.ELIGIBLE_UID_TABLE}" (uid) VALUES (?)',
+                uids,
+            )
+        return True, len(uids)
+
+    def _stale_uid_count(self, conn, table):
+        if not self._table_exists(conn, table):
+            return 0
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        if "UP主UID" not in columns:
+            return 0
+        row = conn.execute(
+            f'''
+            SELECT COUNT(*)
+            FROM "{table}" AS s
+            LEFT JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid
+            WHERE e.uid IS NULL
+            '''
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
     def _query_rows(self, conn, sql, limit=30):
+        if limit is None:
+            return conn.execute(sql).fetchall()
         return conn.execute(sql, (limit,)).fetchall()
 
     def _populate_table(self, table, rows):
+        table.setSortingEnabled(False)
         table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
-                item = QTableWidgetItem(self._fmt(value))
-                item.setToolTip(self._fmt(value))
+                header_item = table.horizontalHeaderItem(column_index)
+                header_text = header_item.text() if header_item else ""
+                text = self._fmt(value)
+                item = SortableTableWidgetItem(text)
+                item.setToolTip(text)
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setData(SORT_ROLE, self._sort_value(header_text, value))
+                if header_text in {"UP主主页链接", "视频链接"} and text:
+                    item.setText("打开主页" if header_text == "UP主主页链接" else "打开视频")
+                    item.setToolTip(text)
+                    item.setData(Qt.UserRole, text)
+                    item.setData(SORT_ROLE, text.lower())
+                    item.setForeground(Qt.blue)
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
                 table.setItem(row_index, column_index, item)
-        table.resizeColumnsToContents()
-        table.horizontalHeader().setStretchLastSection(True)
+            table.setRowHeight(row_index, 42)
+        table.setSortingEnabled(True)
+
+    def _open_link_item(self, item):
+        url = item.data(Qt.UserRole) if item else ""
+        if not url:
+            return
+        QDesktopServices.openUrl(QUrl(str(url)))
 
     def _clear_tables(self):
         for table in (
@@ -1264,6 +1459,27 @@ class DouyinRatingOverviewDialog(QDialog):
             self.video_watch_table,
         ):
             table.setRowCount(0)
+
+    def refresh_scores(self):
+        if self.refresh_worker and self.refresh_worker.isRunning():
+            return
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("刷新中...")
+        self.summary_label.setText("正在按当前 full 缓存重新生成 UP 主评分，请稍候...")
+        self.refresh_worker = RatingRefreshThread(self)
+        self.refresh_worker.done.connect(self._on_scores_refreshed)
+        self.refresh_worker.start()
+
+    def _on_scores_refreshed(self, ok, message):
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("刷新")
+        self.refresh_data()
+        if not ok:
+            QMessageBox.warning(self, "评分刷新失败", message)
+            return
+        self.refresh_info_label.setText(
+            f"{message} | 最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
     def refresh_data(self):
         if not self.db_path.exists():
@@ -1275,6 +1491,17 @@ class DouyinRatingOverviewDialog(QDialog):
             with sqlite3.connect(str(self.db_path)) as conn:
                 has_creator = self._table_exists(conn, self.CREATOR_TABLE)
                 has_video = self._table_exists(conn, self.VIDEO_TABLE)
+                has_eligible_filter, eligible_count = self._prepare_eligible_uid_filter(conn)
+                stale_creator_count = (
+                    self._stale_uid_count(conn, self.CREATOR_TABLE)
+                    if has_eligible_filter and has_creator
+                    else 0
+                )
+                stale_video_count = (
+                    self._stale_uid_count(conn, self.VIDEO_TABLE)
+                    if has_eligible_filter and has_video
+                    else 0
+                )
 
                 if not has_creator and not has_video:
                     self.summary_label.setText(
@@ -1284,35 +1511,51 @@ class DouyinRatingOverviewDialog(QDialog):
                     return
 
                 if has_creator:
-                    total, counts = self._grade_counts(conn, self.CREATOR_TABLE, "UP最终等级")
+                    total, counts = self._grade_counts(
+                        conn,
+                        self.CREATOR_TABLE,
+                        "UP最终等级",
+                        eligible_only=has_eligible_filter,
+                    )
                     low_confidence = self._confidence_count(
-                        conn, self.CREATOR_TABLE, "评级置信度", ["低", "中"]
+                        conn,
+                        self.CREATOR_TABLE,
+                        "评级置信度",
+                        ["低", "中"],
+                        eligible_only=has_eligible_filter,
                     )
                     self._set_summary("creator", total, counts, low_confidence)
+                    creator_join = (
+                        f'JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON c."UP主UID" = e.uid'
+                        if has_eligible_filter
+                        else ""
+                    )
                     self._populate_table(
                         self.creator_top_table,
                         self._query_rows(
                             conn,
-                            """
-                            SELECT "UP主姓名", "UP最终等级", "UP最终分", "评级置信度",
-                                   "粉丝数", "已评分视频数", "评分原因"
-                            FROM creator_score_current
-                            ORDER BY CAST("UP最终分" AS REAL) DESC
-                            LIMIT ?
+                            f"""
+                            SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
+                                   c."粉丝数", c."视频数量", c."UP主主页链接"
+                            FROM creator_score_current AS c
+                            {creator_join}
+                            ORDER BY CAST(c."UP最终分" AS REAL) DESC
                             """,
+                            limit=None,
                         ),
                     )
                     self._populate_table(
                         self.creator_low_table,
                         self._query_rows(
                             conn,
-                            """
-                            SELECT "UP主姓名", "UP最终等级", "UP最终分", "评级置信度",
-                                   "未更新天数", "低等级视频比例", "评分原因"
-                            FROM creator_score_current
-                            WHERE "UP最终等级" IN ('C', 'D')
-                               OR "评级置信度" IN ('低', '中')
-                            ORDER BY CAST("UP最终分" AS REAL) ASC
+                            f"""
+                            SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
+                                   c."未更新天数", c."低等级视频比例", c."UP主主页链接"
+                            FROM creator_score_current AS c
+                            {creator_join}
+                            WHERE c."UP最终等级" IN ('C', 'D')
+                               OR c."评级置信度" IN ('低', '中')
+                            ORDER BY CAST(c."UP最终分" AS REAL) ASC
                             LIMIT ?
                             """,
                         ),
@@ -1323,19 +1566,36 @@ class DouyinRatingOverviewDialog(QDialog):
                     self.creator_low_table.setRowCount(0)
 
                 if has_video:
-                    total, counts = self._grade_counts(conn, self.VIDEO_TABLE, "视频最终等级")
+                    total, counts = self._grade_counts(
+                        conn,
+                        self.VIDEO_TABLE,
+                        "视频最终等级",
+                        eligible_only=has_eligible_filter,
+                    )
                     low_confidence = self._confidence_count(
-                        conn, self.VIDEO_TABLE, "评分置信度", ["很低", "低", "中"]
+                        conn,
+                        self.VIDEO_TABLE,
+                        "评分置信度",
+                        ["很低", "低", "中"],
+                        eligible_only=has_eligible_filter,
                     )
                     self._set_summary("video", total, counts, low_confidence)
+                    video_join = (
+                        f'JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON v."UP主UID" = e.uid'
+                        if has_eligible_filter
+                        else ""
+                    )
                     self._populate_table(
                         self.video_top_table,
                         self._query_rows(
                             conn,
-                            """
-                            SELECT "视频标题", "UP主姓名", "视频最终等级", "视频最终分",
-                                   "评分置信度", "点赞数", "下载状态", "评分原因"
-                            FROM video_score_current
+                            f"""
+                            SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
+                                   v."评分置信度", v."点赞数", v."下载状态", v."视频链接"
+                            FROM video_score_current AS v
+                            {video_join}
+                            LEFT JOIN creator_score_current AS c
+                              ON v."UP主UID" = c."UP主UID"
                             ORDER BY CAST("视频最终分" AS REAL) DESC
                             LIMIT ?
                             """,
@@ -1345,13 +1605,16 @@ class DouyinRatingOverviewDialog(QDialog):
                         self.video_watch_table,
                         self._query_rows(
                             conn,
-                            """
-                            SELECT "视频标题", "UP主姓名", "视频最终等级", "视频最终分",
-                                   "评分置信度", "缺失指标", "评分原因"
-                            FROM video_score_current
-                            WHERE "评分置信度" IN ('很低', '低', '中')
-                               OR "评分状态" LIKE '%观察%'
-                            ORDER BY CAST("视频最终分" AS REAL) DESC
+                            f"""
+                            SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
+                                   v."评分置信度", v."缺失指标", v."视频链接"
+                            FROM video_score_current AS v
+                            {video_join}
+                            LEFT JOIN creator_score_current AS c
+                              ON v."UP主UID" = c."UP主UID"
+                            WHERE v."评分置信度" IN ('很低', '低', '中')
+                               OR v."评分状态" LIKE '%观察%'
+                            ORDER BY CAST(v."视频最终分" AS REAL) DESC
                             LIMIT ?
                             """,
                         ),
@@ -1361,9 +1624,17 @@ class DouyinRatingOverviewDialog(QDialog):
                     self.video_top_table.setRowCount(0)
                     self.video_watch_table.setRowCount(0)
 
+            warning_parts = []
+            if has_eligible_filter:
+                warning_parts.append(f"当前full缓存UP：{eligible_count}")
+            if stale_creator_count:
+                warning_parts.append(f"已隐藏非当前full缓存UP评分：{stale_creator_count}")
+            if stale_video_count:
+                warning_parts.append(f"已隐藏非当前full缓存视频评分：{stale_video_count}")
+            warning_text = f"\n检测：{'；'.join(warning_parts)}" if warning_parts else ""
             self.summary_label.setText(
                 f"评分数据来源：{self.db_path}\n"
-                "S级只代表手动偏好；自动评分最高为A级。这里展示的是当前 SQLite 快照。"
+                f"S级只代表手动偏好；自动评分最高为A级。这里展示的是当前 SQLite 快照。{warning_text}"
             )
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -1378,17 +1649,63 @@ class DouyinRatingOverviewDialog(QDialog):
             self.summary_cells[(key, grade)].setText(str(int((counts or {}).get(grade, 0))))
         self.summary_cells[(key, "low_confidence")].setText(str(low_confidence))
 
-    def _open_path(self, key):
-        path = self.csv_paths.get(key)
-        if not path:
-            return
-        if not path.exists():
-            QMessageBox.warning(self, "文件不存在", f"还没有找到这个文件：\n{path}")
-            return
-        try:
-            os.startfile(str(path))
-        except Exception as exc:
-            QMessageBox.warning(self, "打开失败", f"无法打开文件：\n{path}\n\n{exc}")
+
+class LogCenterDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("日志中心")
+        self.resize(1120, 680)
+        self.setMinimumSize(900, 520)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QPushButton {
+                font-size: 14px;
+                min-height: 32px;
+                padding: 6px 16px;
+            }
+            QLabel {
+                color: #475569;
+                font-size: 14px;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        header_row = QHBoxLayout()
+        info_label = QLabel("运行日志会实时追加到这里；关闭窗口不会清空日志。")
+        header_row.addWidget(info_label)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
+        self.log_text.setStyleSheet(
+            "font-family: Consolas, 'Microsoft YaHei UI'; font-size: 14px; "
+            "background: #10141f; color: #d7e0f0; border: 1px solid #263244;"
+        )
+        layout.addWidget(self.log_text, stretch=1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.clear_button = QPushButton("清空日志")
+        self.close_button = QPushButton("关闭")
+        self.clear_button.clicked.connect(self.log_text.clear)
+        self.close_button.clicked.connect(self.hide)
+        button_row.addWidget(self.clear_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
 
 
 class MainWindow(QMainWindow):
@@ -1420,6 +1737,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.worker = None
         self.cookie_checker = None
+        self.log_dialog = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
@@ -1430,37 +1748,101 @@ class MainWindow(QMainWindow):
         self._progress_current = 0
         self._progress_total = 0
         self._progress_running = False
-        self.setWindowTitle("")
-        self.resize(1100, 760)
+        self.setWindowTitle("B站/抖音数据分析系统")
+        self.resize(1240, 720)
+        self.setMinimumSize(1120, 660)
+        self._apply_readable_style()
         self._build_ui()
         self._load_gui_config()
         self._sync_visible_options()
 
+    def _apply_readable_style(self):
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                font-size: 14px;
+                min-height: 30px;
+                padding: 3px 6px;
+            }
+            QRadioButton {
+                font-size: 14px;
+                spacing: 8px;
+            }
+            QPushButton {
+                font-size: 14px;
+                min-height: 32px;
+                padding: 6px 14px;
+            }
+            QProgressBar {
+                font-size: 13px;
+                min-height: 26px;
+                text-align: center;
+            }
+            #StatusCard {
+                background: #f8fafc;
+                border: 1px solid #d8dde6;
+                border-radius: 8px;
+            }
+            """
+        )
+
     def _build_ui(self):
         root = QWidget(self)
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignTop)
 
-        config_layout = QGridLayout()
-        layout.addLayout(config_layout)
+        settings_group = QGroupBox("运行设置")
+        settings_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        settings_grid = QGridLayout(settings_group)
+        settings_grid.setContentsMargins(14, 18, 14, 14)
+        settings_grid.setHorizontalSpacing(16)
+        settings_grid.setVerticalSpacing(10)
+        settings_grid.setColumnMinimumWidth(0, 96)
+        settings_grid.setColumnMinimumWidth(2, 120)
+        settings_grid.setColumnStretch(1, 1)
+        settings_grid.setColumnStretch(3, 1)
 
-        run_group = QGroupBox("运行配置")
-        run_form = QFormLayout(run_group)
+        def add_setting(row, left_label, left_widget, right_label=None, right_widget=None):
+            settings_grid.addWidget(QLabel(left_label), row, 0)
+            settings_grid.addWidget(left_widget, row, 1)
+            if right_label is not None and right_widget is not None:
+                settings_grid.addWidget(QLabel(right_label), row, 2)
+                settings_grid.addWidget(right_widget, row, 3)
+
         self.platform_combo = QComboBox()
         for label, value in self.PLATFORM_OPTIONS:
             self.platform_combo.addItem(label, value)
         self.platform_combo.currentIndexChanged.connect(self._sync_visible_options)
-        run_form.addRow("平台/模式", self.platform_combo)
 
         self.action_combo = QComboBox()
         for label, value in self.ACTION_OPTIONS:
             self.action_combo.addItem(label, value)
-        run_form.addRow("动作", self.action_combo)
+        add_setting(0, "平台/模式", self.platform_combo, "动作", self.action_combo)
 
         self.bilibili_mode_combo = QComboBox()
         for label, mode in self.BILIBILI_MODE_OPTIONS:
             self.bilibili_mode_combo.addItem(label, mode)
         self.bilibili_mode_combo.setCurrentIndex(0)
-        run_form.addRow("B站抓取模式", self.bilibili_mode_combo)
 
         self.douyin_mode_combo = QComboBox()
         for label, mode in (
@@ -1473,23 +1855,19 @@ class MainWindow(QMainWindow):
             self.douyin_mode_combo.addItem(label, mode)
         self.douyin_mode_combo.setCurrentIndex(2)
         self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
-        run_form.addRow("抖音抓取模式", self.douyin_mode_combo)
+        add_setting(1, "B站抓取模式", self.bilibili_mode_combo, "抖音抓取模式", self.douyin_mode_combo)
 
         self.monitor_video_limit_spin = QSpinBox()
         self.monitor_video_limit_spin.setRange(1, 500)
         self.monitor_video_limit_spin.setValue(10)
+        self.monitor_video_limit_spin.setMaximumWidth(140)
         self.monitor_video_limit_spin.setToolTip("监控/增量模式下，每位博主最多抓取最近 N 条视频。基础统计和完整模式会忽略该参数。")
-        run_form.addRow("监控视频数", self.monitor_video_limit_spin)
 
         self.backend_combo = QComboBox()
         self.backend_combo.addItem("DrissionPage", "drission")
         self.backend_combo.addItem("Playwright", "playwright")
-        run_form.addRow("抖音浏览器后端", self.backend_combo)
+        add_setting(2, "监控视频数", self.monitor_video_limit_spin, "抖音浏览器后端", self.backend_combo)
 
-        config_layout.addWidget(run_group, 0, 0)
-
-        uid_group = QGroupBox("UID 与筛选参数")
-        uid_form = QFormLayout(uid_group)
         self.uid_fetch_all_radio = QRadioButton("全抓取模式")
         self.uid_fetch_all_radio.setToolTip("抓取 UID 名单中的全部博主。")
         self.uid_fetch_partial_radio = QRadioButton("部分抓取模式")
@@ -1502,28 +1880,46 @@ class MainWindow(QMainWindow):
         self.uid_limit_spin = QSpinBox()
         self.uid_limit_spin.setRange(1, 100000)
         self.uid_limit_spin.setValue(100)
+        self.uid_limit_spin.setMaximumWidth(120)
         self.uid_limit_spin.setToolTip("部分抓取模式下生效；全抓取模式会忽略该数量。")
         fetch_mode_row = QHBoxLayout()
         fetch_mode_row.addWidget(self.uid_fetch_all_radio)
         fetch_mode_row.addWidget(self.uid_fetch_partial_radio)
         fetch_mode_row.addStretch(1)
-        uid_form.addRow("抓取方式", fetch_mode_row)
+        fetch_mode_widget = QWidget()
+        fetch_mode_widget.setLayout(fetch_mode_row)
+
         limit_row = QHBoxLayout()
         limit_row.addWidget(QLabel("抓取前 N 个 UID"))
         limit_row.addWidget(self.uid_limit_spin)
         limit_row.addStretch(1)
-        uid_form.addRow("UID 数量", limit_row)
+        limit_widget = QWidget()
+        limit_widget.setLayout(limit_row)
+        add_setting(3, "抓取方式", fetch_mode_widget, "UID 数量", limit_widget)
 
         self.high_like_spin = QSpinBox()
         self.high_like_spin.setRange(1, 100000000)
         self.high_like_spin.setValue(10000)
+        self.high_like_spin.setMaximumWidth(180)
         self.high_like_spin.setToolTip("导出抖音高赞视频时使用，其它模式不会使用该参数。")
-        uid_form.addRow("高赞阈值", self.high_like_spin)
-        config_layout.addWidget(uid_group, 0, 1)
+        add_setting(4, "高赞阈值", self.high_like_spin)
+        layout.addWidget(settings_group)
 
+        self.log_dialog = LogCenterDialog(self)
+        self.log_text = self.log_dialog.log_text
+
+        controls_group = QGroupBox("快捷操作")
+        controls_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        controls_layout = QVBoxLayout(controls_group)
+        controls_layout.setContentsMargins(14, 16, 14, 12)
+        controls_layout.setSpacing(10)
         button_row = QHBoxLayout()
+        button_row.setSpacing(12)
+        utility_button_row = QHBoxLayout()
+        utility_button_row.setSpacing(12)
         self.start_button = QPushButton("开始运行")
-        self.start_button.setStyleSheet("font-size: 16px; font-weight: 700; padding: 10px;")
+        self.start_button.setMinimumWidth(118)
+        self.start_button.setStyleSheet("font-size: 18px; font-weight: 700; padding: 8px 16px; min-height: 36px;")
         self.start_button.clicked.connect(self._start)
         self.stop_button = QPushButton("终止运行")
         self.stop_button.setEnabled(False)
@@ -1538,6 +1934,8 @@ class MainWindow(QMainWindow):
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.rating_overview_button = QPushButton("评分概览")
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
+        self.log_center_button = QPushButton("日志中心")
+        self.log_center_button.clicked.connect(self._open_log_center)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
         self.cookie_check_button.clicked.connect(self._check_bilibili_cookie)
         self.advanced_button = QPushButton("高级设置")
@@ -1545,45 +1943,65 @@ class MainWindow(QMainWindow):
         self.lock_button = QPushButton("锁定配置")
         self.lock_button.clicked.connect(self._toggle_config_lock)
         self.clear_button = QPushButton("清空日志")
-        self.clear_button.clicked.connect(lambda: self.log_text.clear())
+        self.clear_button.clicked.connect(self.log_text.clear)
+        primary_buttons = (
+            self.start_button,
+            self.stop_button,
+            self.high_like_export_button,
+            self.video_download_button,
+            self.unfollow_cleanup_button,
+        )
+        utility_buttons = (
+            self.douyin_stats_button,
+            self.rating_overview_button,
+            self.log_center_button,
+            self.cookie_check_button,
+            self.advanced_button,
+            self.lock_button,
+            self.clear_button,
+        )
+        for button in primary_buttons:
+            button.setMinimumWidth(120)
+        for button in utility_buttons:
+            button.setMinimumWidth(112)
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.high_like_export_button)
         button_row.addWidget(self.video_download_button)
         button_row.addWidget(self.unfollow_cleanup_button)
-        button_row.addWidget(self.douyin_stats_button)
-        button_row.addWidget(self.rating_overview_button)
-        button_row.addWidget(self.cookie_check_button)
-        button_row.addWidget(self.advanced_button)
-        button_row.addWidget(self.lock_button)
-        button_row.addWidget(self.clear_button)
-        layout.addLayout(button_row)
+        button_row.addStretch(1)
+        for button in utility_buttons:
+            utility_button_row.addWidget(button, stretch=1)
+        controls_layout.addLayout(button_row)
+        controls_layout.addLayout(utility_button_row)
+        layout.addWidget(controls_group)
+
+        status_group = QGroupBox("运行状态")
+        status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        status_layout = QGridLayout(status_group)
+        status_layout.setContentsMargins(14, 18, 14, 14)
+        status_layout.setHorizontalSpacing(12)
+        status_layout.setVerticalSpacing(8)
 
         self.cookie_status_label = QLabel("B站 Cookie：未检测")
-        self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #666;")
-        layout.addWidget(self.cookie_status_label)
+        self.cookie_status_label.setStyleSheet("color: #475569; font-size: 14px;")
+        status_layout.addWidget(QLabel("Cookie 状态"), 0, 0)
+        status_layout.addWidget(self.cookie_status_label, 0, 1)
 
-        progress_group = QGroupBox("抓取进度")
-        progress_layout = QVBoxLayout(progress_group)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("等待开始")
-        self.progress_bar.setStyleSheet("QProgressBar { min-height: 20px; }")
+        self.progress_bar.setStyleSheet("QProgressBar { min-height: 28px; }")
         self.progress_label = QLabel("请选择配置后点击开始运行")
-        self.progress_label.setStyleSheet("padding: 2px 0 0 2px; color: #555;")
-        progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(self.progress_label)
-        layout.addWidget(progress_group)
-
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.log_text.setStyleSheet(
-            "font-family: Consolas, 'Microsoft YaHei UI'; font-size: 12px; background: #10141f; color: #d7e0f0;"
-        )
-        layout.addWidget(self.log_text, stretch=1)
+        self.progress_label.setStyleSheet("padding: 3px 0 0 2px; color: #555; font-size: 14px;")
+        status_layout.addWidget(QLabel("抓取进度"), 1, 0)
+        status_layout.addWidget(self.progress_bar, 1, 1)
+        status_layout.addWidget(self.progress_label, 2, 1)
+        status_layout.setColumnStretch(1, 1)
+        layout.addWidget(status_group)
+        layout.addStretch(1)
 
         self.setCentralWidget(root)
 
@@ -1766,6 +2184,14 @@ class MainWindow(QMainWindow):
         dialog = DouyinRatingOverviewDialog(self)
         dialog.exec_()
 
+    def _open_log_center(self):
+        if self.log_dialog is None:
+            self.log_dialog = LogCenterDialog(self)
+            self.log_text = self.log_dialog.log_text
+        self.log_dialog.show()
+        self.log_dialog.raise_()
+        self.log_dialog.activateWindow()
+
     def _start(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
@@ -1932,7 +2358,7 @@ class MainWindow(QMainWindow):
         self.cookie_check_button.setEnabled(False)
         self.cookie_check_button.setText("检测中...")
         self.cookie_status_label.setText("B站 Cookie：检测中...")
-        self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #1565c0;")
+        self.cookie_status_label.setStyleSheet("color: #1565c0; font-size: 14px; font-weight: 700;")
         self.cookie_checker = BilibiliCookieCheckThread()
         self.cookie_checker.checked.connect(self._on_bilibili_cookie_checked)
         self.cookie_checker.start()
@@ -1942,12 +2368,12 @@ class MainWindow(QMainWindow):
         self.cookie_check_button.setText("检测 B站 Cookie")
         if ok:
             self.cookie_status_label.setText(f"B站 Cookie：{message}")
-            self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #2e7d32; font-weight: 700;")
+            self.cookie_status_label.setStyleSheet("color: #2e7d32; font-size: 14px; font-weight: 700;")
             self._append_log(f"B站 Cookie 状态检测：{message}")
             self._show_info_dialog("B站 Cookie 状态", message)
         else:
             self.cookie_status_label.setText(f"B站 Cookie：{message}")
-            self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #c62828; font-weight: 700;")
+            self.cookie_status_label.setStyleSheet("color: #c62828; font-size: 14px; font-weight: 700;")
             self._append_log(f"B站 Cookie 状态检测：{message}")
             self._show_warning_dialog("B站 Cookie 状态", message)
 

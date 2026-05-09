@@ -1,5 +1,6 @@
 import asyncio
 import queue
+import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -107,7 +108,13 @@ class HighLikeDownloaderGUI:
             command=self.request_stop,
             state=tk.DISABLED,
         )
-        self.stop_button.pack(side=tk.LEFT)
+        self.stop_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.reset_button = ttk.Button(
+            controls,
+            text="一键重置",
+            command=self.reset_download_records,
+        )
+        self.reset_button.pack(side=tk.LEFT)
 
         filename_frame = ttk.Frame(outer)
         filename_frame.pack(fill=tk.X, pady=(10, 0))
@@ -245,6 +252,51 @@ class HighLikeDownloaderGUI:
         self.status.set("正在停止，当前视频处理完成后会退出")
         self._log("收到停止请求，等待当前下载任务收尾")
 
+    def reset_download_records(self):
+        if self._is_busy():
+            return
+
+        self._snapshot_inputs()
+        try:
+            config = ConfigLoader(self.active_config_path)
+            db_path = self._resolve_database_path(config)
+            manifest_paths = self._download_manifest_paths(config)
+        except Exception as exc:
+            messagebox.showerror("重置失败", f"读取配置失败：{exc}")
+            return
+
+        detail_lines = [
+            "将清空 SQLite 中 aweme 表的已下载视频记录。",
+            "将清空当前下载目录下的 download_manifest.jsonl 下载清单。",
+            "不会删除本地已下载的视频文件。",
+            "",
+            "注意：如果本地视频文件还在，下载器仍会通过文件名识别并跳过已存在视频。",
+            "",
+            f"数据库：{db_path}",
+        ]
+        if manifest_paths:
+            detail_lines.append("下载清单：")
+            detail_lines.extend(str(path) for path in manifest_paths)
+        if not messagebox.askyesno("确认一键重置", "\n".join(detail_lines)):
+            return
+
+        try:
+            deleted = self._clear_aweme_records(db_path)
+            cleared_manifests = self._clear_download_manifests(manifest_paths)
+        except Exception as exc:
+            self.status.set("重置失败")
+            self._log(f"一键重置失败：{exc}")
+            messagebox.showerror("重置失败", str(exc))
+            return
+
+        self.completed_count.set("0")
+        self.pending_count.set(self.total_count.get())
+        self.status.set("已清空已下载视频记录")
+        self._log(
+            f"已清空已下载视频记录：SQLite 删除 {deleted} 条，清空清单 {cleared_manifests} 个；本地视频文件未删除。"
+        )
+        self.refresh_stats()
+
     def _is_busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
 
@@ -253,6 +305,7 @@ class HighLikeDownloaderGUI:
         self.refresh_button.configure(state=state)
         self.start_button.configure(state=state)
         self.skip_failed_button.configure(state=state)
+        self.reset_button.configure(state=state)
         self.stop_button.configure(state=tk.NORMAL if allow_stop else tk.DISABLED)
 
     def _run_worker(self, target):
@@ -419,10 +472,60 @@ class HighLikeDownloaderGUI:
             await database.close()
 
     async def _open_database(self, config: ConfigLoader) -> Database:
-        db_path = config.get("database_path", "dy_downloader.db") or "dy_downloader.db"
-        database = Database(db_path=str(PROJECT_ROOT / db_path if not Path(db_path).is_absolute() else db_path))
+        database = Database(db_path=str(self._resolve_database_path(config)))
         await database.initialize()
         return database
+
+    @staticmethod
+    def _resolve_database_path(config: ConfigLoader) -> Path:
+        db_path = config.get("database_path", "dy_downloader.db") or "dy_downloader.db"
+        path = Path(str(db_path)).expanduser()
+        if path.is_absolute():
+            return path
+        return PROJECT_ROOT / path
+
+    def _download_manifest_paths(self, config: ConfigLoader) -> list[Path]:
+        configured_path = self.active_download_path or str(config.get("path", "./Downloaded/"))
+        current_manifest = self._resolve_download_path(configured_path) / "download_manifest.jsonl"
+        default_manifest = PROJECT_ROOT / "Downloaded" / "download_manifest.jsonl"
+        paths = [current_manifest]
+        if default_manifest != current_manifest:
+            paths.append(default_manifest)
+        return paths
+
+    @staticmethod
+    def _clear_aweme_records(db_path: Path) -> int:
+        if not db_path.exists():
+            return 0
+
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='aweme'"
+            )
+            if cursor.fetchone() is None:
+                return 0
+
+            cursor = conn.execute("DELETE FROM aweme")
+            deleted = cursor.rowcount if cursor.rowcount is not None else 0
+            try:
+                conn.execute("DELETE FROM sqlite_sequence WHERE name='aweme'")
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
+            return max(deleted, 0)
+
+    @staticmethod
+    def _clear_download_manifests(paths: list[Path]) -> int:
+        cleared = 0
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved in seen or not path.exists():
+                continue
+            seen.add(resolved)
+            path.write_text("", encoding="utf-8")
+            cleared += 1
+        return cleared
 
     def _apply_runtime_config(self, config: ConfigLoader) -> None:
         if self.active_download_path:

@@ -164,6 +164,17 @@ class DouyinCreatorScorer:
         creator_manual = self._load_manual_grades()
         creator_rows = self._load_creator_rows()
         video_stats = self._load_video_stats()
+        full_mode_uids = self._load_full_mode_uids()
+        if full_mode_uids is not None:
+            creator_rows = [
+                row for row in creator_rows
+                if str(row.get("uploader_id") or "").strip() in full_mode_uids
+            ]
+        else:
+            creator_rows = [
+                row for row in creator_rows
+                if video_stats.get(str(row.get("uploader_id") or "").strip(), {}).get("scores")
+            ]
 
         follower_p95 = _p95([row["follower_count"] for row in creator_rows])
         total_like_p95 = _p95([row["total_like_count"] for row in creator_rows])
@@ -310,6 +321,32 @@ class DouyinCreatorScorer:
         for item in grouped.values():
             item["videos"].sort(key=lambda video: video.get("publish_ts") or 0, reverse=True)
         return grouped
+
+    def _load_full_mode_uids(self):
+        if not self._table_exists("cache_inventory_current"):
+            return None
+
+        rows = self._read_table("cache_inventory_current")
+        uid_columns = ("UP主UID", "UP涓籙ID", "uploader_id")
+        full_columns = ("有full缓存", "鏈塮ull缂撳瓨", "has_full_cache")
+        result = set()
+        for row in rows:
+            uid = ""
+            for column in uid_columns:
+                uid = _pick_text(row, column)
+                if uid:
+                    break
+            if not uid:
+                continue
+
+            has_full_cache = ""
+            for column in full_columns:
+                has_full_cache = _pick_text(row, column)
+                if has_full_cache:
+                    break
+            if _is_yes_value(has_full_cache):
+                result.add(uid)
+        return result
 
     def _score_creator(self, creator, video_stat, manual_grade, follower_p95, total_like_p95, avg_like_p95):
         follower_count = _safe_int(creator.get("follower_count"), 0)
@@ -671,6 +708,11 @@ def _pick(row, *names):
 def _pick_text(row, *names):
     value = _pick(row, *names)
     return str(value or "").strip()
+
+
+def _is_yes_value(value):
+    text = str(value or "").strip().lower()
+    return text in {"是", "yes", "true", "1", "y"}
 
 
 def _clamp(value, low=0, high=100):
