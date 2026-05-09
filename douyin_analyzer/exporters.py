@@ -42,6 +42,10 @@ def _write_mapped_csv(path, ordered_headers, rows, error_message):
         print(f"{error_message}: {exc}")
 
 
+def _should_write_legacy_csv(config):
+    return not getattr(config, "compact_output_only", False)
+
+
 def _load_mapped_rows_from_store(db_path, table_name, ordered_headers):
     dataframe = read_table_to_dataframe(db_path, table_name)
     if dataframe is None:
@@ -107,9 +111,11 @@ def save_to_csv(config, results, merge_existing=False):
             config.export_main_table,
             ordered_headers,
         )
-        _write_mapped_csv(config.output_csv, ordered_headers, mapped_rows, "保存抖音排行榜CSV失败")
+        if _should_write_legacy_csv(config):
+            _write_mapped_csv(config.output_csv, ordered_headers, mapped_rows, "保存抖音排行榜CSV失败")
     else:
-        _write_csv(config.output_csv, fieldnames, headers, results, "保存抖音排行榜CSV失败")
+        if _should_write_legacy_csv(config):
+            _write_csv(config.output_csv, fieldnames, headers, results, "保存抖音排行榜CSV失败")
         write_rows_to_table(config.export_store_db, config.export_main_table, fieldnames, headers, results)
         mapped_rows = _mapped_rows(fieldnames, headers, results)
     incoming_rows = _mapped_rows(fieldnames, headers, results)
@@ -146,7 +152,8 @@ def save_all_videos_to_csv(config, video_rows):
         "view_count": "播放量",
         "video_url": "视频链接",
     }
-    _write_csv(config.all_videos_csv, fieldnames, headers, video_rows, "保存抖音视频明细CSV失败")
+    if _should_write_legacy_csv(config):
+        _write_csv(config.all_videos_csv, fieldnames, headers, video_rows, "保存抖音视频明细CSV失败")
 
     grouped_rows = {}
     for row in video_rows or []:
@@ -222,14 +229,16 @@ def save_video_duration_analysis_to_csv(config, summary_rows, merge_existing=Fal
             config.export_analysis_table,
             ordered_headers,
         )
-        _write_mapped_csv(
-            config.video_duration_analysis_csv,
-            ordered_headers,
-            mapped_rows,
-            "保存抖音视频时长分析CSV失败",
-        )
+        if _should_write_legacy_csv(config):
+            _write_mapped_csv(
+                config.video_duration_analysis_csv,
+                ordered_headers,
+                mapped_rows,
+                "保存抖音视频时长分析CSV失败",
+            )
     else:
-        _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存抖音视频时长分析CSV失败")
+        if _should_write_legacy_csv(config):
+            _write_csv(config.video_duration_analysis_csv, fieldnames, headers, summary_rows, "保存抖音视频时长分析CSV失败")
         write_rows_to_table(config.export_store_db, config.export_analysis_table, fieldnames, headers, summary_rows)
         mapped_rows = _mapped_rows(fieldnames, headers, summary_rows)
     replace_summary_rows(
@@ -324,7 +333,9 @@ def save_cache_inventory_to_csv(config, cache_rows):
         "latest_publish_date": "缓存最新发布时间",
         "latest_publish_timestamp": "缓存最新发布时间戳",
     }
-    _write_csv(config.cache_inventory_csv, fieldnames, headers, cache_rows, "保存抖音缓存清单CSV失败")
+    if _should_write_legacy_csv(config):
+        _write_csv(config.cache_inventory_csv, fieldnames, headers, cache_rows, "保存抖音缓存清单CSV失败")
+    write_rows_to_table(config.export_store_db, "cache_inventory_current", fieldnames, headers, cache_rows)
 
 
 def save_full_fetch_mismatch_to_csv(config, mismatch_rows):

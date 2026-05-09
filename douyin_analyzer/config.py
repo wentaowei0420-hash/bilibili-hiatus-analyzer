@@ -49,6 +49,11 @@ class DouyinAnalyzerConfig:
     all_videos_csv: Path
     video_duration_analysis_csv: Path
     video_duration_report_md: Path
+    video_score_csv: Path
+    creator_score_csv: Path
+    compact_creator_csv: Path
+    compact_video_csv: Path
+    compact_diagnostic_csv: Path
     cache_inventory_csv: Path
     full_fetch_mismatch_csv: Path
     export_store_db: Path
@@ -100,6 +105,7 @@ class DouyinAnalyzerConfig:
     failed_profile_skip_max_age_hours: int
     progress_trim_video_limit: int
     enable_video_duration_analysis: bool
+    compact_output_only: bool
     unfollow_interval_seconds: float
     unfollow_batch_size: int
     unfollow_batch_cooldown: float
@@ -234,6 +240,11 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         all_videos_csv=output_dir / "douyin_all_videos.csv",
         video_duration_analysis_csv=output_dir / "douyin_video_duration_analysis.csv",
         video_duration_report_md=output_dir / "douyin_video_duration_report.md",
+        video_score_csv=output_dir / "douyin_video_scores.csv",
+        creator_score_csv=output_dir / "douyin_creator_scores.csv",
+        compact_creator_csv=output_dir / "douyin_creators_summary.csv",
+        compact_video_csv=output_dir / "douyin_videos_summary.csv",
+        compact_diagnostic_csv=output_dir / "douyin_diagnostics_summary.csv",
         cache_inventory_csv=output_dir / "douyin_cache_inventory.csv",
         full_fetch_mismatch_csv=output_dir / "douyin_full_fetch_mismatch.csv",
         export_store_db=state_dir / "douyin_export_store.db",
@@ -326,6 +337,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         enable_video_duration_analysis=_get_bool(
             "DOUYIN_ENABLE_VIDEO_DURATION_ANALYSIS", True
         ),
+        compact_output_only=_get_bool("DOUYIN_COMPACT_OUTPUT_ONLY", False),
         unfollow_interval_seconds=float(
             os.getenv("DOUYIN_UNFOLLOW_INTERVAL_SECONDS", "1.5")
         ),

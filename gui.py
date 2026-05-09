@@ -1,6 +1,8 @@
 import os
 import json
+import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,14 +24,19 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -280,6 +287,18 @@ class RunnerThread(QThread):
             from douyin_analyzer.app import run_export_high_like_videos_from_cache
 
             run_export_high_like_videos_from_cache(threshold=self.config.high_like_threshold)
+        elif self.config.platform == "douyin_video_score":
+            from douyin_analyzer.app import run_score_videos_from_cache
+
+            run_score_videos_from_cache()
+        elif self.config.platform == "douyin_creator_score":
+            from douyin_analyzer.app import run_score_creators_from_cache
+
+            run_score_creators_from_cache()
+        elif self.config.platform == "douyin_compact_export":
+            from douyin_analyzer.app import run_export_compact_tables_from_cache
+
+            run_export_compact_tables_from_cache(high_like_threshold=self.config.high_like_threshold)
         else:
             raise ValueError(f"未知平台模式: {self.config.platform}")
 
@@ -1077,6 +1096,301 @@ class DouyinStatsDialogV2(QDialog):
             )
 
 
+class DouyinRatingOverviewDialog(QDialog):
+    CREATOR_TABLE = "creator_score_current"
+    VIDEO_TABLE = "video_score_current"
+    GRADE_ORDER = ("S", "A", "B", "C", "D")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("抖音评分概览")
+        self.resize(1040, 720)
+
+        from douyin_analyzer.config import load_analyzer_config
+
+        self.config = load_analyzer_config()
+        self.db_path = Path(self.config.export_store_db)
+        self.csv_paths = {
+            "up_score": Path(self.config.creator_score_csv),
+            "video_score": Path(self.config.video_score_csv),
+            "up_summary": Path(self.config.compact_creator_csv),
+            "video_summary": Path(self.config.compact_video_csv),
+        }
+
+        layout = QVBoxLayout(self)
+
+        self.summary_label = QLabel("正在读取评分数据...")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("padding: 4px 2px; color: #444;")
+        layout.addWidget(self.summary_label)
+
+        summary_group = QGroupBox("等级分布")
+        summary_grid = QGridLayout(summary_group)
+        headers = ["对象", "总数", "S", "A", "B", "C", "D", "低/中置信度"]
+        for column, header in enumerate(headers):
+            label = QLabel(header)
+            label.setStyleSheet("font-weight: 700;")
+            summary_grid.addWidget(label, 0, column)
+
+        self.summary_cells = {}
+        for row, key in enumerate(("creator", "video"), start=1):
+            title = "UP主" if key == "creator" else "视频"
+            summary_grid.addWidget(QLabel(title), row, 0)
+            for column, name in enumerate(("total", *self.GRADE_ORDER, "low_confidence"), start=1):
+                cell = QLabel("-")
+                cell.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                summary_grid.addWidget(cell, row, column)
+                self.summary_cells[(key, name)] = cell
+        layout.addWidget(summary_group)
+
+        self.tabs = QTabWidget()
+        self.creator_top_table = self._make_table(
+            ["UP主", "等级", "分数", "置信度", "粉丝数", "视频数", "评分原因"]
+        )
+        self.creator_low_table = self._make_table(
+            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "评分原因"]
+        )
+        self.video_top_table = self._make_table(
+            ["视频标题", "UP主", "等级", "分数", "置信度", "点赞数", "下载状态", "评分原因"]
+        )
+        self.video_watch_table = self._make_table(
+            ["视频标题", "UP主", "等级", "分数", "置信度", "缺失指标", "评分原因"]
+        )
+        self.tabs.addTab(self.creator_top_table, "高分UP")
+        self.tabs.addTab(self.creator_low_table, "低分/风险UP")
+        self.tabs.addTab(self.video_top_table, "高分视频")
+        self.tabs.addTab(self.video_watch_table, "待观察视频")
+        layout.addWidget(self.tabs, stretch=1)
+
+        self.refresh_info_label = QLabel("")
+        self.refresh_info_label.setStyleSheet("padding: 2px 2px; color: #666;")
+        layout.addWidget(self.refresh_info_label)
+
+        button_row = QHBoxLayout()
+        self.refresh_button = QPushButton("刷新")
+        self.open_creator_score_button = QPushButton("打开UP评分CSV")
+        self.open_video_score_button = QPushButton("打开视频评分CSV")
+        self.open_creator_summary_button = QPushButton("打开UP精简表")
+        self.open_video_summary_button = QPushButton("打开视频精简表")
+        self.close_button = QPushButton("关闭")
+
+        self.refresh_button.clicked.connect(self.refresh_data)
+        self.open_creator_score_button.clicked.connect(lambda: self._open_path("up_score"))
+        self.open_video_score_button.clicked.connect(lambda: self._open_path("video_score"))
+        self.open_creator_summary_button.clicked.connect(lambda: self._open_path("up_summary"))
+        self.open_video_summary_button.clicked.connect(lambda: self._open_path("video_summary"))
+        self.close_button.clicked.connect(self.accept)
+
+        button_row.addStretch(1)
+        button_row.addWidget(self.refresh_button)
+        button_row.addWidget(self.open_creator_score_button)
+        button_row.addWidget(self.open_video_score_button)
+        button_row.addWidget(self.open_creator_summary_button)
+        button_row.addWidget(self.open_video_summary_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+        self.refresh_data()
+
+    @staticmethod
+    def _make_table(headers):
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setWordWrap(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.verticalHeader().setVisible(False)
+        return table
+
+    @staticmethod
+    def _table_exists(conn, table_name):
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _fmt(value):
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.2f}"
+        text = str(value)
+        return text if len(text) <= 120 else text[:117] + "..."
+
+    def _grade_counts(self, conn, table, column):
+        counts = {grade: 0 for grade in self.GRADE_ORDER}
+        total = 0
+        for grade, count in conn.execute(
+            f'SELECT "{column}", COUNT(*) FROM {table} GROUP BY "{column}"'
+        ):
+            grade_text = str(grade or "").strip().upper()
+            if grade_text in counts:
+                counts[grade_text] += int(count or 0)
+            total += int(count or 0)
+        return total, counts
+
+    def _confidence_count(self, conn, table, column, values):
+        placeholders = ",".join("?" for _ in values)
+        row = conn.execute(
+            f'SELECT COUNT(*) FROM {table} WHERE "{column}" IN ({placeholders})',
+            tuple(values),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _query_rows(self, conn, sql, limit=30):
+        return conn.execute(sql, (limit,)).fetchall()
+
+    def _populate_table(self, table, rows):
+        table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(self._fmt(value))
+                item.setToolTip(self._fmt(value))
+                table.setItem(row_index, column_index, item)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _clear_tables(self):
+        for table in (
+            self.creator_top_table,
+            self.creator_low_table,
+            self.video_top_table,
+            self.video_watch_table,
+        ):
+            table.setRowCount(0)
+
+    def refresh_data(self):
+        if not self.db_path.exists():
+            self.summary_label.setText(f"未找到评分数据库：{self.db_path}")
+            self._clear_tables()
+            return
+
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                has_creator = self._table_exists(conn, self.CREATOR_TABLE)
+                has_video = self._table_exists(conn, self.VIDEO_TABLE)
+
+                if not has_creator and not has_video:
+                    self.summary_label.setText(
+                        "还没有生成评分数据。请先在主界面运行“抖音视频评分”和“抖音UP主评分”。"
+                    )
+                    self._clear_tables()
+                    return
+
+                if has_creator:
+                    total, counts = self._grade_counts(conn, self.CREATOR_TABLE, "UP最终等级")
+                    low_confidence = self._confidence_count(
+                        conn, self.CREATOR_TABLE, "评级置信度", ["低", "中"]
+                    )
+                    self._set_summary("creator", total, counts, low_confidence)
+                    self._populate_table(
+                        self.creator_top_table,
+                        self._query_rows(
+                            conn,
+                            """
+                            SELECT "UP主姓名", "UP最终等级", "UP最终分", "评级置信度",
+                                   "粉丝数", "已评分视频数", "评分原因"
+                            FROM creator_score_current
+                            ORDER BY CAST("UP最终分" AS REAL) DESC
+                            LIMIT ?
+                            """,
+                        ),
+                    )
+                    self._populate_table(
+                        self.creator_low_table,
+                        self._query_rows(
+                            conn,
+                            """
+                            SELECT "UP主姓名", "UP最终等级", "UP最终分", "评级置信度",
+                                   "未更新天数", "低等级视频比例", "评分原因"
+                            FROM creator_score_current
+                            WHERE "UP最终等级" IN ('C', 'D')
+                               OR "评级置信度" IN ('低', '中')
+                            ORDER BY CAST("UP最终分" AS REAL) ASC
+                            LIMIT ?
+                            """,
+                        ),
+                    )
+                else:
+                    self._set_summary("creator", 0, {}, 0)
+                    self.creator_top_table.setRowCount(0)
+                    self.creator_low_table.setRowCount(0)
+
+                if has_video:
+                    total, counts = self._grade_counts(conn, self.VIDEO_TABLE, "视频最终等级")
+                    low_confidence = self._confidence_count(
+                        conn, self.VIDEO_TABLE, "评分置信度", ["很低", "低", "中"]
+                    )
+                    self._set_summary("video", total, counts, low_confidence)
+                    self._populate_table(
+                        self.video_top_table,
+                        self._query_rows(
+                            conn,
+                            """
+                            SELECT "视频标题", "UP主姓名", "视频最终等级", "视频最终分",
+                                   "评分置信度", "点赞数", "下载状态", "评分原因"
+                            FROM video_score_current
+                            ORDER BY CAST("视频最终分" AS REAL) DESC
+                            LIMIT ?
+                            """,
+                        ),
+                    )
+                    self._populate_table(
+                        self.video_watch_table,
+                        self._query_rows(
+                            conn,
+                            """
+                            SELECT "视频标题", "UP主姓名", "视频最终等级", "视频最终分",
+                                   "评分置信度", "缺失指标", "评分原因"
+                            FROM video_score_current
+                            WHERE "评分置信度" IN ('很低', '低', '中')
+                               OR "评分状态" LIKE '%观察%'
+                            ORDER BY CAST("视频最终分" AS REAL) DESC
+                            LIMIT ?
+                            """,
+                        ),
+                    )
+                else:
+                    self._set_summary("video", 0, {}, 0)
+                    self.video_top_table.setRowCount(0)
+                    self.video_watch_table.setRowCount(0)
+
+            self.summary_label.setText(
+                f"评分数据来源：{self.db_path}\n"
+                "S级只代表手动偏好；自动评分最高为A级。这里展示的是当前 SQLite 快照。"
+            )
+            self.refresh_info_label.setText(
+                f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except Exception as exc:
+            self.summary_label.setText(f"读取评分概览失败：{exc}")
+            self._clear_tables()
+
+    def _set_summary(self, key, total, counts, low_confidence):
+        self.summary_cells[(key, "total")].setText(str(total))
+        for grade in self.GRADE_ORDER:
+            self.summary_cells[(key, grade)].setText(str(int((counts or {}).get(grade, 0))))
+        self.summary_cells[(key, "low_confidence")].setText(str(low_confidence))
+
+    def _open_path(self, key):
+        path = self.csv_paths.get(key)
+        if not path:
+            return
+        if not path.exists():
+            QMessageBox.warning(self, "文件不存在", f"还没有找到这个文件：\n{path}")
+            return
+        try:
+            os.startfile(str(path))
+        except Exception as exc:
+            QMessageBox.warning(self, "打开失败", f"无法打开文件：\n{path}\n\n{exc}")
+
+
 class MainWindow(QMainWindow):
     BILIBILI_MODE_OPTIONS = [
         ("精确模式（主榜 + 视频分析）", "precise_full"),
@@ -1092,6 +1406,9 @@ class MainWindow(QMainWindow):
         ("B站 UID 全量视频", "bilibili_uid"),
         ("抖音 UID 全量视频", "douyin_uid"),
         ("导出抖音高赞视频", "douyin_high_like"),
+        ("抖音视频评分", "douyin_video_score"),
+        ("抖音UP主评分", "douyin_creator_score"),
+        ("导出抖音精简表", "douyin_compact_export"),
     ]
     ACTION_OPTIONS = [
         ("仅抓取", "fetch"),
@@ -1110,6 +1427,9 @@ class MainWindow(QMainWindow):
         self.bilibili_runtime_settings = _load_default_bilibili_runtime_settings()
         self.douyin_runtime_settings = _load_default_douyin_runtime_settings()
         self.fetch_order_settings = _load_default_fetch_order_settings()
+        self._progress_current = 0
+        self._progress_total = 0
+        self._progress_running = False
         self.setWindowTitle("")
         self.resize(1100, 760)
         self._build_ui()
@@ -1216,6 +1536,8 @@ class MainWindow(QMainWindow):
         self.unfollow_cleanup_button.clicked.connect(self._start_douyin_non_followed_cache_cleanup)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
+        self.rating_overview_button = QPushButton("评分概览")
+        self.rating_overview_button.clicked.connect(self._open_rating_overview)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
         self.cookie_check_button.clicked.connect(self._check_bilibili_cookie)
         self.advanced_button = QPushButton("高级设置")
@@ -1230,6 +1552,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.video_download_button)
         button_row.addWidget(self.unfollow_cleanup_button)
         button_row.addWidget(self.douyin_stats_button)
+        button_row.addWidget(self.rating_overview_button)
         button_row.addWidget(self.cookie_check_button)
         button_row.addWidget(self.advanced_button)
         button_row.addWidget(self.lock_button)
@@ -1239,6 +1562,20 @@ class MainWindow(QMainWindow):
         self.cookie_status_label = QLabel("B站 Cookie：未检测")
         self.cookie_status_label.setStyleSheet("padding: 2px 0 8px 2px; color: #666;")
         layout.addWidget(self.cookie_status_label)
+
+        progress_group = QGroupBox("抓取进度")
+        progress_layout = QVBoxLayout(progress_group)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("等待开始")
+        self.progress_bar.setStyleSheet("QProgressBar { min-height: 20px; }")
+        self.progress_label = QLabel("请选择配置后点击开始运行")
+        self.progress_label.setStyleSheet("padding: 2px 0 0 2px; color: #555;")
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.progress_label)
+        layout.addWidget(progress_group)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -1425,6 +1762,10 @@ class MainWindow(QMainWindow):
         dialog = DouyinStatsDialogV2(self, high_like_threshold=self.high_like_spin.value())
         dialog.exec_()
 
+    def _open_rating_overview(self):
+        dialog = DouyinRatingOverviewDialog(self)
+        dialog.exec_()
+
     def _start(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
@@ -1437,6 +1778,7 @@ class MainWindow(QMainWindow):
             self._save_gui_config()
 
         self.log_text.clear()
+        self._start_task_progress("任务已启动，正在等待抓取总数...")
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.high_like_export_button.setEnabled(False)
@@ -1461,6 +1803,7 @@ class MainWindow(QMainWindow):
             self._save_gui_config()
 
         self.log_text.clear()
+        self._start_task_progress("高赞视频导出中，正在等待统计结果...")
         self.start_button.setEnabled(False)
         self.high_like_export_button.setEnabled(False)
         self.high_like_export_button.setText("导出中...")
@@ -1562,6 +1905,7 @@ class MainWindow(QMainWindow):
             self._save_gui_config()
 
         self.log_text.clear()
+        self._start_task_progress("缓存清理中，正在等待处理进度...")
         self.start_button.setEnabled(False)
         self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
@@ -1624,8 +1968,115 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, line):
         self.log_text.append(line)
+        self._update_task_progress_from_log(line)
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _start_task_progress(self, message):
+        self._progress_current = 0
+        self._progress_total = 0
+        self._progress_running = True
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("运行中")
+        self.progress_label.setText(message)
+
+    def _set_task_progress(self, current=None, total=None, label=None):
+        if total is not None and total > 0:
+            total = int(total)
+            if self._progress_total <= 0 or self._progress_current <= total:
+                self._progress_total = total
+        if current is not None and current >= 0:
+            self._progress_current = max(int(current), self._progress_current)
+
+        if self._progress_total <= 0:
+            if self._progress_running:
+                self.progress_bar.setRange(0, 0)
+                self.progress_bar.setFormat("运行中")
+                if label:
+                    self.progress_label.setText(label)
+            return
+
+        current_value = min(self._progress_current, self._progress_total)
+        percent = current_value / self._progress_total * 100
+        self.progress_bar.setRange(0, self._progress_total)
+        self.progress_bar.setValue(current_value)
+        self.progress_bar.setFormat(f"{current_value}/{self._progress_total} ({percent:.1f}%)")
+        if label:
+            self.progress_label.setText(label)
+        else:
+            self.progress_label.setText(f"抓取进度：已处理 {current_value} / {self._progress_total}")
+
+    def _update_task_progress_from_log(self, line):
+        if not self._progress_running or not line:
+            return
+
+        text = str(line)
+        total = self._extract_progress_total(text)
+        current, current_total = self._extract_progress_current(text)
+        if current_total:
+            total = current_total
+
+        if total:
+            self._set_task_progress(total=total, label=f"已识别本轮总数：{total}")
+        if current is not None:
+            self._set_task_progress(current=current, label=f"抓取进度：已处理 {current} / {self._progress_total or '?'}")
+
+    def _extract_progress_total(self, text):
+        patterns = (
+            r"本轮处理\s*[=：]\s*(\d+)\s*位",
+            r"Douyin followings ready\s*\|\s*rows\s*=\s*(\d+)",
+            r"Douyin analysis start\s*\|.*?cached_followings\s*=\s*(\d+)",
+            r"关注列表准备完成\s*\|.*?本轮处理\s*=\s*(\d+)\s*位",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def _extract_progress_current(self, text):
+        paired_patterns = (
+            r"获取B站关注列表\s*\((\d+)\s*/\s*(\d+)\)",
+            r"执行抖音取消关注\s*\((\d+)\s*/\s*(\d+)\)",
+        )
+        for pattern in paired_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+
+        current_patterns = (
+            r"已处理博主\s*[:：]\s*(\d+)",
+            r"已处理\s*(\d+)\s*位博主",
+            r"已安全保存到本地\s*[:：]\s*已处理\s*(\d+)\s*位博主",
+            r"抓取抖音关注列表\s*\|\s*已获取\s*(\d+)\s*位",
+        )
+        for pattern in current_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1)), None
+        return None, None
+
+    def _finish_task_progress(self, ok, message):
+        self._progress_running = False
+        if ok:
+            if self._progress_total > 0:
+                final_value = self._progress_total
+                if message.startswith("已终止运行"):
+                    final_value = min(self._progress_current, self._progress_total)
+                self.progress_bar.setRange(0, self._progress_total)
+                self.progress_bar.setValue(final_value)
+                percent = final_value / self._progress_total * 100 if self._progress_total else 0
+                self.progress_bar.setFormat(f"{final_value}/{self._progress_total} ({percent:.1f}%)")
+            else:
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(100)
+                self.progress_bar.setFormat("完成")
+            self.progress_label.setText(message)
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("失败")
+            self.progress_label.setText(f"任务失败：{message}")
 
     def _on_done(self, ok, message):
         self.start_button.setEnabled(True)
@@ -1641,6 +2092,7 @@ class MainWindow(QMainWindow):
         else:
             self.stop_button.setText("终止运行")
             self.stop_button.setStyleSheet("")
+        self._finish_task_progress(ok, message)
         if ok:
             self._append_log("-" * 60)
             self._append_log(message)

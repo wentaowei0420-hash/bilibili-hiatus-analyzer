@@ -63,6 +63,9 @@ def show_platform_menu():
     table.add_row("5", "B站 UID 全量抓取", "B站分析表", "按 txt 名单抓指定 UID，并只上传 UID 分析结果")
     table.add_row("6", "抖音 UID 全量抓取", "抖音分析表", "按 txt 名单抓指定 UID，并只上传 UID 分析结果")
     table.add_row("7", "导出抖音高赞视频", "本地 CSV", "从缓存筛选点赞数大于 10000 的唯一视频")
+    table.add_row("8", "抖音视频评分", "视频评分表", "基于本地缓存生成视频评分")
+    table.add_row("9", "抖音UP主评分", "UP主评分表", "基于视频评分和UP主数据生成UP评分")
+    table.add_row("10", "导出抖音精简表", "精简CSV", "导出UP主总表、视频总表、诊断总表")
     console.print(table)
     console.print()
 
@@ -110,8 +113,8 @@ def show_run_panel(title: str, lines, border_style: str = "green"):
 def prompt_platform_choice():
     show_platform_menu()
     while True:
-        choice = input("请输入平台编号 (1/2/3/4/5/6/7): ").strip()
-        if choice in {"1", "2", "3", "4", "5", "6", "7"}:
+        choice = input("请输入平台编号 (1/2/3/4/5/6/7/8/9/10): ").strip()
+        if choice in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             return choice
         get_console().print(
             create_summary_panel(
@@ -245,6 +248,24 @@ def run_douyin_high_like_export():
     run_export_high_like_videos_from_cache(threshold=10000)
 
 
+def run_douyin_video_score():
+    from douyin_analyzer.app import run_score_videos_from_cache
+
+    run_score_videos_from_cache()
+
+
+def run_douyin_creator_score():
+    from douyin_analyzer.app import run_score_creators_from_cache
+
+    run_score_creators_from_cache()
+
+
+def run_douyin_compact_export():
+    from douyin_analyzer.app import run_export_compact_tables_from_cache
+
+    run_export_compact_tables_from_cache(high_like_threshold=10000)
+
+
 def main():
     platform_choice = prompt_platform_choice()
 
@@ -310,6 +331,21 @@ def main():
             border_style="yellow",
         )
         run_douyin_high_like_export()
+        return
+
+    if platform_choice == "8":
+        show_run_panel("抖音视频评分", ["数据来源: 本地 SQLite 缓存", "输出: douyin_video_scores.csv / video_score_current"])
+        run_douyin_video_score()
+        return
+
+    if platform_choice == "9":
+        show_run_panel("抖音UP主评分", ["数据来源: 本地 SQLite 缓存与视频评分表", "若缺少视频评分，会先自动生成视频评分。"])
+        run_douyin_creator_score()
+        return
+
+    if platform_choice == "10":
+        show_run_panel("导出抖音精简表", ["输出: UP主总表、视频总表、诊断总表", "高赞标记已合并到视频总表。"])
+        run_douyin_compact_export()
         return
 
     action_choice = prompt_action_choice()

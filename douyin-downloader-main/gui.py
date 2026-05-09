@@ -37,6 +37,7 @@ class HighLikeDownloaderGUI:
         self.active_csv_path = ""
         self.active_failed_csv_path = ""
         self.active_config_path = ""
+        self.active_download_path = ""
         self.active_batch_count = 1
         self.active_skip_failed = False
         self.active_filename_template = ""
@@ -44,6 +45,9 @@ class HighLikeDownloaderGUI:
         self.csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_CSV))
         self.failed_csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_FAILED_CSV))
         self.config_path = tk.StringVar(value=str(PROJECT_ROOT / "config.yml"))
+        self.download_path = tk.StringVar(
+            value=self._load_config_download_path(str(PROJECT_ROOT / "config.yml"))
+        )
         self.batch_count = tk.IntVar(value=20)
         self.skip_failed_records = tk.BooleanVar(value=False)
         self.filename_template = tk.StringVar(value="{date}_{title}_{aweme_id}")
@@ -72,6 +76,7 @@ class HighLikeDownloaderGUI:
         self._path_row(paths, "视频 CSV", self.csv_path, self._choose_csv, 0)
         self._path_row(paths, "失败 CSV", self.failed_csv_path, self._choose_failed_csv, 1)
         self._path_row(paths, "配置文件", self.config_path, self._choose_config, 2)
+        self._path_row(paths, "下载目录", self.download_path, self._choose_download_dir, 3)
 
         controls = ttk.Frame(outer)
         controls.pack(fill=tk.X, pady=(10, 0))
@@ -168,6 +173,21 @@ class HighLikeDownloaderGUI:
         ttk.Button(parent, text="选择", command=command).grid(row=row, column=2, pady=4)
         parent.columnconfigure(1, weight=1)
 
+    def _load_config_download_path(self, config_path: str) -> str:
+        try:
+            config = ConfigLoader(config_path)
+            configured_path = config.get("path", "./Downloaded/")
+        except Exception:
+            configured_path = "./Downloaded/"
+        return str(self._resolve_download_path(configured_path))
+
+    @staticmethod
+    def _resolve_download_path(path_value: str) -> Path:
+        path = Path(str(path_value or "./Downloaded/")).expanduser()
+        if path.is_absolute():
+            return path
+        return PROJECT_ROOT / path
+
     def _choose_csv(self):
         path = filedialog.askopenfilename(
             title="选择视频 CSV",
@@ -192,6 +212,17 @@ class HighLikeDownloaderGUI:
         )
         if path:
             self.config_path.set(path)
+            self.download_path.set(self._load_config_download_path(path))
+
+    def _choose_download_dir(self):
+        current = self._resolve_download_path(self.download_path.get())
+        initial_dir = current if current.exists() else current.parent
+        path = filedialog.askdirectory(
+            title="选择下载输出目录",
+            initialdir=str(initial_dir if initial_dir.exists() else PROJECT_ROOT),
+        )
+        if path:
+            self.download_path.set(path)
 
     def refresh_stats(self):
         if self._is_busy():
@@ -232,6 +263,7 @@ class HighLikeDownloaderGUI:
         self.active_csv_path = self.csv_path.get()
         self.active_failed_csv_path = self.failed_csv_path.get()
         self.active_config_path = self.config_path.get()
+        self.active_download_path = self.download_path.get().strip()
         self.active_batch_count = max(int(self.batch_count.get()), 1)
         self.active_skip_failed = bool(self.skip_failed_records.get())
         self.active_filename_template = self.filename_template.get().strip()
@@ -393,6 +425,8 @@ class HighLikeDownloaderGUI:
         return database
 
     def _apply_runtime_config(self, config: ConfigLoader) -> None:
+        if self.active_download_path:
+            config.update(path=str(self._resolve_download_path(self.active_download_path)))
         if self.active_filename_template:
             config.update(filename_template=self.active_filename_template)
 

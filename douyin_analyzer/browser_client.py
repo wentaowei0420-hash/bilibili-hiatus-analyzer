@@ -928,7 +928,35 @@ class DouyinBrowserClient:
                             actual_count=len(videos),
                             no_more_marker_seen=no_more_marker_seen,
                         )
-                    if expected_video_count > 0 and len(videos) != expected_video_count:
+                    if expected_video_count > 0 and len(videos) > expected_video_count:
+                        user["aweme_count"] = len(videos)
+                        latest_video = videos[0] if videos else None
+                        if latest_video:
+                            user["latest_publish_timestamp"] = normalize_timestamp(
+                                latest_video.get("publish_timestamp")
+                            )
+                        logger.info(
+                            "Douyin full fetch accepted count newer than profile | uid={} | profile_count={} | actual_count={}",
+                            user.get("sec_uid"),
+                            expected_video_count,
+                            len(videos),
+                        )
+                    elif expected_video_count > 0 and 0 <= expected_video_count - len(videos) <= 10:
+                        if len(videos) != expected_video_count:
+                            user["aweme_count"] = len(videos)
+                            latest_video = videos[0] if videos else None
+                            if latest_video:
+                                user["latest_publish_timestamp"] = normalize_timestamp(
+                                    latest_video.get("publish_timestamp")
+                                )
+                            logger.info(
+                                "Douyin full fetch accepted minor count mismatch | uid={} | profile_count={} | actual_count={} | delta={}",
+                                user.get("sec_uid"),
+                                expected_video_count,
+                                len(videos),
+                                expected_video_count - len(videos),
+                            )
+                    elif expected_video_count > 0 and len(videos) < expected_video_count:
                         raise DouyinFullFetchValidationError(
                             f"抖音全量抓取作品数量校验失败：主页显示作品 {expected_video_count} 个，"
                             f"实际抓取到 {len(videos)} 个。"

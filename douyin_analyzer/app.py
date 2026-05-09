@@ -902,6 +902,72 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     return output_path
 
 
+def run_score_videos_from_cache():
+    config = load_analyzer_config()
+    setup_logging(config.log_dir, "douyin_video_scoring")
+    from .video_scoring import run_douyin_video_scoring
+
+    return run_douyin_video_scoring(config)
+
+
+def run_score_creators_from_cache():
+    config = load_analyzer_config()
+    setup_logging(config.log_dir, "douyin_creator_scoring")
+    if _sqlite_table_count(config.export_store_db, "video_score_current") <= 0:
+        from .video_scoring import run_douyin_video_scoring
+
+        run_douyin_video_scoring(config)
+    from .creator_scoring import run_douyin_creator_scoring
+
+    return run_douyin_creator_scoring(config)
+
+
+def run_export_compact_tables_from_cache(high_like_threshold=10000):
+    config = load_analyzer_config()
+    setup_logging(config.log_dir, "douyin_compact_export")
+    if _sqlite_table_count(config.export_store_db, "video_score_current") <= 0:
+        from .video_scoring import run_douyin_video_scoring
+
+        run_douyin_video_scoring(config)
+    if _sqlite_table_count(config.export_store_db, "creator_score_current") <= 0:
+        from .creator_scoring import run_douyin_creator_scoring
+
+        run_douyin_creator_scoring(config)
+    from .compact_exports import run_douyin_compact_exports
+
+    return run_douyin_compact_exports(config, high_like_threshold=high_like_threshold)
+
+
+def run_prune_export_snapshots(vacuum=False):
+    config = load_analyzer_config()
+    from common.export_store import prune_disabled_snapshot_history
+
+    deleted = prune_disabled_snapshot_history(config.export_store_db)
+    if vacuum:
+        import sqlite3
+
+        with sqlite3.connect(config.export_store_db) as conn:
+            conn.execute("VACUUM")
+    return deleted
+
+
+def _sqlite_table_count(db_path, table_name):
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return 0
+        return int(conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0] or 0)
+
+
 def _load_downloader_aweme_status(db_path, aweme_ids):
     db_path = Path(db_path) if db_path else None
     aweme_ids = sorted({str(item or "").strip() for item in (aweme_ids or []) if str(item or "").strip()})
