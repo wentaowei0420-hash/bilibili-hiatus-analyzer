@@ -18,8 +18,10 @@ from cli.main import (
     download_url,
 )
 from config import ConfigLoader
+from core.downloader_base import _FilenameTemplateValues, _normalize_filename_template
 from storage import Database
 from utils.logger import set_console_log_level
+from utils.validators import sanitize_filename
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -42,6 +44,7 @@ class HighLikeDownloaderGUI:
         self.active_batch_count = 1
         self.active_skip_failed = False
         self.active_filename_template = ""
+        self.preview_after_id = None
 
         self.csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_CSV))
         self.failed_csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_FAILED_CSV))
@@ -51,7 +54,8 @@ class HighLikeDownloaderGUI:
         )
         self.batch_count = tk.IntVar(value=20)
         self.skip_failed_records = tk.BooleanVar(value=False)
-        self.filename_template = tk.StringVar(value="{date}_{title}_{aweme_id}")
+        self.saved_filename_template = self._load_config_filename_template(str(PROJECT_ROOT / "config.yml"))
+        self.filename_template = tk.StringVar(value=self.saved_filename_template)
 
         self.total_count = tk.StringVar(value="0")
         self.completed_count = tk.StringVar(value="0")
@@ -63,11 +67,16 @@ class HighLikeDownloaderGUI:
         self.failed_count = tk.StringVar(value="0")
         self.skipped_count = tk.StringVar(value="0")
         self.status = tk.StringVar(value="请选择 CSV 后点击刷新统计")
+        self.filename_preview = tk.StringVar(value="命名示例：请选择 CSV")
 
         self._build_ui()
+        self.filename_template.trace_add("write", self._mark_filename_template_dirty)
+        self.csv_path.trace_add("write", self._schedule_filename_preview_update)
+        self.root.after(0, self._update_filename_preview)
         self.root.after(150, self._drain_events)
 
     def _build_ui(self):
+        self._configure_styles()
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill=tk.BOTH, expand=True)
 
@@ -125,10 +134,35 @@ class HighLikeDownloaderGUI:
             expand=True,
             padx=(8, 8),
         )
+        self.save_filename_button = ttk.Button(
+            filename_frame,
+            text="保存命名设置",
+            command=self.save_filename_template,
+        )
+        self.save_filename_button.pack(side=tk.LEFT, padx=(0, 8))
+        available_fields = (
+            "可用字段：等级/视频等级、UP主/UP主姓名/作者、视频标题/标题、点赞数、"
+            "发布时间/发表时间/发布日期、视频ID/作品ID；英文：{grade} {video_grade} {final_grade} {level} "
+            "{author} {author_name} {author_id} {uid} {title} {desc} {like_count} "
+            "{digg_count} {comment_count} {share_count} {collect_count} {date} "
+            "{create_time} {aweme_id}。说明：视频ID会始终保留用于本地去重；写入模板可控制位置，不写则自动追加到末尾。"
+        )
         ttk.Label(
             filename_frame,
-            text="可用：{date} {title} {author} {aweme_id} {like_count}",
+            text=available_fields,
+            wraplength=520,
+            justify=tk.LEFT,
         ).pack(side=tk.LEFT)
+
+        preview_frame = ttk.Frame(outer)
+        preview_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(preview_frame, text="命名效果").pack(side=tk.LEFT)
+        ttk.Label(
+            preview_frame,
+            textvariable=self.filename_preview,
+            foreground="#4b5563",
+            wraplength=720,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
         stats = ttk.LabelFrame(outer, text="下载统计", padding=10)
         stats.pack(fill=tk.X, pady=(10, 0))
@@ -168,6 +202,15 @@ class HighLikeDownloaderGUI:
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
 
+    def _configure_styles(self):
+        style = ttk.Style(self.root)
+        style.configure("Busy.TButton", foreground="white", background="#2563eb")
+        style.map(
+            "Busy.TButton",
+            foreground=[("active", "white"), ("!disabled", "white")],
+            background=[("active", "#1d4ed8"), ("!disabled", "#2563eb")],
+        )
+
     def _path_row(self, parent, label: str, variable: tk.StringVar, command, row: int):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(parent, textvariable=variable).grid(
@@ -187,6 +230,16 @@ class HighLikeDownloaderGUI:
         except Exception:
             configured_path = "./Downloaded/"
         return str(self._resolve_download_path(configured_path))
+
+    def _load_config_filename_template(self, config_path: str) -> str:
+        try:
+            config = ConfigLoader(config_path)
+            template = str(config.get("filename_template", "") or "").strip()
+            if template:
+                return template
+        except Exception:
+            pass
+        return "等级_UP主_视频标题_点赞数"
 
     @staticmethod
     def _resolve_download_path(path_value: str) -> Path:
@@ -220,6 +273,9 @@ class HighLikeDownloaderGUI:
         if path:
             self.config_path.set(path)
             self.download_path.set(self._load_config_download_path(path))
+            self.saved_filename_template = self._load_config_filename_template(path)
+            self.filename_template.set(self.saved_filename_template)
+            self._schedule_filename_preview_update()
 
     def _choose_download_dir(self):
         current = self._resolve_download_path(self.download_path.get())
@@ -231,11 +287,185 @@ class HighLikeDownloaderGUI:
         if path:
             self.download_path.set(path)
 
+    def _schedule_filename_preview_update(self, *_args):
+        if self.preview_after_id is not None:
+            try:
+                self.root.after_cancel(self.preview_after_id)
+            except tk.TclError:
+                pass
+        self.preview_after_id = self.root.after(250, self._update_filename_preview)
+
+    def _mark_filename_template_dirty(self, *_args):
+        if self.filename_template.get().strip() != self.saved_filename_template:
+            self.status.set("命名格式已修改，点击“保存命名设置”后生效")
+
+    def save_filename_template(self):
+        template = self.filename_template.get().strip() or "等级_UP主_视频标题_点赞数"
+        config_path = self.config_path.get().strip() or str(PROJECT_ROOT / "config.yml")
+        try:
+            config = ConfigLoader(config_path)
+            config.update(filename_template=template)
+            config.save(config_path)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"命名设置保存失败：{exc}")
+            return
+
+        self.saved_filename_template = template
+        self.filename_template.set(template)
+        self.status.set("命名设置已保存，后续将自动复用")
+        self._log(f"命名设置已保存：{template}")
+        self._update_filename_preview()
+
+    def _update_filename_preview(self):
+        self.preview_after_id = None
+        try:
+            self.filename_preview.set(self._build_filename_preview())
+        except Exception as exc:
+            self.filename_preview.set(f"命名示例生成失败：{exc}")
+
+    def _build_filename_preview(self) -> str:
+        config = ConfigLoader(self.config_path.get())
+        db_path = self._resolve_database_path(config)
+        row = {}
+        csv_first_row = None
+        csv_path = self.csv_path.get().strip()
+        if csv_path:
+            try:
+                rows = _load_high_like_video_rows(csv_path)
+                csv_first_row = rows[0] if rows else None
+            except Exception:
+                csv_first_row = None
+
+        if csv_first_row:
+            aweme_id = str(csv_first_row.get("aweme_id") or csv_first_row.get("视频ID") or "").strip()
+            row = self._lookup_video_context(db_path, aweme_id) or {}
+            row = {**csv_first_row, **row} if row else csv_first_row
+        else:
+            row = self._lookup_video_context(db_path, "") or {}
+
+        if not row:
+            return "命名示例：SQLite 暂无视频评分数据，请先生成视频评分或选择 CSV"
+
+        try:
+            row = self._filename_context_for_row(row, config)
+        except Exception:
+            row = self._filename_context_for_row(row)
+        aweme_id = str(row.get("aweme_id") or "").strip()
+        template = self.saved_filename_template or "等级_UP主_视频标题_点赞数"
+        values = {
+            "date": row.get("date") or row.get("发布时间") or "",
+            "title": row.get("video_title") or "",
+            "desc": row.get("video_title") or "",
+            "aweme_id": aweme_id,
+            "author": row.get("uploader_name") or "",
+            "author_name": row.get("uploader_name") or "",
+            "like_count": row.get("like_count") or "",
+            "digg_count": row.get("like_count") or "",
+            "grade": row.get("video_grade") or "",
+            "level": row.get("video_grade") or "",
+            "video_grade": row.get("video_grade") or "",
+            "final_grade": row.get("video_grade") or "",
+            "等级": row.get("video_grade") or "",
+            "视频等级": row.get("video_grade") or "",
+            "UP主": row.get("uploader_name") or "",
+            "UP主姓名": row.get("uploader_name") or "",
+            "作者": row.get("uploader_name") or "",
+            "视频标题": row.get("video_title") or "",
+            "标题": row.get("video_title") or "",
+            "点赞数": row.get("like_count") or "",
+            "视频ID": aweme_id,
+            "视频id": aweme_id,
+            "视频Id": aweme_id,
+            "作品ID": aweme_id,
+            "作品id": aweme_id,
+            "发布时间": row.get("发布时间") or row.get("date") or "",
+            "发表时间": row.get("发表时间") or row.get("发布时间") or row.get("date") or "",
+            "发布日期": row.get("发布日期") or row.get("发布时间") or row.get("date") or "",
+            "create_time": row.get("create_time") or "",
+        }
+        raw_name = _normalize_filename_template(template).format_map(_FilenameTemplateValues(values))
+        safe_name = sanitize_filename(raw_name)
+        if aweme_id and aweme_id not in safe_name:
+            safe_name = sanitize_filename(f"{safe_name}_{aweme_id}")
+        return f"命名示例：{safe_name}.mp4"
+
+    def _filename_context_for_row(self, row: dict[str, Any], config: ConfigLoader | None = None) -> dict[str, Any]:
+        context = dict(row)
+        if config is not None:
+            aweme_id = str(context.get("aweme_id") or context.get("视频ID") or "").strip()
+            sql_context = self._lookup_video_context(self._resolve_database_path(config), aweme_id)
+            if sql_context:
+                context = {**context, **sql_context}
+        return context
+
+    @staticmethod
+    def _lookup_video_context(db_path: Path, aweme_id: str) -> dict[str, Any]:
+        if not db_path.exists():
+            return {}
+
+        try:
+            with sqlite3.connect(str(db_path), timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='video_score_current'"
+                ).fetchone()
+                if not exists:
+                    return {}
+
+                columns = [row[1] for row in conn.execute('PRAGMA table_info("video_score_current")').fetchall()]
+                id_column = next((name for name in ("视频ID", "aweme_id", "video_id") if name in columns), None)
+                if aweme_id and id_column:
+                    result = conn.execute(
+                        f'SELECT * FROM "video_score_current" WHERE "{id_column}" = ? LIMIT 1',
+                        (aweme_id,),
+                    ).fetchone()
+                else:
+                    order_column = "点赞数" if "点赞数" in columns else (id_column or columns[0])
+                    result = conn.execute(
+                        f'SELECT * FROM "video_score_current" ORDER BY CAST("{order_column}" AS INTEGER) DESC LIMIT 1'
+                    ).fetchone()
+                if not result:
+                    return {}
+
+                row = dict(result)
+                video_id = str(row.get("视频ID") or row.get("aweme_id") or row.get("video_id") or "").strip()
+                publish_time = str(row.get("发布日期") or row.get("发布时间") or row.get("date") or "").strip()
+                publish_date = publish_time.split(" ", 1)[0] if publish_time else ""
+                return {
+                    **row,
+                    "aweme_id": video_id,
+                    "video_id": video_id,
+                    "视频ID": video_id,
+                    "视频id": video_id,
+                    "视频Id": video_id,
+                    "作品ID": video_id,
+                    "作品id": video_id,
+                    "video_url": row.get("视频链接") or row.get("video_url") or "",
+                    "uploader_name": row.get("UP主姓名") or row.get("UP主") or row.get("uploader_name") or "",
+                    "UP主": row.get("UP主姓名") or row.get("UP主") or row.get("uploader_name") or "",
+                    "UP主姓名": row.get("UP主姓名") or row.get("UP主") or row.get("uploader_name") or "",
+                    "video_title": row.get("视频标题") or row.get("video_title") or row.get("title") or "",
+                    "视频标题": row.get("视频标题") or row.get("video_title") or row.get("title") or "",
+                    "like_count": row.get("点赞数") or row.get("like_count") or row.get("digg_count") or "",
+                    "点赞数": row.get("点赞数") or row.get("like_count") or row.get("digg_count") or "",
+                    "video_grade": row.get("视频最终等级") or row.get("视频等级") or row.get("final_grade") or "",
+                    "视频等级": row.get("视频最终等级") or row.get("视频等级") or row.get("final_grade") or "",
+                    "等级": row.get("视频最终等级") or row.get("视频等级") or row.get("final_grade") or "",
+                    "发布时间": publish_time,
+                    "发表时间": publish_time,
+                    "发布日期": publish_time,
+                    "date": publish_date,
+                    "create_time": row.get("发布时间戳") or row.get("create_time") or "",
+                }
+        except sqlite3.Error:
+            return {}
+
     def refresh_stats(self):
         if self._is_busy():
             return
         self._snapshot_inputs()
-        self._set_busy(True, allow_stop=False)
+        self.status.set("正在刷新统计...")
+        self._set_busy(True, allow_stop=False, refresh_text="刷新中...")
         self._run_worker(self._refresh_stats_worker)
 
     def start_download(self):
@@ -244,7 +474,8 @@ class HighLikeDownloaderGUI:
         self._snapshot_inputs()
         self.stop_requested.clear()
         self._reset_run_stats()
-        self._set_busy(True, allow_stop=True)
+        self.status.set("正在准备下载...")
+        self._set_busy(True, allow_stop=True, refresh_text="下载中...")
         self._run_worker(self._download_worker)
 
     def request_stop(self):
@@ -300,12 +531,16 @@ class HighLikeDownloaderGUI:
     def _is_busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
 
-    def _set_busy(self, busy: bool, allow_stop: bool = False):
+    def _set_busy(self, busy: bool, allow_stop: bool = False, refresh_text: str = "运行中..."):
         state = tk.DISABLED if busy else tk.NORMAL
-        self.refresh_button.configure(state=state)
+        if busy:
+            self.refresh_button.configure(state=tk.NORMAL, text=refresh_text, style="Busy.TButton")
+        else:
+            self.refresh_button.configure(state=tk.NORMAL, text="刷新统计", style="TButton")
         self.start_button.configure(state=state)
         self.skip_failed_button.configure(state=state)
         self.reset_button.configure(state=state)
+        self.save_filename_button.configure(state=state)
         self.stop_button.configure(state=tk.NORMAL if allow_stop else tk.DISABLED)
 
     def _run_worker(self, target):
@@ -319,7 +554,7 @@ class HighLikeDownloaderGUI:
         self.active_download_path = self.download_path.get().strip()
         self.active_batch_count = max(int(self.batch_count.get()), 1)
         self.active_skip_failed = bool(self.skip_failed_records.get())
-        self.active_filename_template = self.filename_template.get().strip()
+        self.active_filename_template = self.saved_filename_template
 
     def _refresh_stats_worker(self):
         try:
@@ -430,6 +665,7 @@ class HighLikeDownloaderGUI:
                     continue
 
                 self.events.put(("current", f"正在下载 {index}/{len(selected_rows)}：{aweme_id}"))
+                config.update(filename_context=self._filename_context_for_row(row, config))
                 result = await download_url(url, config, cookie_manager, database, progress_reporter=None)
                 if result and result.success > 0:
                     success += result.success

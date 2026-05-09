@@ -9,7 +9,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "start_time": "",
     "end_time": "",
     "folderstyle": True,
-    "filename_template": "{date}_{title}_{aweme_id}",
+    "filename_template": "等级_UP主_视频标题_点赞数",
     "mode": ["post"],
     "number": {
         "post": 0,

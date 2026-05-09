@@ -738,6 +738,7 @@ class DouyinStatsDialog(QDialog):
         self.refresh_stats()
 
     def refresh_stats(self):
+        _set_button_busy(self.refresh_button, "刷新中...")
         try:
             from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
             from douyin_analyzer.cache import CacheStore
@@ -832,6 +833,8 @@ class DouyinStatsDialog(QDialog):
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
+        finally:
+            _restore_button_busy(self.refresh_button)
 
 
 class DouyinStatsDialogV2(QDialog):
@@ -984,6 +987,7 @@ class DouyinStatsDialogV2(QDialog):
         return value <= upper
 
     def refresh_stats(self):
+        _set_button_busy(self.refresh_button, "刷新中...")
         try:
             from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
             from douyin_analyzer.cache import CacheStore
@@ -1109,9 +1113,44 @@ class DouyinStatsDialogV2(QDialog):
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
+        finally:
+            _restore_button_busy(self.refresh_button)
 
 
 SORT_ROLE = Qt.UserRole + 1
+BUSY_BUTTON_STYLE = (
+    "QPushButton { background-color: #2563eb; color: white; font-weight: 700; "
+    "border: 1px solid #1d4ed8; border-radius: 4px; }"
+    "QPushButton:disabled { background-color: #2563eb; color: white; font-weight: 700; "
+    "border: 1px solid #1d4ed8; border-radius: 4px; }"
+)
+
+
+def _set_button_busy(button, text="刷新中..."):
+    if button is None:
+        return
+    if not button.property("_busy_state_saved"):
+        button.setProperty("_busy_old_text", button.text())
+        button.setProperty("_busy_old_style", button.styleSheet())
+        button.setProperty("_busy_old_enabled", button.isEnabled())
+        button.setProperty("_busy_state_saved", True)
+    button.setText(text)
+    button.setEnabled(False)
+    button.setStyleSheet(BUSY_BUTTON_STYLE)
+    QApplication.processEvents()
+
+
+def _restore_button_busy(button):
+    if button is None or not button.property("_busy_state_saved"):
+        return
+    button.setText(button.property("_busy_old_text") or "")
+    button.setStyleSheet(button.property("_busy_old_style") or "")
+    button.setEnabled(bool(button.property("_busy_old_enabled")))
+    button.setProperty("_busy_old_text", None)
+    button.setProperty("_busy_old_style", None)
+    button.setProperty("_busy_old_enabled", None)
+    button.setProperty("_busy_state_saved", False)
+    QApplication.processEvents()
 
 
 class SortableTableWidgetItem(QTableWidgetItem):
@@ -1463,16 +1502,14 @@ class DouyinRatingOverviewDialog(QDialog):
     def refresh_scores(self):
         if self.refresh_worker and self.refresh_worker.isRunning():
             return
-        self.refresh_button.setEnabled(False)
-        self.refresh_button.setText("刷新中...")
+        _set_button_busy(self.refresh_button, "刷新中...")
         self.summary_label.setText("正在按当前 full 缓存重新生成 UP 主评分，请稍候...")
         self.refresh_worker = RatingRefreshThread(self)
         self.refresh_worker.done.connect(self._on_scores_refreshed)
         self.refresh_worker.start()
 
     def _on_scores_refreshed(self, ok, message):
-        self.refresh_button.setEnabled(True)
-        self.refresh_button.setText("刷新")
+        _restore_button_busy(self.refresh_button)
         self.refresh_data()
         if not ok:
             QMessageBox.warning(self, "评分刷新失败", message)
@@ -1648,6 +1685,307 @@ class DouyinRatingOverviewDialog(QDialog):
         for grade in self.GRADE_ORDER:
             self.summary_cells[(key, grade)].setText(str(int((counts or {}).get(grade, 0))))
         self.summary_cells[(key, "low_confidence")].setText(str(low_confidence))
+
+
+class DouyinArchiveDialog(QDialog):
+    CANDIDATE_COLUMNS = [
+        ("UP主", "uploader_name"),
+        ("UP主UID", "uploader_id"),
+        ("未更新天数", "inactive_days"),
+        ("最后发布时间", "latest_publish_time"),
+        ("等级", "final_grade"),
+        ("分数", "final_score"),
+        ("置信度", "confidence"),
+        ("粉丝数", "follower_count"),
+        ("作品数", "published_video_count"),
+        ("缓存视频数", "cached_video_count"),
+        ("最近抓取模式", "last_fetch_mode"),
+        ("UP主主页链接", "homepage_url"),
+    ]
+    ARCHIVED_COLUMNS = [
+        ("UP主", "uploader_name"),
+        ("UP主UID", "uploader_id"),
+        ("状态", "archive_status"),
+        ("未更新天数", "inactive_days"),
+        ("最后发布时间", "latest_publish_time"),
+        ("等级", "final_grade"),
+        ("分数", "final_score"),
+        ("归档时间", "archived_at"),
+        ("归档原因", "archive_reason"),
+        ("UP主主页链接", "homepage_url"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("抖音归档管理")
+        self.resize(1280, 780)
+        self.setMinimumSize(1080, 680)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QTabBar::tab {
+                font-size: 15px;
+                padding: 9px 22px;
+                min-width: 120px;
+                min-height: 28px;
+            }
+            QTableWidget {
+                font-size: 15px;
+                gridline-color: #d8dde6;
+                alternate-background-color: #f7f8fb;
+                selection-background-color: #dbeafe;
+                selection-color: #111827;
+            }
+            QHeaderView::section {
+                font-size: 15px;
+                font-weight: 700;
+                padding: 8px 10px;
+                background: #f1f5f9;
+                border: 1px solid #d8dde6;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 7px 16px;
+                min-height: 30px;
+            }
+            """
+        )
+
+        from douyin_analyzer.config import load_analyzer_config
+
+        self.config = load_analyzer_config()
+        self.db_path = Path(self.config.export_store_db)
+        self.candidates = []
+        self.archived_rows = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        self.summary_label = QLabel(
+            "归档只记录本地状态，不删除缓存、CSV、评分或视频数据。active 归档对象会在后续主流程中默认跳过。"
+        )
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(
+            "padding: 10px 12px; color: #263241; background: #f8fafc; "
+            "border: 1px solid #d8dde6; border-radius: 8px; font-size: 14px;"
+        )
+        layout.addWidget(self.summary_label)
+
+        filter_group = QGroupBox("筛选条件")
+        filter_row = QHBoxLayout(filter_group)
+        filter_row.setContentsMargins(14, 16, 14, 12)
+        filter_row.setSpacing(10)
+        filter_row.addWidget(QLabel("未更新天数 ≥"))
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(1, 10000)
+        self.threshold_spin.setValue(100)
+        self.threshold_spin.setMaximumWidth(120)
+        filter_row.addWidget(self.threshold_spin)
+        filter_row.addWidget(QLabel("仅展示已有 full 缓存/完整数据，且未手动 S/A 保留、未 active 归档的 UP。"))
+        filter_row.addStretch(1)
+        self.refresh_button = QPushButton("刷新候选")
+        self.refresh_button.clicked.connect(self.refresh_data)
+        filter_row.addWidget(self.refresh_button)
+        layout.addWidget(filter_group)
+
+        self.tabs = QTabWidget()
+        self.candidate_table = self._make_table([label for label, _ in self.CANDIDATE_COLUMNS])
+        self.archived_table = self._make_table([label for label, _ in self.ARCHIVED_COLUMNS])
+        self.tabs.addTab(self.candidate_table, "候选归档")
+        self.tabs.addTab(self.archived_table, "已归档/已恢复")
+        layout.addWidget(self.tabs, stretch=1)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        self.archive_selected_button = QPushButton("归档选中")
+        self.archive_all_button = QPushButton("归档全部候选")
+        self.restore_selected_button = QPushButton("恢复选中")
+        self.close_button = QPushButton("关闭")
+        self.archive_selected_button.clicked.connect(self.archive_selected)
+        self.archive_all_button.clicked.connect(self.archive_all)
+        self.restore_selected_button.clicked.connect(self.restore_selected)
+        self.close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(self.archive_selected_button)
+        button_row.addWidget(self.archive_all_button)
+        button_row.addWidget(self.restore_selected_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+        self.refresh_data()
+
+    def _make_table(self, headers):
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.ExtendedSelection)
+        table.setSortingEnabled(True)
+        table.setWordWrap(False)
+        table.itemClicked.connect(self._open_link_item)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(42)
+        table.horizontalHeader().setMinimumHeight(42)
+        for column, header in enumerate(headers):
+            if header in {"UP主主页链接", "UP主UID"}:
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+            else:
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        return table
+
+    @staticmethod
+    def _fmt(value):
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.2f}"
+        return str(value)
+
+    @staticmethod
+    def _sort_value(header_text, value):
+        text = "" if value is None else str(value).strip()
+        if header_text == "等级":
+            return {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}.get(text.upper(), 0)
+        if header_text == "置信度":
+            return {"很高": 5, "高": 4, "中": 3, "低": 2, "很低": 1}.get(text, 0)
+        if header_text in {"未更新天数", "分数", "粉丝数", "作品数", "缓存视频数"}:
+            try:
+                return float(text.replace(",", ""))
+            except ValueError:
+                return -1
+        return text.lower()
+
+    def _populate_table(self, table, columns, rows):
+        table.setSortingEnabled(False)
+        table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            uid = str(row.get("uploader_id") or "").strip()
+            for column_index, (header, key) in enumerate(columns):
+                value = row.get(key, "")
+                text = self._fmt(value)
+                item = SortableTableWidgetItem(text)
+                item.setData(SORT_ROLE, self._sort_value(header, value))
+                item.setData(Qt.UserRole + 1, uid)
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setToolTip(text)
+                if header == "UP主主页链接" and text:
+                    item.setText("打开主页")
+                    item.setData(Qt.UserRole, text)
+                    item.setForeground(Qt.blue)
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                table.setItem(row_index, column_index, item)
+            table.setRowHeight(row_index, 42)
+        table.setSortingEnabled(True)
+
+    def _open_link_item(self, item):
+        url = item.data(Qt.UserRole) if item else ""
+        if url:
+            QDesktopServices.openUrl(QUrl(str(url)))
+
+    def _selected_uids(self, table):
+        rows = table.selectionModel().selectedRows() if table.selectionModel() else []
+        uids = []
+        for model_index in rows:
+            item = table.item(model_index.row(), 0)
+            uid = item.data(Qt.UserRole + 1) if item else ""
+            if uid:
+                uids.append(str(uid))
+        return sorted(set(uids))
+
+    def refresh_data(self):
+        from douyin_analyzer.archive import load_archive_candidates, load_archived_creators
+
+        _set_button_busy(self.refresh_button, "刷新中...")
+        try:
+            self.candidates = load_archive_candidates(
+                self.db_path,
+                inactive_days_threshold=self.threshold_spin.value(),
+            )
+            self.archived_rows = load_archived_creators(self.db_path, active_only=False)
+            self._populate_table(self.candidate_table, self.CANDIDATE_COLUMNS, self.candidates)
+            self._populate_table(self.archived_table, self.ARCHIVED_COLUMNS, self.archived_rows)
+            active_count = sum(1 for row in self.archived_rows if str(row.get("archive_status") or "") == "active")
+            self.summary_label.setText(
+                f"数据库：{self.db_path}\n"
+                f"候选归档：{len(self.candidates)} 位；active 已归档：{active_count} 位；"
+                "归档不会删除任何历史数据，后续主流程会跳过 active 归档对象。"
+            )
+        except Exception as exc:
+            self.summary_label.setText(f"读取归档数据失败：{exc}")
+            self.candidate_table.setRowCount(0)
+            self.archived_table.setRowCount(0)
+        finally:
+            _restore_button_busy(self.refresh_button)
+
+    def _candidate_rows_by_uids(self, uids):
+        wanted = set(uids or [])
+        return [row for row in self.candidates if str(row.get("uploader_id") or "") in wanted]
+
+    def archive_selected(self):
+        uids = self._selected_uids(self.candidate_table)
+        if not uids:
+            QMessageBox.information(self, "请选择候选", "请先在候选归档表中选择要归档的 UP。")
+            return
+        self._archive_rows(self._candidate_rows_by_uids(uids))
+
+    def archive_all(self):
+        if not self.candidates:
+            QMessageBox.information(self, "没有候选", "当前没有符合条件的归档候选。")
+            return
+        self._archive_rows(list(self.candidates))
+
+    def _archive_rows(self, rows):
+        from douyin_analyzer.archive import archive_creators
+
+        if not rows:
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认归档",
+            f"确认将 {len(rows)} 位长期未更新 UP 标记为 active 归档吗？\n"
+            "这只写入本地 SQLite 归档表，不删除历史数据。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        count = archive_creators(self.db_path, rows)
+        QMessageBox.information(self, "归档完成", f"已归档 {count} 位 UP。")
+        self.refresh_data()
+
+    def restore_selected(self):
+        from douyin_analyzer.archive import restore_creators
+
+        uids = self._selected_uids(self.archived_table)
+        if not uids:
+            QMessageBox.information(self, "请选择归档对象", "请先在已归档列表中选择要恢复的 UP。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认恢复",
+            f"确认恢复 {len(uids)} 位 UP 的归档状态吗？恢复后主流程会重新允许处理这些对象。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        count = restore_creators(self.db_path, uids)
+        QMessageBox.information(self, "恢复完成", f"已恢复 {count} 位 active 归档 UP。")
+        self.refresh_data()
 
 
 class LogCenterDialog(QDialog):
@@ -1934,6 +2272,8 @@ class MainWindow(QMainWindow):
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.rating_overview_button = QPushButton("评分概览")
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
+        self.archive_button = QPushButton("归档管理")
+        self.archive_button.clicked.connect(self._open_archive_manager)
         self.log_center_button = QPushButton("日志中心")
         self.log_center_button.clicked.connect(self._open_log_center)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
@@ -1954,6 +2294,7 @@ class MainWindow(QMainWindow):
         utility_buttons = (
             self.douyin_stats_button,
             self.rating_overview_button,
+            self.archive_button,
             self.log_center_button,
             self.cookie_check_button,
             self.advanced_button,
@@ -2182,6 +2523,10 @@ class MainWindow(QMainWindow):
 
     def _open_rating_overview(self):
         dialog = DouyinRatingOverviewDialog(self)
+        dialog.exec_()
+
+    def _open_archive_manager(self):
+        dialog = DouyinArchiveDialog(self)
         dialog.exec_()
 
     def _open_log_center(self):

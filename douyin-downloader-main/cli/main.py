@@ -106,6 +106,10 @@ def _load_high_like_video_rows(file_path: str) -> list[dict[str, str]]:
             seen.add(key)
             row["aweme_id"] = aweme_id
             row["video_url"] = video_url
+            row["uploader_name"] = _csv_value(row, "UP主", "UP主姓名", "uploader_name", "author")
+            row["video_title"] = _csv_value(row, "视频标题", "video_title", "title")
+            row["like_count"] = _csv_value(row, "点赞数", "like_count", "digg_count")
+            row["video_grade"] = _csv_value(row, "视频等级", "等级", "视频最终等级", "final_grade", "video_grade")
             rows.append(row)
 
     return rows
@@ -121,6 +125,7 @@ def _append_failed_high_like_rows(file_path: str, rows: list[dict[str, Any]]) ->
         "failed_time",
         "failure_reason",
         "UP主",
+        "视频等级",
         "视频ID",
         "视频标题",
         "视频链接",
@@ -177,6 +182,7 @@ async def download_high_like_csv(
             continue
 
         display.start_url(index, len(rows), url)
+        config.update(filename_context=row)
         result = await download_url(
             url,
             config,

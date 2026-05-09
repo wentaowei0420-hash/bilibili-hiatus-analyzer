@@ -715,30 +715,87 @@ class BaseDownloader(ABC):
         aweme_id = str(aweme_data.get("aweme_id") or "")
         author = aweme_data.get("author", {}) or {}
         statistics = aweme_data.get("statistics", {}) or {}
+        filename_context = self.config.get("filename_context") or {}
+        if not isinstance(filename_context, dict):
+            filename_context = {}
         template = (
             self.config.get("filename_template")
             or "{date}_{title}_{aweme_id}"
         )
+        author_value = (
+            _first_filename_value(filename_context, "UP主", "UP主姓名", "uploader_name", "author", "author_name")
+            or author.get("nickname")
+            or author_name
+        )
+        title_value = (
+            _first_filename_value(filename_context, "视频标题", "video_title", "title", "desc")
+            or title
+        )
+        like_value = (
+            _first_filename_value(filename_context, "点赞数", "like_count", "digg_count")
+            or statistics.get("digg_count")
+            or ""
+        )
+        grade_value = (
+            _first_filename_value(filename_context, "视频等级", "等级", "视频最终等级", "final_grade", "video_grade")
+            or aweme_data.get("video_grade")
+            or aweme_data.get("final_grade")
+            or ""
+        )
+        publish_time_value = (
+            _first_filename_value(filename_context, "发表时间", "发布时间", "发布日期", "date")
+            or publish_date
+        )
+        date_value = _first_filename_value(filename_context, "date")
+        if not date_value and publish_time_value:
+            date_value = str(publish_time_value).split(" ", 1)[0]
+        date_value = date_value or publish_date
+        create_time_value = (
+            _first_filename_value(filename_context, "create_time", "发布时间戳")
+            or aweme_data.get("create_time")
+            or ""
+        )
 
         values = {
-            "date": publish_date,
-            "title": title,
-            "desc": title,
+            "date": date_value,
+            "title": title_value,
+            "desc": title_value,
             "aweme_id": aweme_id,
-            "author": author.get("nickname") or author_name,
-            "author_name": author.get("nickname") or author_name,
+            "author": author_value,
+            "author_name": author_value,
             "author_id": author.get("uid") or "",
             "uid": author.get("uid") or "",
-            "create_time": aweme_data.get("create_time") or "",
-            "like_count": statistics.get("digg_count") or "",
-            "digg_count": statistics.get("digg_count") or "",
+            "create_time": create_time_value,
+            "like_count": like_value,
+            "digg_count": like_value,
             "comment_count": statistics.get("comment_count") or "",
             "share_count": statistics.get("share_count") or "",
             "collect_count": statistics.get("collect_count") or "",
+            "grade": grade_value,
+            "level": grade_value,
+            "video_grade": grade_value,
+            "final_grade": grade_value,
+            "等级": grade_value,
+            "视频等级": grade_value,
+            "UP主": author_value,
+            "UP主姓名": author_value,
+            "作者": author_value,
+            "视频标题": title_value,
+            "标题": title_value,
+            "点赞数": like_value,
+            "视频ID": aweme_id,
+            "视频id": aweme_id,
+            "视频Id": aweme_id,
+            "作品ID": aweme_id,
+            "作品id": aweme_id,
+            "发布时间": publish_time_value,
+            "发表时间": publish_time_value,
+            "发布日期": publish_time_value,
         }
+        template = _normalize_filename_template(str(template))
 
         try:
-            raw_name = str(template).format_map(_FilenameTemplateValues(values))
+            raw_name = template.format_map(_FilenameTemplateValues(values))
         except Exception as exc:
             logger.warning(
                 "Invalid filename_template %r, using default template: %s",
@@ -762,3 +819,40 @@ class BaseDownloader(ABC):
 class _FilenameTemplateValues(dict):
     def __missing__(self, key):
         return ""
+
+
+def _first_filename_value(source: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = source.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _normalize_filename_template(template: str) -> str:
+    """Allow Chinese filename templates without braces, e.g. 等级_UP主_视频标题_点赞数."""
+    if "{" in template or "}" in template:
+        return template
+
+    replacements = {
+        "视频等级": "{视频等级}",
+        "UP主姓名": "{UP主姓名}",
+        "视频标题": "{视频标题}",
+        "发布时间": "{发布时间}",
+        "发表时间": "{发表时间}",
+        "发布日期": "{发布日期}",
+        "点赞数": "{点赞数}",
+        "视频ID": "{视频ID}",
+        "视频id": "{视频ID}",
+        "视频Id": "{视频ID}",
+        "作品ID": "{视频ID}",
+        "作品id": "{视频ID}",
+        "aweme_id": "{aweme_id}",
+        "video_id": "{aweme_id}",
+        "等级": "{等级}",
+        "UP主": "{UP主}",
+        "作者": "{作者}",
+        "标题": "{标题}",
+    }
+    pattern = re.compile("|".join(re.escape(token) for token in sorted(replacements, key=len, reverse=True)))
+    return pattern.sub(lambda match: replacements[match.group(0)], template)

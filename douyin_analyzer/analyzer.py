@@ -19,6 +19,7 @@ from .browser_client import (
     DouyinRateLimitError,
     DouyinServiceError,
 )
+from .archive import load_active_archived_uids
 from .exporters import (
     save_all_videos_to_csv,
     save_cache_inventory_to_csv,
@@ -1304,6 +1305,36 @@ class DouyinHiatusAnalyzer:
         progress = self.cache_store.load_progress()
         if progress:
             print(f"♻️  已加载 {len(progress)} 条抖音缓存")
+
+        try:
+            archived_uids = load_active_archived_uids(self.config.export_store_db)
+        except Exception as exc:
+            archived_uids = set()
+            logger.warning("Douyin archive status load failed; continue without archive filter | error={}", exc)
+        if archived_uids:
+            before_archive_filter = len(followings)
+            followings = [
+                user
+                for user in followings
+                if not (
+                    isinstance(user, dict)
+                    and str(user.get("sec_uid") or user.get("uid") or "").strip() in archived_uids
+                )
+            ]
+            skipped_archived = before_archive_filter - len(followings)
+            if skipped_archived:
+                print(
+                    f"🗄️  已跳过 {skipped_archived} 位处于 active 归档状态的长期未更新 UP，"
+                    "本轮不再进入主页校验/监控/全量处理。"
+                )
+                logger.info(
+                    "Douyin archived creators skipped | skipped={} | remaining={}",
+                    skipped_archived,
+                    len(followings),
+                )
+            if not followings:
+                print("🗄️  当前关注列表全部命中 active 归档状态，本轮无需继续处理。")
+                return None
 
         order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)

@@ -779,6 +779,7 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     mirror_output_path = getattr(config, "high_like_export_mirror_csv", None)
     fieldnames = [
         "uploader_name",
+        "video_grade",
         "video_id",
         "aweme_id",
         "video_title",
@@ -790,6 +791,7 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     ]
     headers = {
         "uploader_name": "UP主",
+        "video_grade": "视频等级",
         "video_id": "视频ID",
         "aweme_id": "aweme_id",
         "video_title": "视频标题",
@@ -801,6 +803,7 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     }
 
     unique_videos = {}
+    video_grades = _load_video_score_grades(config.export_store_db)
     for uid, entry in (progress or {}).items():
         if not isinstance(entry, dict):
             continue
@@ -825,6 +828,7 @@ def run_export_high_like_videos_from_cache(threshold=10000):
             existing = unique_videos.get(unique_key)
             row = {
                 "uploader_name": video.get("uploader_name") or uploader_name,
+                "video_grade": video_grades.get(video_id, ""),
                 "video_id": video_id,
                 "aweme_id": video_id,
                 "video_title": video.get("video_title") or "",
@@ -966,6 +970,44 @@ def _sqlite_table_count(db_path, table_name):
         if not exists:
             return 0
         return int(conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0] or 0)
+
+
+def _load_video_score_grades(db_path):
+    db_path = Path(db_path) if db_path else None
+    if not db_path or not db_path.exists():
+        return {}
+
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='video_score_current'"
+            ).fetchone()
+            if not exists:
+                return {}
+
+            columns = [row[1] for row in conn.execute('PRAGMA table_info("video_score_current")').fetchall()]
+            id_column = next((name for name in ("视频ID", "aweme_id", "video_id") if name in columns), None)
+            grade_column = next((name for name in ("视频最终等级", "final_grade", "视频等级") if name in columns), None)
+            if not id_column or not grade_column:
+                return {}
+
+            rows = conn.execute(
+                f'SELECT "{id_column}", "{grade_column}" FROM "video_score_current"'
+            ).fetchall()
+            return {
+                str(video_id).strip(): str(grade or "").strip()
+                for video_id, grade in rows
+                if str(video_id or "").strip()
+            }
+    except Exception as exc:
+        get_console().print(
+            create_summary_panel(
+                "视频等级读取失败",
+                [f"数据库: {db_path}", f"错误: {exc}"],
+                border_style="yellow",
+            )
+        )
+        return {}
 
 
 def _load_downloader_aweme_status(db_path, aweme_ids):

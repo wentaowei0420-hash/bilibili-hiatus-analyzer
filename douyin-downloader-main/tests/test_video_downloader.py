@@ -259,6 +259,61 @@ async def test_download_aweme_assets_uses_filename_template(tmp_path, monkeypatc
     await api_client.close()
 
 
+def test_build_file_stem_supports_chinese_filename_context(tmp_path):
+    downloader, api_client = _build_downloader(tmp_path)
+    downloader.config.update(
+        filename_template="等级_UP主_视频标题_点赞数",
+        filename_context={
+            "视频等级": "A",
+            "发表时间": "2026-05-09 13:14:15",
+            "UP主": "测试作者",
+            "视频标题": "模板标题",
+            "点赞数": "1234",
+        },
+    )
+
+    aweme_id = "7600224486650121528"
+    stem = downloader._build_file_stem(
+        {
+            "aweme_id": aweme_id,
+            "author": {"nickname": "接口作者"},
+            "statistics": {"digg_count": 888},
+        },
+        author_name="备用作者",
+        title="接口标题",
+        publish_date="2026-05-09",
+    )
+
+    assert stem == f"A_测试作者_模板标题_1234_{aweme_id}"
+
+    downloader.config.update(filename_template="等级_发表时间_UP主_视频标题_点赞数")
+    stem = downloader._build_file_stem(
+        {
+            "aweme_id": aweme_id,
+            "author": {"nickname": "接口作者"},
+            "statistics": {"digg_count": 888},
+        },
+        author_name="备用作者",
+        title="接口标题",
+        publish_date="2026-05-09",
+    )
+    assert stem == f"A_2026-05-09_13_14_15_测试作者_模板标题_1234_{aweme_id}"
+
+    downloader.config.update(filename_template="视频id_作品ID_aweme_id_video_id")
+    stem = downloader._build_file_stem(
+        {
+            "aweme_id": aweme_id,
+            "author": {"nickname": "接口作者"},
+            "statistics": {"digg_count": 888},
+        },
+        author_name="备用作者",
+        title="接口标题",
+        publish_date="2026-05-09",
+    )
+    assert stem == f"{aweme_id}_{aweme_id}_{aweme_id}_{aweme_id}"
+    asyncio.run(api_client.close())
+
+
 @pytest.mark.asyncio
 async def test_download_aweme_assets_keeps_success_when_transcript_skipped(
     tmp_path, monkeypatch
