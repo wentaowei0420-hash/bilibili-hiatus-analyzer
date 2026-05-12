@@ -155,14 +155,17 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
     def ensure_login(self):
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
+        needs_login = False
         try:
-            if page.locator("text=登录").first.is_visible(timeout=2000):
-                print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
-                input("登录成功并刷新页面后，按回车继续...")
+            needs_login = page.locator("text=登录").first.is_visible(timeout=2000)
         except PlaywrightTimeoutError:
             pass
         except Exception:
             pass
+        needs_login = needs_login or self._page_has_login_dialog()
+        if needs_login:
+            print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
+            input("登录成功并刷新页面后，按回车继续...")
         print("✅ 抖音登录状态已确认。")
 
     def _create_response_collector(self, patterns):
@@ -451,6 +454,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             full_mode = limit is None
             try:
                 self._open_page(user["homepage"], self.config.video_page_load_delay)
+                self._abort_if_mid_task_login_required(full_mode)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
@@ -476,12 +480,15 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                 while True:
                     if limit and len(videos_by_id) >= limit:
                         break
+                    self._abort_if_mid_task_login_required(full_mode)
                     if self._page_has_rate_limit():
                         raise RuntimeError("rate_limit")
                     self._scroll_video_page_fast()
+                    self._abort_if_mid_task_login_required(full_mode)
                     no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
                     packets = self._drain_response_collector(collected, self.config.video_packet_timeout)
                     if not packets:
+                        self._abort_if_mid_task_login_required(full_mode)
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
@@ -579,6 +586,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     reverse=True,
                 )
                 if (not videos or (limit and len(videos) < limit)) and self.rate_limiter.current_fallback_max_ids() > 0:
+                    self._abort_if_mid_task_login_required(full_mode)
                     fallback_videos = self._collect_videos_by_browser_fallback(
                         user,
                         limit,

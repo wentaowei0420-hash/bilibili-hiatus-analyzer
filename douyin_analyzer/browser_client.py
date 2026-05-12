@@ -28,6 +28,10 @@ class DouyinRateLimitError(RuntimeError):
     pass
 
 
+class DouyinLoginExpiredError(RuntimeError):
+    pass
+
+
 class DouyinFullFetchValidationError(RuntimeError):
     def __init__(
         self,
@@ -142,7 +146,7 @@ class DouyinBrowserClient:
 
     def ensure_login(self):
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
-        if page.ele("text=登录", timeout=2):
+        if page.ele("text=登录", timeout=2) or self._page_has_login_dialog():
             print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
             input("登录成功并刷新页面后，按回车继续...")
         print("✅ 抖音登录状态已确认。")
@@ -772,6 +776,7 @@ class DouyinBrowserClient:
             page.listen.start([self.config.post_api_pattern, self.config.video_detail_api_pattern])
             try:
                 self._open_page(user["homepage"], self.config.video_page_load_delay)
+                self._abort_if_mid_task_login_required(full_mode)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
                 if self._page_has_service_error():
@@ -791,9 +796,11 @@ class DouyinBrowserClient:
                 while True:
                     if limit and len(videos_by_id) >= limit:
                         break
+                    self._abort_if_mid_task_login_required(full_mode)
                     if self._page_has_rate_limit():
                         raise RuntimeError("rate_limit")
                     self._scroll_video_page_fast()
+                    self._abort_if_mid_task_login_required(full_mode)
                     no_more_marker_seen = no_more_marker_seen or self._video_page_has_no_more_marker()
                     packets = self._drain_listen_packets(timeout=self.config.video_packet_timeout)
                     if packets:
@@ -863,6 +870,7 @@ class DouyinBrowserClient:
                                     no_more_marker_seen=no_more_marker_seen,
                                 )
                     else:
+                        self._abort_if_mid_task_login_required(full_mode)
                         if self._page_has_rate_limit():
                             raise RuntimeError("rate_limit")
                         if self._page_has_service_error():
@@ -900,6 +908,7 @@ class DouyinBrowserClient:
                     reverse=True,
                 )
                 if (not videos or (limit and len(videos) < limit)) and self.rate_limiter.current_fallback_max_ids() > 0:
+                    self._abort_if_mid_task_login_required(full_mode)
                     fallback_videos = self._collect_videos_by_browser_fallback(
                         user,
                         limit,
@@ -1024,6 +1033,60 @@ class DouyinBrowserClient:
             return self.start().run_js("return document.body ? document.body.innerText : '';") or ""
         except Exception:
             return ""
+
+    def _page_has_login_dialog(self):
+        body_text = self._page_body_text()
+        login_markers = (
+            "\u767b\u5f55\u540e\u514d\u8d39\u7545\u4eab\u66f4\u591a\u7cbe\u5f69\u89c6\u9891",
+            "\u626b\u7801\u767b\u5f55",
+            "\u9a8c\u8bc1\u7801\u767b\u5f55",
+            "\u5bc6\u7801\u767b\u5f55",
+            "\u83b7\u53d6\u77ed\u4fe1\u9a8c\u8bc1\u7801",
+        )
+        if any(marker in body_text for marker in login_markers):
+            return True
+
+        script = r"""
+        const loginMarkers = [
+          '\u767b\u5f55\u540e\u514d\u8d39\u7545\u4eab\u66f4\u591a\u7cbe\u5f69\u89c6\u9891',
+          '\u626b\u7801\u767b\u5f55',
+          '\u9a8c\u8bc1\u7801\u767b\u5f55',
+          '\u5bc6\u7801\u767b\u5f55',
+          '\u83b7\u53d6\u77ed\u4fe1\u9a8c\u8bc1\u7801'
+        ];
+        const visible = Array.from(document.querySelectorAll('body *'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            const text = (el.innerText || el.textContent || '').trim();
+            return {rect, style, text};
+          })
+          .filter(item =>
+            item.text &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.style.display !== 'none' &&
+            item.style.visibility !== 'hidden'
+          );
+        const hit = visible.find(item => loginMarkers.some(marker => item.text.includes(marker)));
+        return Boolean(hit);
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                return bool(page.run_js(script))
+            if hasattr(page, "evaluate"):
+                return bool(page.evaluate(script))
+        except Exception:
+            return False
+        return False
+
+    def _abort_if_mid_task_login_required(self, full_mode=False):
+        if full_mode and self._page_has_login_dialog():
+            raise DouyinLoginExpiredError(
+                "\u6296\u97f3 full \u6a21\u5f0f\u6267\u884c\u4e2d\u51fa\u73b0\u767b\u5f55\u5f39\u7a97\uff0c"
+                "\u5224\u5b9a\u4e3a\u4f1a\u8bdd\u5931\u6548\uff0c\u5df2\u4e2d\u6b62\u4efb\u52a1\u3002"
+            )
 
     def _annotate_empty_video_profile_state(self, user, expected_video_count=None):
         if not isinstance(user, dict):

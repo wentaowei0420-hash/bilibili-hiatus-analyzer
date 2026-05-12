@@ -16,6 +16,7 @@ from bilibili_analyzer.logging_utils import (
 
 from .browser_client import (
     DouyinFullFetchValidationError,
+    DouyinLoginExpiredError,
     DouyinRateLimitError,
     DouyinServiceError,
 )
@@ -1930,6 +1931,9 @@ class DouyinHiatusAnalyzer:
                                 videos = entry.get("videos", [])
                             else:
                                 videos = recent_videos
+                    except DouyinLoginExpiredError as exc:
+                        print(f"⚠️  {exc}")
+                        raise
                     except DouyinRateLimitError as exc:
                         print(f"⚠️  {user['nickname']} 触发页面级速率限制: {exc}")
                         self.browser_client.restart(self.config.rate_limit_global_cooldown)
