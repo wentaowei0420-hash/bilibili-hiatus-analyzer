@@ -1,5 +1,6 @@
 import random
 import time
+from pathlib import Path
 
 from loguru import logger
 
@@ -79,7 +80,11 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         self._playwright = sync_playwright().start()
         cache_bytes = max(0, int(getattr(self.config, "browser_disk_cache_size_mb", 128) or 0)) * 1024 * 1024
-        browser_args = ["--mute-audio", "--start-maximized"]
+        browser_args = [
+            "--mute-audio",
+            "--start-maximized",
+            "--disable-blink-features=AutomationControlled",
+        ]
         if cache_bytes:
             browser_args.extend([
                 f"--disk-cache-size={cache_bytes}",
@@ -101,12 +106,29 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         self.context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        self._install_automation_stealth_hooks()
         self._prepare_window_after_launch()
         return self.page
+
+    def _install_automation_stealth_hooks(self):
+        script = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        try:
+            self.context.add_init_script(script)
+        except Exception:
+            pass
+        try:
+            self.page.add_init_script(script)
+        except Exception:
+            pass
+        try:
+            self.page.evaluate(script)
+        except Exception:
+            pass
 
     def close(self):
         if self.context is not None:
             try:
+                self._flush_browser_storage_before_close()
                 self.context.close()
             except Exception:
                 pass
@@ -155,6 +177,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
     def ensure_login(self):
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
+        self._print_login_persistence_diagnostic("启动检查")
         needs_login = False
         try:
             needs_login = page.locator("text=登录").first.is_visible(timeout=2000)
@@ -166,6 +189,9 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         if needs_login:
             print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
             input("登录成功并刷新页面后，按回车继续...")
+            self._wait_until_login_dialog_gone()
+            time.sleep(1.0)
+            self._print_login_persistence_diagnostic("登录后检查")
         print("✅ 抖音登录状态已确认。")
 
     def _create_response_collector(self, patterns):
@@ -255,6 +281,27 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             return self.start().locator("body").inner_text(timeout=1500) or ""
         except Exception:
             return ""
+
+    def _flush_browser_storage_before_close(self):
+        try:
+            state_path = Path(getattr(self.config, "export_store_db")).parent / "douyin_browser_storage_state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.context.storage_state(path=str(state_path))
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+    def _current_browser_cookie_names(self):
+        names = set()
+        if self.context is not None:
+            try:
+                for cookie in self.context.cookies("https://www.douyin.com"):
+                    name = str((cookie or {}).get("name") or "").strip()
+                    if name:
+                        names.add(name)
+            except Exception:
+                pass
+        return names or super()._current_browser_cookie_names()
 
     def _page_has_service_error(self):
         body_text = self._page_body_text()

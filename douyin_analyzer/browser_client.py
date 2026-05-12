@@ -1,7 +1,10 @@
 import json
 import random
 import re
+import shutil
+import sqlite3
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from DrissionPage import ChromiumOptions, ChromiumPage
@@ -30,6 +33,22 @@ class DouyinRateLimitError(RuntimeError):
 
 class DouyinLoginExpiredError(RuntimeError):
     pass
+
+
+AUTH_COOKIE_NAMES = {
+    "sessionid",
+    "sid_guard",
+    "sid_tt",
+    "uid_tt",
+    "uid_tt_ss",
+    "passport_auth_status",
+    "passport_auth_status_default",
+    "passport_auth_status_ss",
+    "passport_auth_status_ss_default",
+    "passport_assist_user",
+    "passport_fe_beating_status",
+    "n_mh",
+}
 
 
 class DouyinFullFetchValidationError(RuntimeError):
@@ -99,6 +118,7 @@ class DouyinBrowserClient:
                 pass
         co.set_argument("--mute-audio")
         co.set_argument("--start-maximized")
+        co.set_argument("--disable-blink-features=AutomationControlled")
         cache_bytes = max(0, int(getattr(self.config, "browser_disk_cache_size_mb", 128) or 0)) * 1024 * 1024
         if cache_bytes:
             co.set_argument(f"--disk-cache-size={cache_bytes}")
@@ -132,6 +152,7 @@ class DouyinBrowserClient:
     def close(self):
         if self.page is not None:
             try:
+                self._flush_browser_storage_before_close()
                 self.page.quit()
             except Exception:
                 pass
@@ -146,9 +167,13 @@ class DouyinBrowserClient:
 
     def ensure_login(self):
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
+        self._print_login_persistence_diagnostic("启动检查")
         if page.ele("text=登录", timeout=2) or self._page_has_login_dialog():
             print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
             input("登录成功并刷新页面后，按回车继续...")
+            self._wait_until_login_dialog_gone()
+            time.sleep(1.0)
+            self._print_login_persistence_diagnostic("登录后检查")
         print("✅ 抖音登录状态已确认。")
 
     def _drain_listen_packets(self, timeout, gap=1):
@@ -1033,6 +1058,108 @@ class DouyinBrowserClient:
             return self.start().run_js("return document.body ? document.body.innerText : '';") or ""
         except Exception:
             return ""
+
+    def _flush_browser_storage_before_close(self):
+        time.sleep(0.5)
+
+    def _profile_cookie_db_path(self):
+        user_data_path = getattr(self.config, "browser_user_data_path", None)
+        if not user_data_path:
+            return None
+        user_data_path = Path(user_data_path)
+        candidates = [
+            user_data_path / "Default" / "Network" / "Cookies",
+            user_data_path / "Default" / "Cookies",
+        ]
+        return next((path for path in candidates if path.exists()), candidates[0])
+
+    def _profile_cookie_names(self):
+        cookie_db = self._profile_cookie_db_path()
+        if not cookie_db or not cookie_db.exists():
+            return set()
+        return self._read_cookie_names_from_db(cookie_db)
+
+    def _read_cookie_names_from_db(self, cookie_db):
+        def read_from(path):
+            with sqlite3.connect(str(path), timeout=1) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT name
+                    FROM cookies
+                    WHERE host_key LIKE '%douyin.com%'
+                       OR host_key LIKE '%iesdouyin.com%'
+                       OR host_key LIKE '%snssdk.com%'
+                       OR host_key LIKE '%toutiao.com%'
+                    """
+                ).fetchall()
+            return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+        try:
+            return read_from(cookie_db)
+        except Exception:
+            pass
+
+        try:
+            snapshot_dir = Path(getattr(self.config, "export_store_db")).parent
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = snapshot_dir / "_douyin_cookie_diagnostic.sqlite"
+            shutil.copy2(cookie_db, snapshot_path)
+            try:
+                return read_from(snapshot_path)
+            finally:
+                try:
+                    snapshot_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            return None
+
+    def _current_browser_cookie_names(self):
+        return self._profile_cookie_names()
+
+    def _login_cookie_summary(self):
+        names = self._current_browser_cookie_names()
+        if names is None:
+            names = set()
+            unknown = True
+        else:
+            unknown = False
+        auth_names = sorted(name for name in names if name in AUTH_COOKIE_NAMES)
+        return {
+            "cookie_count": len(names),
+            "auth_cookie_count": len(auth_names),
+            "auth_cookie_names": auth_names,
+            "profile_cookie_db": str(self._profile_cookie_db_path() or ""),
+            "unknown": unknown,
+        }
+
+    def _print_login_persistence_diagnostic(self, stage):
+        summary = self._login_cookie_summary()
+        auth_names = summary.get("auth_cookie_names") or []
+        if summary.get("unknown"):
+            print(
+                f"ℹ️  抖音登录态{stage}: profile={self.config.browser_user_data_path} | "
+                "cookie 库当前被浏览器占用，无法离线读取；运行中将使用浏览器内 cookie 检查。"
+            )
+        elif auth_names:
+            print(
+                f"🔐 抖音登录态{stage}: profile={self.config.browser_user_data_path} | "
+                f"cookie={summary['cookie_count']} | 登录态={','.join(auth_names)}"
+            )
+        else:
+            print(
+                f"⚠️  抖音登录态{stage}: profile={self.config.browser_user_data_path} | "
+                f"cookie={summary['cookie_count']} | 未发现稳定登录态 cookie。"
+            )
+
+    def _wait_until_login_dialog_gone(self, timeout_seconds=180):
+        deadline = time.time() + max(5, float(timeout_seconds or 0))
+        while time.time() < deadline:
+            if not self._page_has_login_dialog():
+                return True
+            time.sleep(1.0)
+        print("⚠️  登录弹窗仍存在，可能登录未完成或未刷新成功，继续前请确认浏览器内已登录。")
+        return False
 
     def _page_has_login_dialog(self):
         body_text = self._page_body_text()

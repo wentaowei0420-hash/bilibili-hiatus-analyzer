@@ -85,11 +85,29 @@ def _loads_json(text):
 
 
 def _load_status_reset_uids(config):
+    reset_uids = set()
+    db_path = config.export_store_db
+    if db_path.exists():
+        try:
+            with sqlite3.connect(db_path) as conn:
+                if _table_exists(conn, "douyin_full_status_reset"):
+                    reset_uids.update(
+                        str(row[0] or "").strip()
+                        for row in conn.execute(
+                            """
+                            SELECT uploader_id
+                            FROM douyin_full_status_reset
+                            WHERE reset_status = 'active'
+                            """
+                        ).fetchall()
+                        if str(row[0] or "").strip()
+                    )
+        except Exception:
+            pass
     try:
         progress = CacheStore(config).load_progress()
     except Exception:
-        return set()
-    reset_uids = set()
+        return reset_uids
     for uid, entry in (progress or {}).items():
         if not isinstance(entry, dict):
             continue

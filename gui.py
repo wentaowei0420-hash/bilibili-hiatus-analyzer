@@ -2881,13 +2881,13 @@ class DouyinStatusResetDialog(QDialog):
         return candidates
 
     def _load_reset_uids(self):
+        reset_uids = self._load_db_reset_uids()
         try:
             from douyin_analyzer.cache import CacheStore
 
             progress = CacheStore(self.config).load_progress()
         except Exception:
-            return set()
-        reset_uids = set()
+            return reset_uids
         for uid, entry in (progress or {}).items():
             if not isinstance(entry, dict):
                 continue
@@ -2895,6 +2895,21 @@ class DouyinStatusResetDialog(QDialog):
             if entry.get("full_status_reset") or str(summary.get("summary_scope") or "").strip().lower() == "status_reset":
                 reset_uids.add(str(uid or "").strip())
         return {uid for uid in reset_uids if uid}
+
+    def _load_db_reset_uids(self):
+        if not self.db_path.exists():
+            return set()
+        with sqlite3.connect(str(self.db_path)) as conn:
+            if not DouyinRatingOverviewDialog._table_exists(conn, "douyin_full_status_reset"):
+                return set()
+            rows = conn.execute(
+                """
+                SELECT uploader_id
+                FROM douyin_full_status_reset
+                WHERE reset_status = 'active'
+                """
+            ).fetchall()
+        return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
 
     def refresh_data(self):
         try:
@@ -2977,34 +2992,93 @@ class DouyinStatusResetDialog(QDialog):
         changed = 0
         for uid in uids:
             entry = progress.get(uid)
-            if not isinstance(entry, dict):
-                continue
             row = candidate_by_uid.get(uid, {})
-            modes = [
-                str(mode).strip().lower()
-                for mode in (entry.get("cache_modes") or [])
-                if str(mode).strip() and str(mode).strip().lower() != "full"
-            ]
-            entry["cache_modes"] = sorted(set(modes))
-            entry["last_fetch_mode"] = "status_reset"
-            entry["cached_at"] = 0
-            entry["full_status_reset"] = {
-                "reset_at": now_text,
-                "reason": "full_cached_video_count_mismatch",
-                "published_video_count": row.get("published_video_count", ""),
-                "cached_video_count": row.get("cached_video_count", ""),
-                "diff_count": row.get("diff_count", ""),
-            }
-            summary = entry.get("summary")
-            if isinstance(summary, dict):
-                summary["summary_scope"] = "status_reset"
-                summary["status_reset_at"] = now_text
-                summary["status_reset_reason"] = "full_cached_video_count_mismatch"
+            if isinstance(entry, dict):
+                raw_modes = entry.get("cache_modes") or []
+                if isinstance(raw_modes, str):
+                    raw_modes = raw_modes.split(",")
+                modes = [
+                    str(mode).strip().lower()
+                    for mode in raw_modes
+                    if str(mode).strip() and str(mode).strip().lower() != "full"
+                ]
+                entry["cache_modes"] = sorted(set(modes))
+                entry["last_fetch_mode"] = "status_reset"
+                entry["cached_at"] = 0
+                entry["full_status_reset"] = {
+                    "reset_at": now_text,
+                    "reason": "full_cached_video_count_mismatch",
+                    "published_video_count": row.get("published_video_count", ""),
+                    "cached_video_count": row.get("cached_video_count", ""),
+                    "diff_count": row.get("diff_count", ""),
+                }
+                summary = entry.get("summary")
+                if isinstance(summary, dict):
+                    summary["summary_scope"] = "status_reset"
+                    summary["status_reset_at"] = now_text
+                    summary["status_reset_reason"] = "full_cached_video_count_mismatch"
             changed += 1
         if changed:
             cache_store.save_progress(progress)
+            self._record_reset_rows(uids, candidate_by_uid, now_text)
             self._update_inventory_rows(uids)
         return changed
+
+    def _ensure_reset_table(self, conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS douyin_full_status_reset (
+                uploader_id TEXT PRIMARY KEY,
+                uploader_name TEXT,
+                reset_status TEXT NOT NULL DEFAULT 'active',
+                reset_at TEXT NOT NULL,
+                reset_reason TEXT,
+                published_video_count INTEGER,
+                cached_video_count INTEGER,
+                diff_count INTEGER
+            )
+            """
+        )
+
+    def _record_reset_rows(self, uids, candidate_by_uid, reset_at):
+        if not self.db_path.exists():
+            return
+        with sqlite3.connect(str(self.db_path)) as conn:
+            self._ensure_reset_table(conn)
+            for uid in uids:
+                row = candidate_by_uid.get(uid, {})
+                conn.execute(
+                    """
+                    INSERT INTO douyin_full_status_reset (
+                        uploader_id,
+                        uploader_name,
+                        reset_status,
+                        reset_at,
+                        reset_reason,
+                        published_video_count,
+                        cached_video_count,
+                        diff_count
+                    )
+                    VALUES (?, ?, 'active', ?, 'full_cached_video_count_mismatch', ?, ?, ?)
+                    ON CONFLICT(uploader_id) DO UPDATE SET
+                        uploader_name=excluded.uploader_name,
+                        reset_status='active',
+                        reset_at=excluded.reset_at,
+                        reset_reason=excluded.reset_reason,
+                        published_video_count=excluded.published_video_count,
+                        cached_video_count=excluded.cached_video_count,
+                        diff_count=excluded.diff_count
+                    """,
+                    (
+                        uid,
+                        row.get("uploader_name", ""),
+                        reset_at,
+                        self._safe_int(row.get("published_video_count")),
+                        self._safe_int(row.get("cached_video_count")),
+                        self._safe_int(row.get("diff_count")),
+                    ),
+                )
+            conn.commit()
 
     def _update_inventory_rows(self, uids):
         if not self.db_path.exists():

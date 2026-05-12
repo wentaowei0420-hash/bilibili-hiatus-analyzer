@@ -889,7 +889,7 @@ class DouyinHiatusAnalyzer:
         expires_at = normalized + int(self.config.precise_cache_max_age_hours) * 3600
         return "是" if time.time() >= expires_at else ""
 
-    def infer_cache_modes(self, entry, has_followings_cache=False):
+    def infer_cache_modes(self, entry, has_followings_cache=False, status_reset=False):
         modes = set()
         if has_followings_cache:
             modes.add("counts")
@@ -899,8 +899,10 @@ class DouyinHiatusAnalyzer:
         summary_scope = ""
         if isinstance(summary, dict):
             summary_scope = str(summary.get("summary_scope") or "").strip().lower()
-        if entry.get("full_status_reset") or summary_scope == "status_reset":
+        if status_reset or entry.get("full_status_reset") or summary_scope == "status_reset":
             explicit_modes = entry.get("cache_modes")
+            if isinstance(explicit_modes, str):
+                explicit_modes = explicit_modes.split(",")
             if isinstance(explicit_modes, list):
                 for mode in explicit_modes:
                     mode_text = str(mode or "").strip().lower()
@@ -927,6 +929,30 @@ class DouyinHiatusAnalyzer:
             modes.add("full")
 
         return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
+
+    def load_full_status_reset_uids_from_store(self):
+        db_path = getattr(self.config, "export_store_db", None)
+        if not db_path or not db_path.exists():
+            return set()
+        try:
+            import sqlite3
+
+            with sqlite3.connect(db_path) as conn:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='douyin_full_status_reset'"
+                ).fetchone()
+                if not exists:
+                    return set()
+                rows = conn.execute(
+                    """
+                    SELECT uploader_id
+                    FROM douyin_full_status_reset
+                    WHERE reset_status = 'active'
+                    """
+                ).fetchall()
+            return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+        except Exception:
+            return set()
 
     def build_cached_user(self, followings_by_uid, progress, uid):
         following_user = dict(followings_by_uid.get(uid) or {})
@@ -964,6 +990,7 @@ class DouyinHiatusAnalyzer:
             if isinstance(user, dict) and user.get("sec_uid")
         }
         all_uids = sorted(set(followings_by_uid) | set(progress.keys()))
+        store_reset_uids = self.load_full_status_reset_uids_from_store()
         rows = []
 
         for uid in all_uids:
@@ -971,15 +998,30 @@ class DouyinHiatusAnalyzer:
             user = self.build_cached_user(followings_by_uid, progress, uid)
             latest_video = self.get_latest_video_from_entry(entry)
             summary = entry.get("summary", {}) if isinstance(entry, dict) else {}
-            cache_modes = sorted(self.infer_cache_modes(entry, has_followings_cache=uid in followings_by_uid))
+            summary_scope = str(summary.get("summary_scope") or "").strip().lower() if isinstance(summary, dict) else ""
+            status_reset = uid in store_reset_uids or (
+                isinstance(entry, dict)
+                and (entry.get("full_status_reset") or summary_scope == "status_reset")
+            )
+            cache_modes = sorted(
+                self.infer_cache_modes(
+                    entry,
+                    has_followings_cache=uid in followings_by_uid,
+                    status_reset=status_reset,
+                )
+            )
             last_fetch_mode = (
+                "status_reset"
+                if status_reset
+                else (
                 "full"
                 if isinstance(entry, dict) and self.entry_has_full_cache(entry)
                 else ((entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "")
+                )
             )
             cached_videos = entry.get("videos", []) if isinstance(entry, dict) else []
             cached_video_count = len(cached_videos or []) if isinstance(cached_videos, list) else 0
-            if isinstance(entry, dict) and self.entry_has_full_cache(entry):
+            if isinstance(entry, dict) and not status_reset and self.entry_has_full_cache(entry):
                 complete_stored_videos = self.load_complete_stored_videos(user, summary, cached_videos)
                 if complete_stored_videos:
                     cached_video_count = max(cached_video_count, len(complete_stored_videos))
@@ -1010,7 +1052,7 @@ class DouyinHiatusAnalyzer:
                     "progress_cache_due": (
                         self._is_progress_cache_due(entry.get("cached_at")) if isinstance(entry, dict) else "是"
                     ),
-                    "summary_scope": (summary.get("summary_scope") if isinstance(summary, dict) else "") or "",
+                    "summary_scope": "status_reset" if status_reset else ((summary.get("summary_scope") if isinstance(summary, dict) else "") or ""),
                     "cached_video_count": cached_video_count,
                     "has_latest_video_cache": "是" if latest_video else "",
                     "latest_video_title": latest_video.get("video_title", "") if latest_video else "",
