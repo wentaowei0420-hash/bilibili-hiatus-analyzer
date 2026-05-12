@@ -504,6 +504,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                 self._abort_if_mid_task_login_required(full_mode)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
+                self._abort_if_full_mode_service_error(full_mode)
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
                 expected_video_count = self._extract_profile_video_count_from_dom()
@@ -536,6 +537,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                     packets = self._drain_response_collector(collected, self.config.video_packet_timeout)
                     if not packets:
                         self._abort_if_mid_task_login_required(full_mode)
+                        self._abort_if_full_mode_service_error(full_mode)
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
@@ -574,6 +576,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
                         if self._packet_has_rate_limit(data):
                             raise RuntimeError("rate_limit")
                         if self._packet_has_service_error(data):
+                            self._abort_full_mode_frequency(full_mode)
                             raise RuntimeError("service_error")
                         self._update_user_profile_from_packet(user, data)
                         for aweme in self._extract_awemes_from_packet_body(data):

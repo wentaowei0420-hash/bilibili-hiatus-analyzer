@@ -35,6 +35,10 @@ class DouyinLoginExpiredError(RuntimeError):
     pass
 
 
+class DouyinFullModeFrequencyError(RuntimeError):
+    pass
+
+
 AUTH_COOKIE_NAMES = {
     "sessionid",
     "sid_guard",
@@ -804,6 +808,7 @@ class DouyinBrowserClient:
                 self._abort_if_mid_task_login_required(full_mode)
                 if self._page_has_rate_limit():
                     raise RuntimeError("rate_limit")
+                self._abort_if_full_mode_service_error(full_mode)
                 if self._page_has_service_error():
                     raise RuntimeError("service_error")
                 expected_video_count = self._extract_profile_video_count_from_dom()
@@ -838,6 +843,7 @@ class DouyinBrowserClient:
                             if self._packet_has_rate_limit(data):
                                 raise RuntimeError("rate_limit")
                             if self._packet_has_service_error(data):
+                                self._abort_full_mode_frequency(full_mode)
                                 raise RuntimeError("service_error")
                             self._update_user_profile_from_packet(user, data)
                             for aweme in self._extract_awemes_from_packet_body(data):
@@ -898,6 +904,7 @@ class DouyinBrowserClient:
                         self._abort_if_mid_task_login_required(full_mode)
                         if self._page_has_rate_limit():
                             raise RuntimeError("rate_limit")
+                        self._abort_if_full_mode_service_error(full_mode)
                         if self._page_has_service_error():
                             raise RuntimeError("service_error")
                         empty_rounds += 1
@@ -1349,6 +1356,18 @@ class DouyinBrowserClient:
         except Exception:
             return False
         return "服务异常" in body_text and "拉取数据" in body_text
+
+    def _abort_if_full_mode_service_error(self, full_mode=False):
+        if full_mode and self._page_has_service_error():
+            self._abort_full_mode_frequency(full_mode)
+
+    @staticmethod
+    def _abort_full_mode_frequency(full_mode=False):
+        if full_mode:
+            raise DouyinFullModeFrequencyError(
+                "抖音 full 模式进入 UP 主页后出现“服务异常，重新刷新拉取数据”，"
+                "判断为抓取过于频繁，已终止本轮任务。"
+            )
 
     def _page_has_rate_limit(self):
         try:

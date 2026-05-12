@@ -15,6 +15,7 @@ from bilibili_analyzer.logging_utils import (
 )
 
 from .browser_client import (
+    DouyinFullModeFrequencyError,
     DouyinFullFetchValidationError,
     DouyinLoginExpiredError,
     DouyinRateLimitError,
@@ -1973,6 +1974,9 @@ class DouyinHiatusAnalyzer:
                                 videos = entry.get("videos", [])
                             else:
                                 videos = recent_videos
+                    except DouyinFullModeFrequencyError as exc:
+                        print(f"⚠️  {exc}")
+                        raise
                     except DouyinLoginExpiredError as exc:
                         print(f"⚠️  {exc}")
                         raise
