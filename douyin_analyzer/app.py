@@ -29,7 +29,7 @@ from .analyzer import DouyinHiatusAnalyzer
 from .browser_client import DouyinBrowserClient
 from .cache import CacheStore
 from .config import load_analyzer_config, load_feishu_config
-from .exporters import save_video_duration_analysis_to_csv
+from .exporters import save_cache_inventory_to_csv, save_video_duration_analysis_to_csv
 from .playwright_browser_client import PlaywrightDouyinBrowserClient
 from .utils import parse_view_count
 
@@ -906,17 +906,21 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     return output_path
 
 
-def run_score_videos_from_cache():
+def run_score_videos_from_cache(*, refresh_inventory=True):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "douyin_video_scoring")
+    if refresh_inventory:
+        refresh_cache_inventory_current(config)
     from .video_scoring import run_douyin_video_scoring
 
     return run_douyin_video_scoring(config)
 
 
-def run_score_creators_from_cache():
+def run_score_creators_from_cache(*, refresh_inventory=True):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "douyin_creator_scoring")
+    if refresh_inventory:
+        refresh_cache_inventory_current(config)
     if _sqlite_table_count(config.export_store_db, "video_score_current") <= 0:
         from .video_scoring import run_douyin_video_scoring
 
@@ -924,6 +928,18 @@ def run_score_creators_from_cache():
     from .creator_scoring import run_douyin_creator_scoring
 
     return run_douyin_creator_scoring(config)
+
+
+def refresh_cache_inventory_current(config=None):
+    config = config or load_analyzer_config()
+    cache_store = CacheStore(config)
+    analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
+    cache_rows = analyzer.build_cache_inventory_rows(
+        cache_store.load_followings_cache_payload(),
+        cache_store.load_progress(),
+    )
+    save_cache_inventory_to_csv(config, cache_rows)
+    return len(cache_rows)
 
 
 def run_export_compact_tables_from_cache(high_like_threshold=10000):

@@ -4,8 +4,10 @@ from datetime import datetime
 
 from common.platform_store import ensure_platform_schema
 
+from .analyzer import DouyinHiatusAnalyzer
 from .cache import CacheStore
 from .creator_scoring import run_douyin_creator_scoring
+from .exporters import save_cache_inventory_to_csv
 from .video_scoring import DouyinVideoScorer, run_douyin_video_scoring
 
 
@@ -349,6 +351,17 @@ def _refresh_inventory_video_counts(config):
     return updated
 
 
+def _refresh_cache_inventory_current(config):
+    cache_store = CacheStore(config)
+    analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
+    cache_rows = analyzer.build_cache_inventory_rows(
+        cache_store.load_followings_cache_payload(),
+        cache_store.load_progress(),
+    )
+    save_cache_inventory_to_csv(config, cache_rows)
+    return len(cache_rows)
+
+
 def diagnose_data_links(config):
     db_path = config.export_store_db
     current_progress_video_ids = _load_current_progress_video_ids(config)
@@ -503,7 +516,7 @@ def sync_progress_videos_to_state(config, *, rerun_scores=True):
 
     raw_videos_processed = _sync_raw_videos_to_state(config)
     processed_creators, processed_videos, skipped_creators = _sync_progress_videos_to_state(config, progress)
-    inventory_rows_updated = _refresh_inventory_video_counts(config)
+    inventory_rows_updated = _refresh_cache_inventory_current(config)
 
     video_score_path = None
     creator_score_path = None

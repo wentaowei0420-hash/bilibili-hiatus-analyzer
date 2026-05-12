@@ -409,7 +409,7 @@ class RatingRefreshThread(QThread):
             from douyin_analyzer.app import run_score_creators_from_cache, run_score_videos_from_cache
 
             run_score_videos_from_cache()
-            output_path = run_score_creators_from_cache()
+            output_path = run_score_creators_from_cache(refresh_inventory=False)
             self.done.emit(True, f"评分数据已更新：{output_path}")
         except Exception as exc:
             self.done.emit(False, f"评分数据刷新失败：{exc}")
