@@ -190,7 +190,12 @@ def upsert_video_state_rows(
                     publish_timestamp=COALESCE(excluded.publish_timestamp, "{_video_state_table(platform)}".publish_timestamp),
                     like_count=COALESCE(excluded.like_count, "{_video_state_table(platform)}".like_count),
                     duration_seconds=COALESCE(excluded.duration_seconds, "{_video_state_table(platform)}".duration_seconds),
-                    source_mode=COALESCE(NULLIF(excluded.source_mode, ''), "{_video_state_table(platform)}".source_mode),
+                    source_mode=CASE
+                        WHEN LOWER(COALESCE("{_video_state_table(platform)}".source_mode, '')) = 'full'
+                             AND LOWER(COALESCE(excluded.source_mode, '')) != 'full'
+                        THEN "{_video_state_table(platform)}".source_mode
+                        ELSE COALESCE(NULLIF(excluded.source_mode, ''), "{_video_state_table(platform)}".source_mode)
+                    END,
                     last_seen_at=excluded.last_seen_at,
                     is_available=1,
                     payload_json=excluded.payload_json,
@@ -347,7 +352,12 @@ def upsert_cache_entries(
                 ON CONFLICT(cache_key) DO UPDATE SET
                     cache_type=excluded.cache_type,
                     uploader_id=excluded.uploader_id,
-                    source_mode=excluded.source_mode,
+                    source_mode=CASE
+                        WHEN LOWER(COALESCE("{_cache_table(platform)}".source_mode, '')) = 'full'
+                             AND LOWER(COALESCE(excluded.source_mode, '')) != 'full'
+                        THEN "{_cache_table(platform)}".source_mode
+                        ELSE excluded.source_mode
+                    END,
                     cached_at=excluded.cached_at,
                     payload_json=excluded.payload_json,
                     updated_at=excluded.updated_at

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 from PyQt5.QtCore import QThread, Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -406,12 +406,48 @@ class RatingRefreshThread(QThread):
 
     def run(self):
         try:
-            from douyin_analyzer.app import run_score_creators_from_cache
+            from douyin_analyzer.app import run_score_creators_from_cache, run_score_videos_from_cache
 
+            run_score_videos_from_cache()
             output_path = run_score_creators_from_cache()
             self.done.emit(True, f"评分数据已更新：{output_path}")
         except Exception as exc:
             self.done.emit(False, f"评分数据刷新失败：{exc}")
+
+
+class DouyinDataSyncThread(QThread):
+    done = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from douyin_analyzer.config import load_analyzer_config
+            from douyin_analyzer.data_sync import sync_progress_videos_to_state
+
+            config = load_analyzer_config()
+            result = sync_progress_videos_to_state(config, rerun_scores=True)
+            before = result.get("before_diagnostics", {})
+            after = result.get("after_diagnostics", {})
+            message = (
+                "抖音数据同步完成："
+                f"同步UP {result['processed_creators']} 位，"
+                f"progress视频 {result['processed_videos']} 条，"
+                f"raw视频 {result.get('raw_videos_processed', 0)} 条；"
+                f"清单缓存数更新 {result.get('inventory_rows_updated', 0)} 行；"
+                f"douyin_video_state {result['video_state_before']} -> {result['video_state_after']}；"
+                f"video_score_current {result['video_score_before']} -> {result['video_score_after']}；"
+                f"creator_score_current {result['creator_score_before']} -> {result['creator_score_after']}；"
+                f"当前缓存视频 {after.get('current_progress_videos', 0)} 条；"
+                f"当前缓存未评分 {before.get('current_progress_not_scored', 0)} -> "
+                f"{after.get('current_progress_not_scored', 0)}；"
+                f"评分不在当前缓存 {before.get('score_not_current_progress', 0)} -> "
+                f"{after.get('score_not_current_progress', 0)}；"
+                f"下载标记孤儿 {before.get('score_download_mark_without_aweme', 0)} -> "
+                f"{after.get('score_download_mark_without_aweme', 0)}；"
+                f"需人工状态重置 {after.get('full_cache_count_mismatch_gt_30', 0)} 位"
+            )
+            self.done.emit(True, message)
+        except Exception as exc:
+            self.done.emit(False, f"抖音数据同步失败：{exc}")
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -1267,6 +1303,23 @@ class DouyinRatingOverviewDialog(QDialog):
                 self.summary_cells[(key, name)] = cell
         layout.addWidget(summary_group)
 
+        search_group = QGroupBox("UP搜索")
+        search_layout = QHBoxLayout(search_group)
+        search_layout.setContentsMargins(14, 12, 14, 12)
+        search_layout.setSpacing(10)
+        search_layout.addWidget(QLabel("UP主ID"))
+        self.creator_search_input = QLineEdit()
+        self.creator_search_input.setPlaceholderText("输入 UP主UID / sec_uid 后筛选单个 UP 主")
+        self.creator_search_input.returnPressed.connect(self._search_creator)
+        search_layout.addWidget(self.creator_search_input, stretch=1)
+        self.creator_search_button = QPushButton("筛选UP")
+        self.creator_search_button.clicked.connect(self._search_creator)
+        self.clear_creator_search_button = QPushButton("清空筛选")
+        self.clear_creator_search_button.clicked.connect(self._clear_creator_search)
+        search_layout.addWidget(self.creator_search_button)
+        search_layout.addWidget(self.clear_creator_search_button)
+        layout.addWidget(search_group)
+
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(False)
         self.tabs.setStyleSheet(
@@ -1281,10 +1334,10 @@ class DouyinRatingOverviewDialog(QDialog):
             """
         )
         self.creator_top_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "粉丝数", "作品数(缓存)", "UP主主页链接"]
+            ["UP主", "等级", "分数", "置信度", "粉丝数", "作品数(缓存)", "详情"]
         )
         self.creator_low_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "UP主主页链接"]
+            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "详情"]
         )
         self.video_top_table = self._make_table(
             ["视频标题", "UP主", "等级", "分数", "置信度", "点赞数", "下载状态", "视频链接"]
@@ -1292,10 +1345,14 @@ class DouyinRatingOverviewDialog(QDialog):
         self.video_watch_table = self._make_table(
             ["视频标题", "UP主", "等级", "分数", "置信度", "缺失指标", "视频链接"]
         )
+        self.archived_creator_table = self._make_table(
+            ["UP主", "等级", "分数", "置信度", "未更新天数", "粉丝数", "作品数", "归档时间", "归档原因", "详情"]
+        )
         self.tabs.addTab(self.creator_top_table, "抖音排行表")
         self.tabs.addTab(self.creator_low_table, "低分/风险UP")
         self.tabs.addTab(self.video_top_table, "高分视频")
         self.tabs.addTab(self.video_watch_table, "待观察视频")
+        self.tabs.addTab(self.archived_creator_table, "归档UP")
         layout.addWidget(self.tabs, stretch=1)
 
         self.refresh_info_label = QLabel("")
@@ -1333,7 +1390,9 @@ class DouyinRatingOverviewDialog(QDialog):
         table.horizontalHeader().setMinimumHeight(42)
         table.horizontalHeader().setMinimumSectionSize(70)
         for column, header in enumerate(headers):
-            if column == len(headers) - 1 or header in {"UP主主页链接", "视频链接", "视频标题"}:
+            if header == "详情":
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            elif column == len(headers) - 1 or header in {"UP主主页链接", "视频链接", "视频标题", "归档原因"}:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
             else:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
@@ -1414,29 +1473,52 @@ class DouyinRatingOverviewDialog(QDialog):
         conn.execute(f'DROP TABLE IF EXISTS "{self.ELIGIBLE_UID_TABLE}"')
         conn.execute(f'CREATE TEMP TABLE "{self.ELIGIBLE_UID_TABLE}" (uid TEXT PRIMARY KEY)')
         if not self._table_exists(conn, "cache_inventory_current"):
-            return False, 0
+            return False, 0, 0
 
         columns = {
             row[1] for row in conn.execute('PRAGMA table_info("cache_inventory_current")')
         }
-        if "UP主UID" not in columns or "有full缓存" not in columns:
-            return False, 0
+        if "UP主UID" not in columns:
+            return False, 0, 0
+
+        active_archived_uids = set()
+        if self._table_exists(conn, "douyin_archived_creators"):
+            active_archived_uids = {
+                str(row[0] or "").strip()
+                for row in conn.execute(
+                    '''
+                    SELECT uploader_id
+                    FROM douyin_archived_creators
+                    WHERE archive_status = 'active'
+                    '''
+                ).fetchall()
+                if str(row[0] or "").strip()
+            }
 
         rows = conn.execute(
             '''
             SELECT "UP主UID"
             FROM cache_inventory_current
             WHERE TRIM(COALESCE("UP主UID", "")) != ""
-              AND LOWER(TRIM(COALESCE("有full缓存", ""))) IN ('是', 'yes', 'true', '1', 'y')
+              AND (
+                  LOWER(TRIM(COALESCE("有full缓存", ""))) IN ('是', 'yes', 'true', '1', 'y')
+                  OR LOWER(COALESCE("已缓存模式", "")) LIKE '%full%'
+                  OR LOWER(TRIM(COALESCE("最近抓取模式", ""))) = 'full'
+                  OR LOWER(TRIM(COALESCE("统计范围", ""))) = 'full'
+              )
             '''
         ).fetchall()
-        uids = [(str(row[0]).strip(),) for row in rows if str(row[0] or "").strip()]
+        uids = [
+            (uid,)
+            for uid in (str(row[0] or "").strip() for row in rows)
+            if uid and uid not in active_archived_uids
+        ]
         if uids:
             conn.executemany(
                 f'INSERT OR IGNORE INTO "{self.ELIGIBLE_UID_TABLE}" (uid) VALUES (?)',
                 uids,
             )
-        return True, len(uids)
+        return True, len(uids), len(active_archived_uids)
 
     def _stale_uid_count(self, conn, table):
         if not self._table_exists(conn, table):
@@ -1454,10 +1536,46 @@ class DouyinRatingOverviewDialog(QDialog):
         ).fetchone()
         return int(row[0] or 0) if row else 0
 
-    def _query_rows(self, conn, sql, limit=30):
+    def _query_rows(self, conn, sql, limit=30, params=()):
         if limit is None:
-            return conn.execute(sql).fetchall()
-        return conn.execute(sql, (limit,)).fetchall()
+            return conn.execute(sql, tuple(params)).fetchall()
+        return conn.execute(sql, (*tuple(params), limit)).fetchall()
+
+    def _current_search_uid(self):
+        return str(self.creator_search_input.text() or "").strip()
+
+    def _search_creator(self):
+        uid = self._current_search_uid()
+        if not uid:
+            QMessageBox.information(self, "请输入UP主ID", "请先输入要筛选的 UP主UID / sec_uid。")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_top_table)
+
+    def _clear_creator_search(self):
+        if self._current_search_uid():
+            self.creator_search_input.clear()
+            self.refresh_data()
+
+    def _load_archived_creator_rows(self, conn, limit=500, uploader_id=""):
+        if not self._table_exists(conn, "douyin_archived_creators"):
+            return []
+        uid_filter = "AND uploader_id = ?" if uploader_id else ""
+        params = (uploader_id, limit) if uploader_id else (limit,)
+        return conn.execute(
+            f"""
+            SELECT uploader_name, final_grade, final_score, confidence,
+                   inactive_days, follower_count, published_video_count,
+                   archived_at, archive_reason, uploader_id
+            FROM douyin_archived_creators
+            WHERE archive_status = 'active'
+              {uid_filter}
+            ORDER BY CAST(COALESCE(inactive_days, 0) AS REAL) DESC,
+                     CAST(COALESCE(final_score, 0) AS REAL) ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
 
     def _populate_table(self, table, rows):
         table.setSortingEnabled(False)
@@ -1466,6 +1584,17 @@ class DouyinRatingOverviewDialog(QDialog):
             for column_index, value in enumerate(row):
                 header_item = table.horizontalHeaderItem(column_index)
                 header_text = header_item.text() if header_item else ""
+                if header_text == "详情":
+                    uid = str(value or "").strip()
+                    button = QPushButton("详情")
+                    button.setEnabled(bool(uid))
+                    button.setProperty("uploader_id", uid)
+                    button.clicked.connect(self._show_creator_detail_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("详情")
+                    item.setData(SORT_ROLE, uid.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
                 text = self._fmt(value)
                 item = SortableTableWidgetItem(text)
                 item.setToolTip(text)
@@ -1484,11 +1613,322 @@ class DouyinRatingOverviewDialog(QDialog):
             table.setRowHeight(row_index, 42)
         table.setSortingEnabled(True)
 
+    def _show_creator_detail_from_button(self):
+        button = self.sender()
+        uid = str(button.property("uploader_id") or "").strip() if button else ""
+        if uid:
+            self._show_creator_detail(uid)
+
     def _open_link_item(self, item):
         url = item.data(Qt.UserRole) if item else ""
         if not url:
             return
         QDesktopServices.openUrl(QUrl(str(url)))
+
+    def _show_creator_detail(self, uploader_id):
+        try:
+            detail = self._load_creator_detail(str(uploader_id or "").strip())
+        except Exception as exc:
+            QMessageBox.warning(self, "读取详情失败", str(exc))
+            return
+        if not detail.get("creator"):
+            QMessageBox.information(self, "没有详情", "未在当前评分快照中找到该 UP 主。")
+            return
+        CreatorDetailDialog(detail, self).exec_()
+
+    def _load_creator_detail(self, uploader_id):
+        if not uploader_id or not self.db_path.exists():
+            return {}
+
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            creator = conn.execute(
+                f'SELECT * FROM "{self.CREATOR_TABLE}" WHERE "UP主UID" = ? LIMIT 1',
+                (uploader_id,),
+            ).fetchone()
+            if not creator:
+                creator = self._load_archived_creator_detail(conn, uploader_id)
+            if not creator:
+                return {}
+
+            cached_video_count = self._load_cached_video_count(conn, uploader_id)
+            scored_video_count = self._count_videos_for_creator(conn, uploader_id)
+            downloaded_snapshot = self._count_downloaded_snapshot_for_creator(conn, uploader_id)
+            downloaded_records = self._count_aweme_download_records_for_creator(conn, uploader_id)
+            duration_rows = self._group_video_values(conn, uploader_id, "时长分类")
+            grade_rows = self._group_video_values(conn, uploader_id, "视频最终等级", grade_order=True)
+            like_rows = self._group_like_values(conn, uploader_id)
+            year_rows = self._group_year_values(conn, uploader_id)
+            like_series = self._load_like_series(conn, uploader_id)
+
+        return {
+            "creator": dict(creator),
+            "cached_video_count": cached_video_count,
+            "scored_video_count": scored_video_count,
+            "downloaded_count": max(downloaded_snapshot, downloaded_records),
+            "duration_rows": duration_rows,
+            "grade_rows": grade_rows,
+            "like_rows": like_rows,
+            "year_rows": year_rows,
+            "like_series": like_series,
+        }
+
+    def _load_archived_creator_detail(self, conn, uploader_id):
+        if not self._table_exists(conn, "douyin_archived_creators"):
+            return None
+        row = conn.execute(
+            """
+            SELECT *
+            FROM douyin_archived_creators
+            WHERE uploader_id = ? AND archive_status = 'active'
+            LIMIT 1
+            """,
+            (uploader_id,),
+        ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        return {
+            "UP主姓名": data.get("uploader_name", ""),
+            "UP主UID": data.get("uploader_id", ""),
+            "UP主主页链接": data.get("homepage_url", ""),
+            "UP手动等级": data.get("manual_grade", ""),
+            "UP最终等级": data.get("final_grade", ""),
+            "UP最终分": data.get("final_score", ""),
+            "评级置信度": data.get("confidence", ""),
+            "评分来源": "archived_snapshot",
+            "粉丝数": data.get("follower_count", ""),
+            "获赞总数": data.get("total_like_count", ""),
+            "最近更新时间": data.get("latest_publish_time", ""),
+            "未更新天数": data.get("inactive_days", ""),
+            "平均几天一更": data.get("avg_update_days", ""),
+            "视频数量": data.get("published_video_count", ""),
+            "评分原因": data.get("archive_reason", ""),
+            "缺失指标": "",
+        }
+
+    def _load_cached_video_count(self, conn, uploader_id):
+        counts = []
+        if self._table_exists(conn, "cache_inventory_current"):
+            row = conn.execute(
+                'SELECT "缓存视频数" FROM "cache_inventory_current" WHERE "UP主UID" = ? LIMIT 1',
+                (uploader_id,),
+            ).fetchone()
+            if row:
+                try:
+                    counts.append(int(float(row[0] or 0)))
+                except (TypeError, ValueError):
+                    pass
+        if self._table_exists(conn, "douyin_video_state"):
+            row = conn.execute(
+                'SELECT COUNT(*) FROM "douyin_video_state" WHERE "uploader_id" = ?',
+                (uploader_id,),
+            ).fetchone()
+            if row:
+                counts.append(int(row[0] or 0))
+        return max(counts) if counts else 0
+
+    def _count_videos_for_creator(self, conn, uploader_id):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return 0
+        row = conn.execute(
+            f'SELECT COUNT(*) FROM "{self.VIDEO_TABLE}" WHERE "UP主UID" = ?',
+            (uploader_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _count_downloaded_snapshot_for_creator(self, conn, uploader_id):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return 0
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
+        if "下载状态" not in columns and "下载路径" not in columns:
+            return 0
+        status_expr = 'TRIM(COALESCE("下载状态", "")) != ""' if "下载状态" in columns else "0"
+        path_expr = 'TRIM(COALESCE("下载路径", "")) != ""' if "下载路径" in columns else "0"
+        row = conn.execute(
+            f'''
+            SELECT COUNT(*)
+            FROM "{self.VIDEO_TABLE}"
+            WHERE "UP主UID" = ?
+              AND ({status_expr} OR {path_expr})
+            ''',
+            (uploader_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _count_aweme_download_records_for_creator(self, conn, uploader_id):
+        if not self._table_exists(conn, "aweme"):
+            return 0
+        columns = {row[1] for row in conn.execute('PRAGMA table_info("aweme")')}
+        if "author_id" not in columns:
+            return 0
+        file_filter = 'AND TRIM(COALESCE(file_path, "")) != ""' if "file_path" in columns else ""
+        row = conn.execute(
+            f'''
+            SELECT COUNT(*)
+            FROM aweme
+            WHERE TRIM(COALESCE(author_id, "")) = ?
+            {file_filter}
+            ''',
+            (uploader_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _group_video_values(self, conn, uploader_id, column, grade_order=False):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return []
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
+        if column not in columns:
+            return []
+        rows = conn.execute(
+            f'''
+            SELECT COALESCE(NULLIF(TRIM("{column}"), ''), '未分类') AS name, COUNT(*) AS count
+            FROM "{self.VIDEO_TABLE}"
+            WHERE "UP主UID" = ?
+            GROUP BY COALESCE(NULLIF(TRIM("{column}"), ''), '未分类')
+            ''',
+            (uploader_id,),
+        ).fetchall()
+        values = [(str(row["name"] or "未分类"), int(row["count"] or 0)) for row in rows]
+        if grade_order:
+            order = {grade: index for index, grade in enumerate(self.GRADE_ORDER)}
+            values.sort(key=lambda item: order.get(item[0], len(order)))
+        else:
+            values.sort(key=lambda item: item[1], reverse=True)
+        return values
+
+    def _group_like_values(self, conn, uploader_id):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return []
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
+        if "点赞数" not in columns:
+            return []
+        rows = conn.execute(
+            f'SELECT "点赞数" FROM "{self.VIDEO_TABLE}" WHERE "UP主UID" = ?',
+            (uploader_id,),
+        ).fetchall()
+        buckets = [
+            ("0-999", 0, 999),
+            ("1千-9999", 1000, 9999),
+            ("1万-9.9万", 10000, 99999),
+            ("10万+", 100000, None),
+        ]
+        counts = {label: 0 for label, _, _ in buckets}
+        missing = 0
+        for (value,) in rows:
+            try:
+                like_count = int(float(str(value or "").replace(",", "")))
+            except (TypeError, ValueError):
+                missing += 1
+                continue
+            matched = False
+            for label, lower, upper in buckets:
+                if like_count >= lower and (upper is None or like_count <= upper):
+                    counts[label] += 1
+                    matched = True
+                    break
+            if not matched:
+                missing += 1
+        values = [(label, count) for label, count in counts.items() if count > 0]
+        if missing:
+            values.append(("无点赞数据", missing))
+        return values
+
+    def _group_year_values(self, conn, uploader_id):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return []
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
+        if "发布时间戳" not in columns and "发布日期" not in columns:
+            return []
+        publish_expr = '"发布时间戳"' if "发布时间戳" in columns else "''"
+        date_expr = '"发布日期"' if "发布日期" in columns else "''"
+        like_expr = '"点赞数"' if "点赞数" in columns else "0"
+        rows = conn.execute(
+            f'''
+            SELECT {publish_expr} AS publish_ts, {date_expr} AS publish_date, {like_expr} AS like_count
+            FROM "{self.VIDEO_TABLE}"
+            WHERE "UP主UID" = ?
+            ''',
+            (uploader_id,),
+        ).fetchall()
+        grouped = {}
+        for publish_ts, publish_date, like_count in rows:
+            year = self._extract_year(publish_ts, publish_date)
+            item = grouped.setdefault(year, {"count": 0, "likes": 0})
+            item["count"] += 1
+            item["likes"] += self._safe_number(like_count)
+        sortable = sorted(
+            grouped.items(),
+            key=lambda item: (item[0] == "未知年份", item[0]),
+        )
+        known_years = [item for item in sortable if item[0] != "未知年份"]
+        unknown_years = [item for item in sortable if item[0] == "未知年份"]
+        sortable = list(reversed(known_years)) + unknown_years
+        return [(year, data["count"], data["likes"]) for year, data in sortable]
+
+    def _load_like_series(self, conn, uploader_id):
+        if not self._table_exists(conn, self.VIDEO_TABLE):
+            return []
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
+        if "点赞数" not in columns:
+            return []
+        title_expr = '"视频标题"' if "视频标题" in columns else "''"
+        publish_expr = '"发布时间戳"' if "发布时间戳" in columns else "0"
+        date_expr = '"发布日期"' if "发布日期" in columns else "''"
+        grade_expr = '"视频最终等级"' if "视频最终等级" in columns else "''"
+        rows = conn.execute(
+            f'''
+            SELECT {title_expr} AS title,
+                   {publish_expr} AS publish_ts,
+                   {date_expr} AS publish_date,
+                   "点赞数" AS like_count,
+                   {grade_expr} AS grade
+            FROM "{self.VIDEO_TABLE}"
+            WHERE "UP主UID" = ?
+            ''',
+            (uploader_id,),
+        ).fetchall()
+        values = []
+        for row in rows:
+            publish_ts = self._safe_number(row["publish_ts"])
+            publish_date = str(row["publish_date"] or "").strip()
+            values.append(
+                {
+                    "title": str(row["title"] or "").strip(),
+                    "publish_ts": publish_ts,
+                    "publish_date": publish_date,
+                    "like_count": self._safe_number(row["like_count"]),
+                    "grade": str(row["grade"] or "").strip(),
+                }
+            )
+        values.sort(
+            key=lambda item: (
+                item.get("publish_ts") or 0,
+                item.get("publish_date") or "",
+                item.get("title") or "",
+            )
+        )
+        return values
+
+    @staticmethod
+    def _safe_number(value):
+        try:
+            text = str(value or "").replace(",", "").strip()
+            return int(float(text)) if text else 0
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _extract_year(publish_ts, publish_date):
+        timestamp = DouyinRatingOverviewDialog._safe_number(publish_ts)
+        if timestamp > 0:
+            try:
+                return datetime.fromtimestamp(timestamp).strftime("%Y")
+            except (OSError, OverflowError, ValueError):
+                pass
+        text = str(publish_date or "").strip()
+        match = re.search(r"(19|20)\d{2}", text)
+        return match.group(0) if match else "未知年份"
 
     def _clear_tables(self):
         for table in (
@@ -1496,6 +1936,7 @@ class DouyinRatingOverviewDialog(QDialog):
             self.creator_low_table,
             self.video_top_table,
             self.video_watch_table,
+            self.archived_creator_table,
         ):
             table.setRowCount(0)
 
@@ -1524,25 +1965,23 @@ class DouyinRatingOverviewDialog(QDialog):
             self._clear_tables()
             return
 
+        search_uid = self._current_search_uid()
+
         try:
             with sqlite3.connect(str(self.db_path)) as conn:
                 has_creator = self._table_exists(conn, self.CREATOR_TABLE)
                 has_video = self._table_exists(conn, self.VIDEO_TABLE)
-                has_eligible_filter, eligible_count = self._prepare_eligible_uid_filter(conn)
+                has_eligible_filter, eligible_count, archived_count = self._prepare_eligible_uid_filter(conn)
                 stale_creator_count = (
                     self._stale_uid_count(conn, self.CREATOR_TABLE)
                     if has_eligible_filter and has_creator
                     else 0
                 )
-                stale_video_count = (
-                    self._stale_uid_count(conn, self.VIDEO_TABLE)
-                    if has_eligible_filter and has_video
-                    else 0
-                )
+                stale_video_count = 0
 
                 if not has_creator and not has_video:
                     self.summary_label.setText(
-                        "还没有生成评分数据。请先在主界面运行“抖音视频评分”和“抖音UP主评分”。"
+                        "未找到评分表，请先运行抖音视频评分或 UP 主评分。"
                     )
                     self._clear_tables()
                     return
@@ -1564,37 +2003,48 @@ class DouyinRatingOverviewDialog(QDialog):
                     self._set_summary("creator", total, counts, low_confidence)
                     creator_join = (
                         f'JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON c."UP主UID" = e.uid'
-                        if has_eligible_filter
+                        if has_eligible_filter and not search_uid
                         else ""
                     )
+                    creator_where = 'WHERE c."UP主UID" = ?' if search_uid else ""
+                    creator_params = (search_uid,) if search_uid else ()
                     self._populate_table(
                         self.creator_top_table,
                         self._query_rows(
                             conn,
                             f"""
                             SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                                   c."粉丝数", c."视频数量", c."UP主主页链接"
+                                   c."粉丝数", c."视频数量", c."UP主UID"
                             FROM creator_score_current AS c
                             {creator_join}
+                            {creator_where}
                             ORDER BY CAST(c."UP最终分" AS REAL) DESC
                             """,
                             limit=None,
+                            params=creator_params,
                         ),
                     )
+                    low_conditions = [
+                        '(c."UP最终等级" IN (\'C\', \'D\') OR c."评级置信度" IN (\'低\', \'中\'))'
+                    ]
+                    low_params = []
+                    if search_uid:
+                        low_conditions.insert(0, 'c."UP主UID" = ?')
+                        low_params.append(search_uid)
                     self._populate_table(
                         self.creator_low_table,
                         self._query_rows(
                             conn,
                             f"""
                             SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                                   c."未更新天数", c."低等级视频比例", c."UP主主页链接"
+                                   c."未更新天数", c."低等级视频比例", c."UP主UID"
                             FROM creator_score_current AS c
                             {creator_join}
-                            WHERE c."UP最终等级" IN ('C', 'D')
-                               OR c."评级置信度" IN ('低', '中')
+                            WHERE {' AND '.join(low_conditions)}
                             ORDER BY CAST(c."UP最终分" AS REAL) ASC
                             LIMIT ?
                             """,
+                            params=low_params,
                         ),
                     )
                 else:
@@ -1602,26 +2052,29 @@ class DouyinRatingOverviewDialog(QDialog):
                     self.creator_top_table.setRowCount(0)
                     self.creator_low_table.setRowCount(0)
 
+                self._populate_table(
+                    self.archived_creator_table,
+                    self._load_archived_creator_rows(conn, uploader_id=search_uid),
+                )
+
                 if has_video:
                     total, counts = self._grade_counts(
                         conn,
                         self.VIDEO_TABLE,
                         "视频最终等级",
-                        eligible_only=has_eligible_filter,
+                        eligible_only=False,
                     )
                     low_confidence = self._confidence_count(
                         conn,
                         self.VIDEO_TABLE,
                         "评分置信度",
                         ["很低", "低", "中"],
-                        eligible_only=has_eligible_filter,
+                        eligible_only=False,
                     )
                     self._set_summary("video", total, counts, low_confidence)
-                    video_join = (
-                        f'JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON v."UP主UID" = e.uid'
-                        if has_eligible_filter
-                        else ""
-                    )
+                    video_join = ""
+                    video_where = 'WHERE v."UP主UID" = ?' if search_uid else ""
+                    video_params = (search_uid,) if search_uid else ()
                     self._populate_table(
                         self.video_top_table,
                         self._query_rows(
@@ -1633,11 +2086,20 @@ class DouyinRatingOverviewDialog(QDialog):
                             {video_join}
                             LEFT JOIN creator_score_current AS c
                               ON v."UP主UID" = c."UP主UID"
-                            ORDER BY CAST("视频最终分" AS REAL) DESC
+                            {video_where}
+                            ORDER BY CAST(v."视频最终分" AS REAL) DESC
                             LIMIT ?
                             """,
+                            params=video_params,
                         ),
                     )
+                    watch_conditions = [
+                        '(v."评分置信度" IN (\'很低\', \'低\', \'中\') OR v."缺失指标" != \'\')'
+                    ]
+                    watch_params = []
+                    if search_uid:
+                        watch_conditions.insert(0, 'v."UP主UID" = ?')
+                        watch_params.append(search_uid)
                     self._populate_table(
                         self.video_watch_table,
                         self._query_rows(
@@ -1649,11 +2111,11 @@ class DouyinRatingOverviewDialog(QDialog):
                             {video_join}
                             LEFT JOIN creator_score_current AS c
                               ON v."UP主UID" = c."UP主UID"
-                            WHERE v."评分置信度" IN ('很低', '低', '中')
-                               OR v."评分状态" LIKE '%观察%'
+                            WHERE {' AND '.join(watch_conditions)}
                             ORDER BY CAST(v."视频最终分" AS REAL) DESC
                             LIMIT ?
                             """,
+                            params=watch_params,
                         ),
                     )
                 else:
@@ -1662,22 +2124,26 @@ class DouyinRatingOverviewDialog(QDialog):
                     self.video_watch_table.setRowCount(0)
 
             warning_parts = []
+            if search_uid:
+                warning_parts.append(f"筛选UP {search_uid}")
             if has_eligible_filter:
-                warning_parts.append(f"当前full缓存UP：{eligible_count}")
+                warning_parts.append(f"UP榜仅展示 full 缓存且未归档UP {eligible_count} 位")
+            if archived_count:
+                warning_parts.append(f"已排除 active 归档UP {archived_count} 位")
             if stale_creator_count:
-                warning_parts.append(f"已隐藏非当前full缓存UP评分：{stale_creator_count}")
-            if stale_video_count:
-                warning_parts.append(f"已隐藏非当前full缓存视频评分：{stale_video_count}")
-            warning_text = f"\n检测：{'；'.join(warning_parts)}" if warning_parts else ""
+                warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
+            if has_video:
+                warning_parts.append("视频榜展示当前缓存视频全集")
+            warning_text = f"\n范围：{'；'.join(warning_parts)}" if warning_parts else ""
             self.summary_label.setText(
-                f"评分数据来源：{self.db_path}\n"
-                f"S级只代表手动偏好；自动评分最高为A级。这里展示的是当前 SQLite 快照。{warning_text}"
+                f"评分数据已加载：{self.db_path}\n"
+                f"S级仅来自手动等级；自动评分最高为A级。数据来自本地 SQLite。{warning_text}"
             )
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as exc:
-            self.summary_label.setText(f"读取评分概览失败：{exc}")
+            self.summary_label.setText(f"读取评分数据失败：{exc}")
             self._clear_tables()
 
     def _set_summary(self, key, total, counts, low_confidence):
@@ -1687,15 +2153,900 @@ class DouyinRatingOverviewDialog(QDialog):
         self.summary_cells[(key, "low_confidence")].setText(str(low_confidence))
 
 
+class LikeLineChartWidget(QWidget):
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        self.rows = rows or []
+        self.setMinimumHeight(360)
+
+    @staticmethod
+    def _fmt_number(value):
+        try:
+            number = int(float(value or 0))
+        except (TypeError, ValueError):
+            number = 0
+        if number >= 10000:
+            return f"{number / 10000:.1f}万"
+        return f"{number:,}"
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 8, -8, -8)
+        painter.fillRect(rect, QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#d8dde6"), 1))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        if not self.rows:
+            painter.setPen(QColor("#6b7280"))
+            painter.drawText(rect, Qt.AlignCenter, "暂无点赞明细数据")
+            return
+
+        left = rect.left() + 72
+        right = rect.right() - 26
+        top = rect.top() + 34
+        bottom = rect.bottom() - 58
+        width = max(right - left, 1)
+        height = max(bottom - top, 1)
+
+        likes = [max(int(row.get("like_count") or 0), 0) for row in self.rows]
+        max_like = max(max(likes), 1)
+        point_count = len(likes)
+
+        painter.setPen(QPen(QColor("#e5e7eb"), 1))
+        for index in range(6):
+            y = bottom - int(height * index / 5)
+            painter.drawLine(left, y, right, y)
+            label_value = int(max_like * index / 5)
+            painter.setPen(QColor("#6b7280"))
+            painter.drawText(rect.left() + 8, y - 9, 58, 18, Qt.AlignRight | Qt.AlignVCenter, self._fmt_number(label_value))
+            painter.setPen(QPen(QColor("#e5e7eb"), 1))
+
+        painter.setPen(QPen(QColor("#9ca3af"), 1.4))
+        painter.drawLine(left, bottom, right, bottom)
+        painter.drawLine(left, top, left, bottom)
+
+        def x_for(idx):
+            if point_count <= 1:
+                return left + width // 2
+            return left + int(width * idx / (point_count - 1))
+
+        def y_for(value):
+            return bottom - int(height * value / max_like)
+
+        painter.setPen(QPen(QColor("#2563eb"), 2.2))
+        points = [(x_for(index), y_for(value)) for index, value in enumerate(likes)]
+        for start, end in zip(points, points[1:]):
+            painter.drawLine(start[0], start[1], end[0], end[1])
+
+        painter.setPen(QPen(QColor("#1d4ed8"), 1.5))
+        painter.setBrush(QColor("#60a5fa"))
+        step = max(point_count // 90, 1)
+        for index, (x, y) in enumerate(points):
+            if index % step == 0 or index in {0, point_count - 1}:
+                painter.drawEllipse(x - 3, y - 3, 6, 6)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor("#374151"))
+        painter.drawText(left, rect.top() + 8, right - left, 22, Qt.AlignCenter, "点赞趋势（按发表时间从早到晚排序）")
+        painter.drawText(left, bottom + 28, right - left, 22, Qt.AlignCenter, "视频编号")
+        painter.save()
+        painter.translate(rect.left() + 18, top + height // 2)
+        painter.rotate(-90)
+        painter.drawText(-80, 0, 160, 18, Qt.AlignCenter, "点赞数")
+        painter.restore()
+
+        x_labels = [(0, "1"), (point_count - 1, str(point_count))]
+        if point_count > 2:
+            middle = point_count // 2
+            x_labels.insert(1, (middle, str(middle + 1)))
+        for index, label in x_labels:
+            x = x_for(index)
+            painter.drawText(x - 28, bottom + 8, 56, 18, Qt.AlignCenter, label)
+
+
+class LikePreviewDialog(QDialog):
+    def __init__(self, detail, parent=None):
+        super().__init__(parent)
+        self.detail = detail or {}
+        self.creator = self.detail.get("creator") or {}
+        self.setWindowTitle(f"点赞预览 - {self.creator.get('UP主姓名') or ''}")
+        self.resize(980, 760)
+        self.setMinimumSize(860, 620)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 7px 16px;
+                min-height: 30px;
+            }
+            """
+        )
+        self._build_ui()
+
+    @staticmethod
+    def _fmt(value):
+        if value is None:
+            return "-"
+        text = str(value).strip()
+        return text if text else "-"
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(
+            f"{self._fmt(self.creator.get('UP主姓名'))}  |  "
+            f"等级 {self._fmt(self.creator.get('UP最终等级'))}  |  "
+            f"视频数 {len(self.detail.get('like_series') or [])}"
+        )
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            "padding: 10px 12px; color: #111827; background: #f8fafc; "
+            "border: 1px solid #d8dde6; border-radius: 8px; font-size: 16px; font-weight: 700;"
+        )
+        layout.addWidget(title)
+
+        chart_group = QGroupBox("点赞折线图")
+        chart_layout = QVBoxLayout(chart_group)
+        chart_layout.addWidget(LikeLineChartWidget(self.detail.get("like_series") or []))
+        tip = QLabel("横坐标：按发表时间升序排列的视频编号；纵坐标：单条视频点赞数。")
+        tip.setStyleSheet("color: #6b7280;")
+        chart_layout.addWidget(tip)
+        layout.addWidget(chart_group, stretch=1)
+
+        cards = QGroupBox("框选数据")
+        cards_layout = QVBoxLayout(cards)
+        cards_layout.addWidget(self._distribution_group("视频点赞构成", self.detail.get("like_rows") or []))
+        cards_layout.addWidget(self._year_distribution_group("视频年份构成", self.detail.get("year_rows") or []))
+        layout.addWidget(cards)
+
+        button_row = QHBoxLayout()
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+    def _distribution_group(self, title, rows):
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        total = sum(count for _, count in rows)
+        if not rows:
+            grid.addWidget(QLabel("暂无明细数据"), 0, 0)
+            return group
+        for index, (name, count) in enumerate(rows):
+            percent = f"{(count / total * 100):.1f}%" if total else "0.0%"
+            row = index // 2
+            col = (index % 2) * 2
+            name_label = QLabel(str(name))
+            name_label.setStyleSheet("font-weight: 700; color: #374151;")
+            value_label = QLabel(f"{count}  ({percent})")
+            grid.addWidget(name_label, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return group
+
+    def _year_distribution_group(self, title, rows):
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        total_count = sum(count for _, count, _ in rows)
+        if not rows:
+            grid.addWidget(QLabel("暂无明细数据"), 0, 0)
+            return group
+        for index, (year, count, like_sum) in enumerate(rows):
+            percent = f"{(count / total_count * 100):.1f}%" if total_count else "0.0%"
+            row = index // 2
+            col = (index % 2) * 2
+            name_label = QLabel(str(year))
+            name_label.setStyleSheet("font-weight: 700; color: #374151;")
+            value_label = QLabel(f"视频 {int(count):,} 条 ({percent}) / 点赞总数 {int(like_sum):,}")
+            grid.addWidget(name_label, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return group
+
+
+class CreatorDetailDialog(QDialog):
+    FACTOR_COLUMNS = [
+        ("粉丝数量分", "粉丝数量分"),
+        ("获赞总数分", "获赞总数分"),
+        ("最近更新时间分", "最近更新时间分"),
+        ("平均几天一更分", "平均几天一更分"),
+        ("视频数量分", "视频数量分"),
+        ("最早视频时间分", "最早视频时间分"),
+        ("平均点赞数分", "平均点赞数分"),
+        ("视频等级分布分", "视频等级分布分"),
+        ("低等级比例分", "低等级比例分"),
+        ("最近10条趋势分", "最近10条趋势分"),
+        ("风险扣分", "风险扣分"),
+    ]
+
+    def __init__(self, detail, parent=None):
+        super().__init__(parent)
+        self.detail = detail or {}
+        self.creator = self.detail.get("creator") or {}
+        self.setWindowTitle(f"UP主详情 - {self.creator.get('UP主姓名') or ''}")
+        self.resize(920, 760)
+        self.setMinimumSize(820, 640)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+            QTableWidget {
+                font-size: 14px;
+                gridline-color: #d8dde6;
+                alternate-background-color: #f7f8fb;
+            }
+            QHeaderView::section {
+                font-size: 14px;
+                font-weight: 700;
+                padding: 7px 9px;
+                background: #f1f5f9;
+                border: 1px solid #d8dde6;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 7px 16px;
+                min-height: 30px;
+            }
+            """
+        )
+        self._build_ui()
+
+    @staticmethod
+    def _fmt(value):
+        if value is None:
+            return "-"
+        if isinstance(value, float):
+            return f"{value:.2f}"
+        text = str(value).strip()
+        return text if text else "-"
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(
+            f"{self._fmt(self.creator.get('UP主姓名'))}  |  "
+            f"等级 {self._fmt(self.creator.get('UP最终等级'))}  |  "
+            f"分数 {self._fmt(self.creator.get('UP最终分'))}  |  "
+            f"置信度 {self._fmt(self.creator.get('评级置信度'))}"
+        )
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            "padding: 10px 12px; color: #111827; background: #f8fafc; "
+            "border: 1px solid #d8dde6; border-radius: 8px; font-size: 16px; font-weight: 700;"
+        )
+        layout.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+
+        body_layout.addWidget(self._basic_group())
+        body_layout.addWidget(self._factor_group())
+        body_layout.addWidget(self._distribution_group("视频等级构成", self.detail.get("grade_rows") or []))
+        body_layout.addWidget(self._distribution_group("视频时长构成", self.detail.get("duration_rows") or []))
+        body_layout.addWidget(self._distribution_group("视频点赞构成", self.detail.get("like_rows") or []))
+        body_layout.addWidget(self._year_distribution_group("视频年份构成", self.detail.get("year_rows") or []))
+
+        reason_group = QGroupBox("评分说明")
+        reason_layout = QVBoxLayout(reason_group)
+        reason = QLabel(
+            f"评分来源：{self._fmt(self.creator.get('评分来源'))}\n"
+            f"评分原因：{self._fmt(self.creator.get('评分原因'))}\n"
+            f"缺失指标：{self._fmt(self.creator.get('缺失指标'))}"
+        )
+        reason.setWordWrap(True)
+        reason.setStyleSheet("line-height: 1.5;")
+        reason_layout.addWidget(reason)
+        body_layout.addWidget(reason_group)
+
+        scroll.setWidget(body)
+        layout.addWidget(scroll, stretch=1)
+
+        button_row = QHBoxLayout()
+        like_preview_button = QPushButton("点赞预览")
+        like_preview_button.clicked.connect(self._open_like_preview)
+        grade_button = QPushButton("等级设置")
+        grade_button.clicked.connect(self._set_manual_grade)
+        homepage = QPushButton("打开主页")
+        homepage.setEnabled(bool(str(self.creator.get("UP主主页链接") or "").strip()))
+        homepage.clicked.connect(self._open_homepage)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(like_preview_button)
+        button_row.addWidget(grade_button)
+        button_row.addWidget(homepage)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+    def _basic_group(self):
+        group = QGroupBox("基础信息")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        items = [
+            ("粉丝数", self.creator.get("粉丝数")),
+            ("获赞总数", self.creator.get("获赞总数")),
+            ("作品数", self.creator.get("视频数量")),
+            ("已缓存视频数", self.detail.get("cached_video_count")),
+            ("已下载视频数", self.detail.get("downloaded_count")),
+            ("视频评分表数量", self.detail.get("scored_video_count")),
+            ("已评分视频数", self.creator.get("已评分视频数")),
+            ("未更新天数", self.creator.get("未更新天数")),
+            ("最近更新时间", self.creator.get("最近更新时间")),
+            ("平均几天一更", self.creator.get("平均几天一更")),
+            ("最早视频时间", self.creator.get("最早视频时间")),
+            ("创作跨度(天)", self.creator.get("创作跨度(天)")),
+            ("低等级视频比例", self.creator.get("低等级视频比例")),
+        ]
+        for index, (label, value) in enumerate(items):
+            row = index // 2
+            col = (index % 2) * 2
+            name = QLabel(label)
+            name.setStyleSheet("font-weight: 700; color: #374151;")
+            value_label = QLabel(self._fmt(value))
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(name, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return group
+
+    def _factor_group(self):
+        group = QGroupBox("各因素分数")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        for index, (label, key) in enumerate(self.FACTOR_COLUMNS):
+            row = index // 2
+            col = (index % 2) * 2
+            name = QLabel(label)
+            name.setStyleSheet("font-weight: 700; color: #374151;")
+            value = QLabel(self._fmt(self.creator.get(key)))
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(name, row, col)
+            grid.addWidget(value, row, col + 1)
+        return group
+
+    def _distribution_group(self, title, rows):
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        total = sum(count for _, count in rows)
+        if not rows:
+            empty = QLabel("暂无明细数据")
+            empty.setStyleSheet("color: #6b7280;")
+            grid.addWidget(empty, 0, 0)
+            return group
+        for index, (name, count) in enumerate(rows):
+            percent = f"{(count / total * 100):.1f}%" if total else "0.0%"
+            row = index // 2
+            col = (index % 2) * 2
+            name_label = QLabel(str(name))
+            name_label.setStyleSheet("font-weight: 700; color: #374151;")
+            value_label = QLabel(f"{count}  ({percent})")
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(name_label, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return group
+
+    def _year_distribution_group(self, title, rows):
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(10)
+        total_count = sum(count for _, count, _ in rows)
+        if not rows:
+            empty = QLabel("暂无明细数据")
+            empty.setStyleSheet("color: #6b7280;")
+            grid.addWidget(empty, 0, 0)
+            return group
+        for index, (year, count, like_sum) in enumerate(rows):
+            percent = f"{(count / total_count * 100):.1f}%" if total_count else "0.0%"
+            row = index // 2
+            col = (index % 2) * 2
+            name_label = QLabel(str(year))
+            name_label.setStyleSheet("font-weight: 700; color: #374151;")
+            value_label = QLabel(f"视频 {int(count):,} 条 ({percent}) / 点赞总数 {int(like_sum):,}")
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(name_label, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return group
+
+    def _open_like_preview(self):
+        LikePreviewDialog(self.detail, self).exec_()
+
+    def _set_manual_grade(self):
+        uploader_id = str(self.creator.get("UP主UID") or "").strip()
+        uploader_name = str(self.creator.get("UP主姓名") or "").strip() or uploader_id
+        if not uploader_id:
+            QMessageBox.warning(self, "无法设置等级", "当前详情缺少 UP主UID，无法写入手动等级。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"等级设置 - {uploader_name}")
+        dialog.resize(420, 180)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        hint = QLabel(
+            "手动等级会写入本地 SQLite，并在重新评分后覆盖自动等级。\n"
+            "选择“自动评分”会清除该 UP 的手动等级。"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        grade_combo = QComboBox()
+        grade_combo.addItem("自动评分（清除手动等级）", "")
+        for grade in ("S", "A", "B", "C", "D"):
+            grade_combo.addItem(grade, grade)
+        current_grade = str(self.creator.get("UP手动等级") or "").strip().upper()
+        if current_grade in {"S", "A", "B", "C", "D"}:
+            grade_combo.setCurrentIndex({"S": 1, "A": 2, "B": 3, "C": 4, "D": 5}[current_grade])
+        note_input = QLineEdit()
+        note_input.setPlaceholderText("可选：记录设置原因")
+        form.addRow("手动等级", grade_combo)
+        form.addRow("备注", note_input)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        save_button = QPushButton("保存")
+        cancel_button = QPushButton("取消")
+        save_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(save_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        grade = str(grade_combo.currentData() or "").strip().upper()
+        note = note_input.text().strip()
+        try:
+            self._save_manual_grade(uploader_id, grade, note)
+        except Exception as exc:
+            QMessageBox.warning(self, "保存失败", f"手动等级保存失败：{exc}")
+            return
+
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "refresh_scores"):
+            parent.refresh_scores()
+        QMessageBox.information(
+            self,
+            "已保存",
+            f"已{'设置' if grade else '清除'} {uploader_name} 的手动等级"
+            f"{f'：{grade}' if grade else ''}。\n评分数据正在刷新，完成后列表会更新。",
+        )
+        self.accept()
+
+    def _save_manual_grade(self, uploader_id, grade, note):
+        parent = self.parent()
+        db_path = getattr(parent, "db_path", None)
+        if not db_path:
+            raise RuntimeError("未找到评分数据库路径")
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS douyin_creator_manual_rating (
+                    uploader_id TEXT PRIMARY KEY,
+                    manual_grade TEXT NOT NULL,
+                    note TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            if grade:
+                conn.execute(
+                    """
+                    INSERT INTO douyin_creator_manual_rating
+                        (uploader_id, manual_grade, note, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(uploader_id) DO UPDATE SET
+                        manual_grade=excluded.manual_grade,
+                        note=excluded.note,
+                        updated_at=excluded.updated_at
+                    """,
+                    (uploader_id, grade, note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                )
+            else:
+                conn.execute(
+                    'DELETE FROM douyin_creator_manual_rating WHERE uploader_id = ?',
+                    (uploader_id,),
+                )
+            conn.commit()
+
+    def _open_homepage(self):
+        url = str(self.creator.get("UP主主页链接") or "").strip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+
+class DouyinStatusResetDialog(QDialog):
+    COLUMNS = [
+        ("UP主", "uploader_name"),
+        ("发布视频数", "published_video_count"),
+        ("缓存视频数", "cached_video_count"),
+        ("差值", "diff_count"),
+        ("最近抓取模式", "last_fetch_mode"),
+        ("已缓存模式", "cache_modes"),
+        ("缓存时间", "progress_cached_at"),
+        ("UP主主页链接", "homepage_url"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("抖音状态重置")
+        self.resize(1180, 720)
+        self.setMinimumSize(980, 620)
+        self.setStyleSheet(
+            """
+            QDialog {
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: 700;
+                margin-top: 10px;
+                padding-top: 14px;
+            }
+            QTableWidget {
+                font-size: 15px;
+                gridline-color: #d8dde6;
+                alternate-background-color: #f7f8fb;
+                selection-background-color: #dbeafe;
+                selection-color: #111827;
+            }
+            QHeaderView::section {
+                font-size: 15px;
+                font-weight: 700;
+                padding: 8px 10px;
+                background: #f1f5f9;
+                border: 1px solid #d8dde6;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 7px 16px;
+                min-height: 30px;
+            }
+            """
+        )
+
+        from douyin_analyzer.config import load_analyzer_config
+
+        self.config = load_analyzer_config()
+        self.db_path = Path(self.config.export_store_db)
+        self.reset_uids = set()
+        self.rows = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(
+            "padding: 10px 12px; color: #263241; background: #f8fafc; "
+            "border: 1px solid #d8dde6; border-radius: 8px;"
+        )
+        layout.addWidget(self.summary_label)
+
+        filter_group = QGroupBox("筛选条件")
+        filter_layout = QHBoxLayout(filter_group)
+        filter_layout.addWidget(QLabel("差值超过"))
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(1, 100000)
+        self.threshold_spin.setValue(30)
+        self.threshold_spin.setMaximumWidth(110)
+        filter_layout.addWidget(self.threshold_spin)
+        filter_layout.addWidget(QLabel("仅列出 full 状态下，发布视频数与缓存视频数差距过大的 UP。"))
+        filter_layout.addStretch(1)
+        self.refresh_button = QPushButton("刷新列表")
+        self.refresh_button.clicked.connect(self.refresh_data)
+        filter_layout.addWidget(self.refresh_button)
+        layout.addWidget(filter_group)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([label for label, _ in self.COLUMNS])
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.itemClicked.connect(self._open_link_item)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(42)
+        self.table.horizontalHeader().setMinimumHeight(42)
+        for column, (label, _) in enumerate(self.COLUMNS):
+            if label == "UP主主页链接":
+                self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+            else:
+                self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        layout.addWidget(self.table, stretch=1)
+
+        button_row = QHBoxLayout()
+        self.reset_selected_button = QPushButton("重置选中状态")
+        self.reset_selected_button.clicked.connect(self.reset_selected)
+        self.close_button = QPushButton("关闭")
+        self.close_button.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(self.reset_selected_button)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+        self.refresh_data()
+
+    @staticmethod
+    def _safe_int(value, default=0):
+        try:
+            if value in (None, ""):
+                return default
+            return int(float(str(value).replace(",", "")))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _fmt(value):
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.0f}" if value.is_integer() else f"{value:.2f}"
+        return str(value)
+
+    def _is_full_row(self, row):
+        cached_modes = str(row.get("已缓存模式") or "").lower()
+        last_fetch_mode = str(row.get("最近抓取模式") or "").strip().lower()
+        has_full = str(row.get("有full缓存") or "").strip().lower()
+        return (
+            "full" in {part.strip() for part in cached_modes.split(",")}
+            or last_fetch_mode == "full"
+            or has_full in {"是", "yes", "true", "1", "y"}
+        )
+
+    def _load_candidates(self):
+        if not self.db_path.exists():
+            return []
+        threshold = self.threshold_spin.value()
+        self.reset_uids = self._load_reset_uids()
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if not DouyinRatingOverviewDialog._table_exists(conn, "cache_inventory_current"):
+                return []
+            rows = conn.execute('SELECT * FROM "cache_inventory_current"').fetchall()
+        candidates = []
+        for row in rows:
+            row_dict = dict(row)
+            uid = str(row_dict.get("UP主UID") or "").strip()
+            if uid and uid in self.reset_uids:
+                continue
+            if not self._is_full_row(row_dict):
+                continue
+            published = self._safe_int(row_dict.get("发布视频数量"))
+            cached = self._safe_int(row_dict.get("缓存视频数"))
+            diff = published - cached
+            if published <= 0 or diff <= threshold:
+                continue
+            candidates.append(
+                {
+                    "uploader_id": uid,
+                    "uploader_name": row_dict.get("UP主姓名") or "",
+                    "published_video_count": published,
+                    "cached_video_count": cached,
+                    "diff_count": diff,
+                    "last_fetch_mode": row_dict.get("最近抓取模式") or "",
+                    "cache_modes": row_dict.get("已缓存模式") or "",
+                    "progress_cached_at": row_dict.get("进度缓存时间") or "",
+                    "homepage_url": row_dict.get("UP主主页链接") or "",
+                }
+            )
+        candidates.sort(key=lambda item: item["diff_count"], reverse=True)
+        return candidates
+
+    def _load_reset_uids(self):
+        try:
+            from douyin_analyzer.cache import CacheStore
+
+            progress = CacheStore(self.config).load_progress()
+        except Exception:
+            return set()
+        reset_uids = set()
+        for uid, entry in (progress or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
+            if entry.get("full_status_reset") or str(summary.get("summary_scope") or "").strip().lower() == "status_reset":
+                reset_uids.add(str(uid or "").strip())
+        return {uid for uid in reset_uids if uid}
+
+    def refresh_data(self):
+        try:
+            self.rows = self._load_candidates()
+        except Exception as exc:
+            self.summary_label.setText(f"读取异常 full 状态列表失败：{exc}")
+            self.table.setRowCount(0)
+            return
+        self._populate_table(self.rows)
+        self.summary_label.setText(
+            f"数据库：{self.db_path}\n"
+            f"候选：{len(self.rows)} 位；重置只会撤销 full 状态并置为过期，不删除视频缓存和评分数据。"
+        )
+
+    def _populate_table(self, rows):
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column_index, (label, key) in enumerate(self.COLUMNS):
+                value = row.get(key)
+                item = QTableWidgetItem(self._fmt(value))
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if column_index == 0:
+                    item.setData(Qt.UserRole + 1, row.get("uploader_id", ""))
+                if label == "UP主主页链接" and value:
+                    item.setText("打开主页")
+                    item.setToolTip(str(value))
+                    item.setData(Qt.UserRole, str(value))
+                    item.setForeground(Qt.blue)
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                self.table.setItem(row_index, column_index, item)
+            self.table.setRowHeight(row_index, 42)
+        self.table.setSortingEnabled(True)
+
+    def _open_link_item(self, item):
+        url = item.data(Qt.UserRole) if item else ""
+        if url:
+            QDesktopServices.openUrl(QUrl(str(url)))
+
+    def _selected_uids(self):
+        uids = []
+        for index in self.table.selectionModel().selectedRows():
+            item = self.table.item(index.row(), 0)
+            uid = str(item.data(Qt.UserRole + 1) or "").strip() if item else ""
+            if uid:
+                uids.append(uid)
+        return sorted(set(uids))
+
+    def reset_selected(self):
+        uids = self._selected_uids()
+        if not uids:
+            QMessageBox.information(self, "未选择", "请先选择需要重置 full 状态的 UP。")
+            return
+        if not QMessageBox.question(
+            self,
+            "确认重置状态",
+            f"将重置 {len(uids)} 位 UP 的 full 状态标记，并让后续完整模式重新抓取。\n"
+            "不会删除已有视频缓存、评分数据或下载文件。是否继续？",
+        ) == QMessageBox.Yes:
+            return
+        try:
+            count = self._reset_full_status(uids)
+        except Exception as exc:
+            QMessageBox.warning(self, "重置失败", str(exc))
+            return
+        QMessageBox.information(self, "重置完成", f"已重置 {count} 位 UP 的 full 状态。")
+        self.refresh_data()
+
+    def _reset_full_status(self, uids):
+        from douyin_analyzer.cache import CacheStore
+
+        cache_store = CacheStore(self.config)
+        progress = cache_store.load_progress()
+        if not isinstance(progress, dict):
+            return 0
+        candidate_by_uid = {row["uploader_id"]: row for row in self.rows}
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        changed = 0
+        for uid in uids:
+            entry = progress.get(uid)
+            if not isinstance(entry, dict):
+                continue
+            row = candidate_by_uid.get(uid, {})
+            modes = [
+                str(mode).strip().lower()
+                for mode in (entry.get("cache_modes") or [])
+                if str(mode).strip() and str(mode).strip().lower() != "full"
+            ]
+            entry["cache_modes"] = sorted(set(modes))
+            entry["last_fetch_mode"] = "status_reset"
+            entry["cached_at"] = 0
+            entry["full_status_reset"] = {
+                "reset_at": now_text,
+                "reason": "full_cached_video_count_mismatch",
+                "published_video_count": row.get("published_video_count", ""),
+                "cached_video_count": row.get("cached_video_count", ""),
+                "diff_count": row.get("diff_count", ""),
+            }
+            summary = entry.get("summary")
+            if isinstance(summary, dict):
+                summary["summary_scope"] = "status_reset"
+                summary["status_reset_at"] = now_text
+                summary["status_reset_reason"] = "full_cached_video_count_mismatch"
+            changed += 1
+        if changed:
+            cache_store.save_progress(progress)
+            self._update_inventory_rows(uids)
+        return changed
+
+    def _update_inventory_rows(self, uids):
+        if not self.db_path.exists():
+            return
+        with sqlite3.connect(str(self.db_path)) as conn:
+            if not DouyinRatingOverviewDialog._table_exists(conn, "cache_inventory_current"):
+                return
+            for uid in uids:
+                row = conn.execute(
+                    'SELECT "已缓存模式" FROM "cache_inventory_current" WHERE "UP主UID" = ?',
+                    (uid,),
+                ).fetchone()
+                modes = []
+                if row:
+                    modes = [
+                        part.strip()
+                        for part in str(row[0] or "").split(",")
+                        if part.strip() and part.strip().lower() != "full"
+                    ]
+                conn.execute(
+                    '''
+                UPDATE "cache_inventory_current"
+                SET "已缓存模式" = ?,
+                    "最近抓取模式" = 'status_reset',
+                    "有full缓存" = '',
+                    "进度缓存时间" = '',
+                    "下次可抓取时间" = '',
+                    "是否已到期" = '是',
+                    "统计范围" = 'status_reset'
+                WHERE "UP主UID" = ?
+                    ''',
+                    (",".join(sorted(set(modes))), uid),
+                )
+            conn.commit()
+
+
 class DouyinArchiveDialog(QDialog):
     CANDIDATE_COLUMNS = [
         ("UP主", "uploader_name"),
-        ("UP主UID", "uploader_id"),
         ("未更新天数", "inactive_days"),
         ("最后发布时间", "latest_publish_time"),
         ("等级", "final_grade"),
-        ("分数", "final_score"),
-        ("置信度", "confidence"),
         ("粉丝数", "follower_count"),
         ("作品数", "published_video_count"),
         ("缓存视频数", "cached_video_count"),
@@ -1704,12 +3055,10 @@ class DouyinArchiveDialog(QDialog):
     ]
     ARCHIVED_COLUMNS = [
         ("UP主", "uploader_name"),
-        ("UP主UID", "uploader_id"),
         ("状态", "archive_status"),
         ("未更新天数", "inactive_days"),
         ("最后发布时间", "latest_publish_time"),
         ("等级", "final_grade"),
-        ("分数", "final_score"),
         ("归档时间", "archived_at"),
         ("归档原因", "archive_reason"),
         ("UP主主页链接", "homepage_url"),
@@ -2075,6 +3424,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.worker = None
         self.cookie_checker = None
+        self.data_sync_worker = None
         self.log_dialog = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
@@ -2250,14 +3600,14 @@ class MainWindow(QMainWindow):
         controls_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         controls_layout = QVBoxLayout(controls_group)
         controls_layout.setContentsMargins(14, 16, 14, 12)
-        controls_layout.setSpacing(10)
-        button_row = QHBoxLayout()
-        button_row.setSpacing(12)
-        utility_button_row = QHBoxLayout()
-        utility_button_row.setSpacing(12)
+        controls_layout.setSpacing(8)
+        button_grid = QGridLayout()
+        button_grid.setHorizontalSpacing(10)
+        button_grid.setVerticalSpacing(8)
+        for column in range(7):
+            button_grid.setColumnStretch(column, 1)
         self.start_button = QPushButton("开始运行")
-        self.start_button.setMinimumWidth(118)
-        self.start_button.setStyleSheet("font-size: 18px; font-weight: 700; padding: 8px 16px; min-height: 36px;")
+        self.start_button.setStyleSheet("font-weight: 700;")
         self.start_button.clicked.connect(self._start)
         self.stop_button = QPushButton("终止运行")
         self.stop_button.setEnabled(False)
@@ -2274,6 +3624,10 @@ class MainWindow(QMainWindow):
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
         self.archive_button = QPushButton("归档管理")
         self.archive_button.clicked.connect(self._open_archive_manager)
+        self.douyin_status_reset_button = QPushButton("抖音状态重置")
+        self.douyin_status_reset_button.clicked.connect(self._open_douyin_status_reset)
+        self.douyin_data_sync_button = QPushButton("抖音数据同步")
+        self.douyin_data_sync_button.clicked.connect(self._start_douyin_data_sync)
         self.log_center_button = QPushButton("日志中心")
         self.log_center_button.clicked.connect(self._open_log_center)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
@@ -2284,37 +3638,33 @@ class MainWindow(QMainWindow):
         self.lock_button.clicked.connect(self._toggle_config_lock)
         self.clear_button = QPushButton("清空日志")
         self.clear_button.clicked.connect(self.log_text.clear)
-        primary_buttons = (
+        toolbar_buttons = (
             self.start_button,
             self.stop_button,
             self.high_like_export_button,
             self.video_download_button,
             self.unfollow_cleanup_button,
-        )
-        utility_buttons = (
             self.douyin_stats_button,
             self.rating_overview_button,
             self.archive_button,
+            self.douyin_status_reset_button,
+            self.douyin_data_sync_button,
             self.log_center_button,
             self.cookie_check_button,
             self.advanced_button,
             self.lock_button,
             self.clear_button,
         )
-        for button in primary_buttons:
-            button.setMinimumWidth(120)
-        for button in utility_buttons:
-            button.setMinimumWidth(112)
-        button_row.addWidget(self.start_button)
-        button_row.addWidget(self.stop_button)
-        button_row.addWidget(self.high_like_export_button)
-        button_row.addWidget(self.video_download_button)
-        button_row.addWidget(self.unfollow_cleanup_button)
-        button_row.addStretch(1)
-        for button in utility_buttons:
-            utility_button_row.addWidget(button, stretch=1)
-        controls_layout.addLayout(button_row)
-        controls_layout.addLayout(utility_button_row)
+        for button in toolbar_buttons:
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(16777215)
+            button.setMinimumHeight(30)
+            button.setMaximumHeight(32)
+            button.setStyleSheet((button.styleSheet() + " " if button.styleSheet() else "") + "font-size: 14px; padding: 4px 8px;")
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for index, button in enumerate(toolbar_buttons):
+            button_grid.addWidget(button, index // 7, index % 7)
+        controls_layout.addLayout(button_grid)
         layout.addWidget(controls_group)
 
         status_group = QGroupBox("运行状态")
@@ -2528,6 +3878,44 @@ class MainWindow(QMainWindow):
     def _open_archive_manager(self):
         dialog = DouyinArchiveDialog(self)
         dialog.exec_()
+
+    def _open_douyin_status_reset(self):
+        dialog = DouyinStatusResetDialog(self)
+        dialog.exec_()
+
+    def _start_douyin_data_sync(self):
+        if self.worker and self.worker.isRunning():
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+        if self.data_sync_worker and self.data_sync_worker.isRunning():
+            self._show_info_dialog("同步运行中", "抖音数据同步还在运行，请等待完成。")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "确认数据同步",
+                "将从本地 progress/raw 缓存补写视频明细到 SQLite，并重新生成视频评分和 UP 主评分。\n"
+                "不会重新抓取网页，也不会删除缓存。是否继续？",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+
+        self._append_log("开始抖音数据同步：progress/raw -> douyin_video_state -> video_score_current -> creator_score_current")
+        self._start_task_progress("抖音数据同步中，正在补齐本地表数据...")
+        _set_button_busy(self.douyin_data_sync_button, "同步中...")
+        self.data_sync_worker = DouyinDataSyncThread()
+        self.data_sync_worker.done.connect(self._on_douyin_data_sync_done)
+        self.data_sync_worker.start()
+
+    def _on_douyin_data_sync_done(self, ok, message):
+        _restore_button_busy(self.douyin_data_sync_button)
+        self._append_log(message)
+        self._finish_task_progress(ok, message)
+        if ok:
+            self._show_info_dialog("同步完成", message)
+        else:
+            self._show_error_dialog("同步失败", message)
 
     def _open_log_center(self):
         if self.log_dialog is None:

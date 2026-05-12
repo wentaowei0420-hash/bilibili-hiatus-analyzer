@@ -109,6 +109,49 @@ class DouyinHiatusAnalyzer:
     def modes_requiring_basic_cache():
         return {"verify", "monitor", "delta", "full"}
 
+    @staticmethod
+    def entry_has_full_cache(entry):
+        if not isinstance(entry, dict):
+            return False
+        summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
+        summary_scope = str(summary.get("summary_scope") or "").strip().lower()
+        if entry.get("full_status_reset") or summary_scope == "status_reset":
+            return False
+
+        cache_modes = entry.get("cache_modes")
+        if isinstance(cache_modes, str):
+            cache_modes = cache_modes.split(",")
+        if isinstance(cache_modes, list):
+            for mode in cache_modes:
+                if str(mode or "").strip().lower() == "full":
+                    return True
+
+        return (
+            str(entry.get("last_fetch_mode") or "").strip().lower() == "full"
+            or summary_scope in {"full", "preserved_full"}
+        )
+
+    def should_preserve_full_cache(self, entry):
+        return self.get_fetch_mode() != "full" and self.entry_has_full_cache(entry)
+
+    @staticmethod
+    def preserve_full_progress_entry(entry, observed_mode=None):
+        preserved = dict(entry or {})
+        raw_modes = preserved.get("cache_modes", [])
+        if isinstance(raw_modes, str):
+            raw_modes = raw_modes.split(",")
+        modes = {
+            str(mode or "").strip().lower()
+            for mode in raw_modes
+            if str(mode or "").strip()
+        }
+        modes.add("full")
+        if observed_mode in {"counts", "verify", "monitor", "delta"}:
+            modes.add(observed_mode)
+        preserved["cache_modes"] = sorted(modes)
+        preserved["last_fetch_mode"] = "full"
+        return preserved
+
     def merge_updated_followings_cache(self, original_followings, updated_users):
         updates = {
             str((user or {}).get("sec_uid") or "").strip(): user
@@ -851,6 +894,20 @@ class DouyinHiatusAnalyzer:
             modes.add("counts")
         if not isinstance(entry, dict):
             return modes
+        summary = entry.get("summary")
+        summary_scope = ""
+        if isinstance(summary, dict):
+            summary_scope = str(summary.get("summary_scope") or "").strip().lower()
+        if entry.get("full_status_reset") or summary_scope == "status_reset":
+            explicit_modes = entry.get("cache_modes")
+            if isinstance(explicit_modes, list):
+                for mode in explicit_modes:
+                    mode_text = str(mode or "").strip().lower()
+                    if mode_text and mode_text != "full":
+                        modes.add(mode_text)
+            if entry.get("latest_video") or entry.get("videos"):
+                modes.add("monitor")
+            return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
 
         explicit_modes = entry.get("cache_modes")
         if isinstance(explicit_modes, list):
@@ -865,8 +922,7 @@ class DouyinHiatusAnalyzer:
         if entry.get("latest_video") or entry.get("videos"):
             modes.add("monitor")
 
-        summary = entry.get("summary")
-        if self.summary_has_complete_statistics(summary):
+        if self.entry_has_full_cache(entry):
             modes.add("full")
 
         return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
@@ -915,6 +971,17 @@ class DouyinHiatusAnalyzer:
             latest_video = self.get_latest_video_from_entry(entry)
             summary = entry.get("summary", {}) if isinstance(entry, dict) else {}
             cache_modes = sorted(self.infer_cache_modes(entry, has_followings_cache=uid in followings_by_uid))
+            last_fetch_mode = (
+                "full"
+                if isinstance(entry, dict) and self.entry_has_full_cache(entry)
+                else ((entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "")
+            )
+            cached_videos = entry.get("videos", []) if isinstance(entry, dict) else []
+            cached_video_count = len(cached_videos or []) if isinstance(cached_videos, list) else 0
+            if isinstance(entry, dict) and self.entry_has_full_cache(entry):
+                complete_stored_videos = self.load_complete_stored_videos(user, summary, cached_videos)
+                if complete_stored_videos:
+                    cached_video_count = max(cached_video_count, len(complete_stored_videos))
 
             rows.append(
                 {
@@ -926,7 +993,7 @@ class DouyinHiatusAnalyzer:
                     "total_favorited": user.get("total_favorited", ""),
                     "published_video_count": user.get("aweme_count", ""),
                     "cache_modes": ",".join(cache_modes),
-                    "last_fetch_mode": (entry.get("last_fetch_mode") if isinstance(entry, dict) else "") or "",
+                    "last_fetch_mode": last_fetch_mode,
                     "has_counts_cache": "是" if uid in followings_by_uid else "",
                     "has_verify_cache": "是" if "verify" in cache_modes else "",
                     "has_monitor_cache": "是" if "monitor" in cache_modes else "",
@@ -943,7 +1010,7 @@ class DouyinHiatusAnalyzer:
                         self._is_progress_cache_due(entry.get("cached_at")) if isinstance(entry, dict) else "是"
                     ),
                     "summary_scope": (summary.get("summary_scope") if isinstance(summary, dict) else "") or "",
-                    "cached_video_count": len(entry.get("videos", []) or []) if isinstance(entry, dict) else 0,
+                    "cached_video_count": cached_video_count,
                     "has_latest_video_cache": "是" if latest_video else "",
                     "latest_video_title": latest_video.get("video_title", "") if latest_video else "",
                     "latest_publish_date": latest_video.get("publish_date", "") if latest_video else "",
@@ -1658,26 +1725,30 @@ class DouyinHiatusAnalyzer:
                     if uid and profile_verified:
                         videos = entry.get("videos", []) if isinstance(entry, dict) else []
                         latest_video = self.get_latest_video_from_entry(entry)
-                        existing_modes = set()
-                        if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
-                            existing_modes = {
-                                str(mode).strip().lower()
-                                for mode in entry.get("cache_modes", [])
-                                if str(mode).strip()
+                        preserve_full_cache = self.should_preserve_full_cache(entry)
+                        if preserve_full_cache:
+                            progress[uid] = self.preserve_full_progress_entry(entry, "verify")
+                        else:
+                            existing_modes = set()
+                            if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
+                                existing_modes = {
+                                    str(mode).strip().lower()
+                                    for mode in entry.get("cache_modes", [])
+                                    if str(mode).strip()
+                                }
+                            existing_modes.add("verify")
+                            progress[uid] = {
+                                "cached_at": int(time.time()),
+                                "user": user,
+                                "videos": videos,
+                                "summary": summary,
+                                "latest_video": latest_video,
+                                "last_fetch_mode": fetch_mode,
+                                "cache_modes": sorted(existing_modes),
                             }
-                        existing_modes.add("verify")
-                        progress[uid] = {
-                            "cached_at": int(time.time()),
-                            "user": user,
-                            "videos": videos,
-                            "summary": summary,
-                            "latest_video": latest_video,
-                            "last_fetch_mode": fetch_mode,
-                            "cache_modes": sorted(existing_modes),
-                        }
                         self.cache_store.upsert_video_state_from_progress_entries(
                             {uid: progress[uid]},
-                            source_mode=fetch_mode,
+                            source_mode="full" if preserve_full_cache else fetch_mode,
                         )
                         pending_progress_saves += 1
 
@@ -1943,18 +2014,22 @@ class DouyinHiatusAnalyzer:
                         for key, value in user.items()
                         if not str(key).startswith("_")
                     }
-                    progress[user["sec_uid"]] = {
-                        "cached_at": int(time.time()),
-                        "user": progress_user,
-                        "videos": videos,
-                        "summary": summary,
-                        "latest_video": latest_video,
-                        "last_fetch_mode": fetch_mode,
-                        "cache_modes": sorted(existing_modes),
-                    }
+                    preserve_full_cache = self.should_preserve_full_cache(entry)
+                    if preserve_full_cache:
+                        progress[user["sec_uid"]] = self.preserve_full_progress_entry(entry, fetch_mode)
+                    else:
+                        progress[user["sec_uid"]] = {
+                            "cached_at": int(time.time()),
+                            "user": progress_user,
+                            "videos": videos,
+                            "summary": summary,
+                            "latest_video": latest_video,
+                            "last_fetch_mode": fetch_mode,
+                            "cache_modes": sorted(existing_modes),
+                        }
                     self.cache_store.upsert_video_state_from_progress_entries(
                         {user["sec_uid"]: progress[user["sec_uid"]]},
-                        source_mode=fetch_mode,
+                        source_mode="full" if preserve_full_cache else fetch_mode,
                     )
                     refreshed_user_count += 1
                     pending_progress_saves += 1

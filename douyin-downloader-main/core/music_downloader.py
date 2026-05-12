@@ -90,6 +90,7 @@ class MusicDownloader(BaseDownloader):
             aweme_id=record_id,
             folderstyle=self.config.get("folderstyle", True),
             download_date=publish_date,
+            flat_output=self.config.get("flat_output", False),
         )
 
         music_ext = self._infer_audio_extension(music_url)

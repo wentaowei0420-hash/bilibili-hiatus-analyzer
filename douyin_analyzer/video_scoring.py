@@ -244,6 +244,10 @@ class DouyinVideoScorer:
         return result
 
     def _load_video_rows(self):
+        progress_videos = self._load_progress_video_rows()
+        if progress_videos is not None:
+            return progress_videos
+
         if self._table_exists("douyin_video_state"):
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -279,6 +283,49 @@ class DouyinVideoScorer:
             payload = _loads_json(payload_json)
             if isinstance(payload, dict):
                 videos.append(payload)
+        return videos
+
+    def _load_progress_video_rows(self):
+        try:
+            from .cache import CacheStore
+
+            cache_store = CacheStore(self.config)
+            followings = cache_store.load_followings_cache()
+            progress = cache_store.load_progress()
+        except Exception:
+            return None
+
+        if not isinstance(progress, dict) or not progress:
+            return None
+
+        active_uids = {
+            str((user or {}).get("sec_uid") or "").strip()
+            for user in (followings or [])
+            if isinstance(user, dict) and str((user or {}).get("sec_uid") or "").strip()
+        }
+        if not active_uids:
+            return []
+
+        videos = []
+        seen_video_ids = set()
+        for uid, entry in progress.items():
+            uid = str(uid or "").strip()
+            if uid not in active_uids or not isinstance(entry, dict):
+                continue
+            user = entry.get("user") if isinstance(entry.get("user"), dict) else {}
+            uploader_name = user.get("nickname") or user.get("uploader_name") or ""
+            source_mode = str(entry.get("last_fetch_mode") or "progress").strip() or "progress"
+            for video in entry.get("videos", []) or []:
+                if not isinstance(video, dict):
+                    continue
+                video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
+                if not video_id or video_id in seen_video_ids:
+                    continue
+                seen_video_ids.add(video_id)
+                row = _normalize_progress_video(video, video_id, uid, uploader_name)
+                row["source_mode"] = row.get("source_mode") or source_mode
+                row["is_available"] = row.get("is_available") if row.get("is_available") not in (None, "") else 1
+                videos.append(row)
         return videos
 
     def _load_download_status(self):
@@ -683,6 +730,42 @@ def _loads_json(value):
         return json.loads(value) if value else None
     except Exception:
         return None
+
+
+def _first_value(payload, *keys):
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_progress_video(video, video_id, uploader_id, uploader_name):
+    row = dict(video or {})
+    row["aweme_id"] = str(row.get("aweme_id") or row.get("video_id") or video_id or "").strip()
+    row["video_id"] = str(row.get("video_id") or row.get("aweme_id") or video_id or "").strip()
+    row["uploader_id"] = str(row.get("uploader_id") or row.get("author_id") or uploader_id or "").strip()
+    row["uploader_name"] = str(row.get("uploader_name") or row.get("author_name") or uploader_name or "").strip()
+
+    title = _first_value(row, "video_title", "title", "desc", "description")
+    if title is not None:
+        row["video_title"] = title
+
+    like_count = _first_value(row, "like_count", "digg_count", "点赞数")
+    if like_count is not None:
+        row["like_count"] = like_count
+
+    publish_timestamp = _first_value(row, "publish_timestamp", "create_time", "发布时间戳")
+    if publish_timestamp is not None:
+        row["publish_timestamp"] = publish_timestamp
+
+    duration_seconds = _first_value(row, "duration_seconds", "duration", "video_duration")
+    if duration_seconds is not None:
+        row["duration_seconds"] = duration_seconds
+
+    if not row.get("video_url") and row["aweme_id"]:
+        row["video_url"] = f"https://www.douyin.com/video/{row['aweme_id']}"
+    return row
 
 
 def _safe_int(value, default=0):

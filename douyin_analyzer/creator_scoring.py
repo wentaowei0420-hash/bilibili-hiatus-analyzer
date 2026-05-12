@@ -324,7 +324,7 @@ class DouyinCreatorScorer:
 
     def _load_full_mode_uids(self):
         if not self._table_exists("cache_inventory_current"):
-            return None
+            return self._load_full_mode_uids_from_progress()
 
         rows = self._read_table("cache_inventory_current")
         uid_columns = ("UP主UID", "UP涓籙ID", "uploader_id")
@@ -344,8 +344,59 @@ class DouyinCreatorScorer:
                 has_full_cache = _pick_text(row, column)
                 if has_full_cache:
                     break
-            if _is_yes_value(has_full_cache):
+            cached_modes = _pick_text(row, "已缓存模式", "cached_modes")
+            last_fetch_mode = _pick_text(row, "最近抓取模式", "last_fetch_mode")
+            summary_scope = _pick_text(row, "统计范围", "summary_scope", "scope")
+            mode_values = {
+                part.strip()
+                for part in str(cached_modes or "").lower().split(",")
+                if part.strip()
+            }
+            if (
+                _is_yes_value(has_full_cache)
+                or "full" in mode_values
+                or str(last_fetch_mode or "").strip().lower() == "full"
+                or str(summary_scope or "").strip().lower() == "full"
+            ):
                 result.add(uid)
+        try:
+            from .archive import load_active_archived_uids
+
+            result -= load_active_archived_uids(self.db_path)
+        except Exception:
+            pass
+        return result
+
+    def _load_full_mode_uids_from_progress(self):
+        try:
+            from .cache import CacheStore
+
+            cache_store = CacheStore(self.config)
+            followings = cache_store.load_followings_cache()
+            progress = cache_store.load_progress()
+        except Exception:
+            return set()
+        if not isinstance(progress, dict) or not progress:
+            return set()
+
+        active_uids = {
+            str((user or {}).get("sec_uid") or "").strip()
+            for user in (followings or [])
+            if isinstance(user, dict) and str((user or {}).get("sec_uid") or "").strip()
+        }
+        result = set()
+        for uid, entry in progress.items():
+            uid = str(uid or "").strip()
+            if not uid or (active_uids and uid not in active_uids):
+                continue
+            if CacheStore._entry_has_full_cache(entry):
+                result.add(uid)
+        try:
+            from .archive import load_active_archived_uids
+
+            result -= load_active_archived_uids(self.db_path)
+        except Exception:
+            pass
         return result
 
     def _score_creator(self, creator, video_stat, manual_grade, follower_p95, total_like_p95, avg_like_p95):

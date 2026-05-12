@@ -31,7 +31,12 @@ class FileManager:
         aweme_id: str = None,
         folderstyle: bool = True,
         download_date: str = "",
+        flat_output: bool = False,
     ) -> Path:
+        if flat_output:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            return self.base_path
+
         safe_author = sanitize_filename(author_name)
 
         if mode:

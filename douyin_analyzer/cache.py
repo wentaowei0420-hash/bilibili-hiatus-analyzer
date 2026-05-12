@@ -18,6 +18,28 @@ class CacheStore:
     def __init__(self, config):
         self.config = config
 
+    @staticmethod
+    def _entry_has_full_cache(entry):
+        if not isinstance(entry, dict):
+            return False
+        summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
+        summary_scope = str(summary.get("summary_scope") or "").strip().lower()
+        if entry.get("full_status_reset") or summary_scope == "status_reset":
+            return False
+
+        cache_modes = entry.get("cache_modes")
+        if isinstance(cache_modes, str):
+            cache_modes = cache_modes.split(",")
+        if isinstance(cache_modes, list):
+            for mode in cache_modes:
+                if str(mode or "").strip().lower() == "full":
+                    return True
+
+        return (
+            str(entry.get("last_fetch_mode") or "").strip().lower() == "full"
+            or summary_scope in {"full", "preserved_full"}
+        )
+
     def load_followings_cache_payload(self):
         try:
             with self.config.followings_cache_json.open("r", encoding="utf-8") as cache_file:
@@ -444,7 +466,7 @@ class CacheStore:
         if not isinstance(entry, dict):
             return entry
         trimmed_entry = dict(entry)
-        if self.config.fetch_mode == "full":
+        if self.config.fetch_mode == "full" or self._entry_has_full_cache(trimmed_entry):
             return trimmed_entry
         videos = trimmed_entry.get("videos")
         if isinstance(videos, list) and len(videos) > self.config.progress_trim_video_limit:

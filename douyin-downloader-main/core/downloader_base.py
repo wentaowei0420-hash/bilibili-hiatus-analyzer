@@ -268,6 +268,7 @@ class BaseDownloader(ABC):
             aweme_id=aweme_id,
             folderstyle=self.config.get("folderstyle", True),
             download_date=publish_date,
+            flat_output=self.config.get("flat_output", False),
         )
         downloaded_files: List[Path] = []
 
