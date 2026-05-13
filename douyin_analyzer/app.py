@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 import sqlite3
 import traceback
@@ -13,7 +14,9 @@ from common.export_store import (
 from common.file_io import atomic_write_csv, atomic_write_text
 from common.platform_store import (
     replace_video_rows_for_uploader,
+    upsert_cache_entries,
     upsert_creator_rows,
+    upsert_video_state_rows,
 )
 from common.retry_control import SyncRetryHandler
 from common.runtime_control import OperationCancelled, check_stop
@@ -804,42 +807,50 @@ def run_export_high_like_videos_from_cache(threshold=10000):
 
     unique_videos = {}
     video_grades = _load_video_score_grades(config.export_store_db)
+
+    def add_video_candidate(video, uploader_name=""):
+        if not isinstance(video, dict):
+            return
+        try:
+            like_count = int(float(video.get("like_count") or 0))
+        except (TypeError, ValueError):
+            like_count = 0
+
+        video_id = str(video.get("aweme_id") or video.get("video_id") or video.get("bvid") or "").strip()
+        video_url = str(video.get("video_url") or "").strip()
+        unique_key = video_id or video_url
+        if not unique_key:
+            return
+        video_grade = video_grades.get(video_id, "") or str(video.get("video_manual_grade") or "").strip().upper()
+        if like_count <= threshold and video_grade != "S":
+            return
+
+        existing = unique_videos.get(unique_key)
+        row = {
+            "uploader_name": video.get("uploader_name") or uploader_name,
+            "video_grade": video_grade,
+            "video_id": video_id,
+            "aweme_id": video_id,
+            "video_title": video.get("video_title") or "",
+            "video_url": video_url,
+            "like_count": like_count,
+            "download_status": "",
+            "download_time": "",
+            "download_path": "",
+        }
+        if existing is None or like_count > int(existing.get("like_count") or 0):
+            unique_videos[unique_key] = row
+
     for uid, entry in (progress or {}).items():
         if not isinstance(entry, dict):
             continue
         user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
         uploader_name = user.get("nickname") or user.get("uploader_name") or str(uid)
         for video in entry.get("videos", []) or []:
-            if not isinstance(video, dict):
-                continue
-            try:
-                like_count = int(float(video.get("like_count") or 0))
-            except (TypeError, ValueError):
-                like_count = 0
-            if like_count <= threshold:
-                continue
+            add_video_candidate(video, uploader_name)
 
-            video_id = str(video.get("aweme_id") or video.get("bvid") or "").strip()
-            video_url = str(video.get("video_url") or "").strip()
-            unique_key = video_id or video_url
-            if not unique_key:
-                continue
-
-            existing = unique_videos.get(unique_key)
-            row = {
-                "uploader_name": video.get("uploader_name") or uploader_name,
-                "video_grade": video_grades.get(video_id, ""),
-                "video_id": video_id,
-                "aweme_id": video_id,
-                "video_title": video.get("video_title") or "",
-                "video_url": video_url,
-                "like_count": like_count,
-                "download_status": "",
-                "download_time": "",
-                "download_path": "",
-            }
-            if existing is None or like_count > int(existing.get("like_count") or 0):
-                unique_videos[unique_key] = row
+    for video in _load_liked_video_state_rows(config.export_store_db):
+        add_video_candidate(video, video.get("uploader_name") or "")
 
     rows = sorted(
         unique_videos.values(),
@@ -904,6 +915,134 @@ def run_export_high_like_videos_from_cache(threshold=10000):
         )
     )
     return output_path
+
+
+def run_cache_liked_videos_as_s(limit=None):
+    config = load_analyzer_config()
+    setup_logging(config.log_dir, "douyin_liked_video_cache")
+    browser_client = create_douyin_browser_client(config)
+    try:
+        browser_client.ensure_login()
+        videos = browser_client.get_liked_videos_from_homepage(limit=limit)
+    finally:
+        browser_client.close()
+
+    output_path = config.output_csv.parent / "douyin_liked_videos_cached.csv"
+    fieldnames = [
+        "uploader_name",
+        "uploader_id",
+        "video_id",
+        "aweme_id",
+        "video_title",
+        "video_url",
+        "publish_date",
+        "publish_timestamp",
+        "duration_seconds",
+        "like_count",
+        "video_manual_grade",
+    ]
+    rows = []
+    for video in videos or []:
+        row = dict(video)
+        video_id = str(row.get("aweme_id") or row.get("video_id") or "").strip()
+        if not video_id:
+            continue
+        row["video_id"] = video_id
+        row["aweme_id"] = video_id
+        row["video_manual_grade"] = "S"
+        row["source_mode"] = "liked"
+        rows.append(row)
+
+    atomic_write_csv(output_path, fieldnames, rows)
+    upsert_video_state_rows(
+        config.export_store_db,
+        "douyin",
+        rows,
+        video_id_column="aweme_id",
+        uploader_id_column="uploader_id",
+        uploader_name_column="uploader_name",
+        source_mode="liked",
+    )
+    upsert_cache_entries(
+        config.export_store_db,
+        "douyin",
+        {row["aweme_id"]: row for row in rows if row.get("aweme_id")},
+        cache_type="liked_videos",
+        source_mode="liked",
+        uploader_id_getter=lambda _key, payload: (payload or {}).get("uploader_id", ""),
+        cached_at_getter=lambda _payload: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    _upsert_manual_video_grades(
+        config.export_store_db,
+        [row.get("aweme_id") for row in rows],
+        grade="S",
+        note="homepage liked video cache",
+    )
+
+    from .video_scoring import run_douyin_video_scoring
+
+    video_score_path = run_douyin_video_scoring(config)
+    try:
+        from .creator_scoring import run_douyin_creator_scoring
+
+        run_douyin_creator_scoring(config)
+    except Exception as exc:
+        get_console().print(
+            create_summary_panel(
+                "Douyin Creator Score Refresh Skipped",
+                [str(exc)],
+                border_style="yellow",
+            )
+        )
+
+    get_console().print(
+        create_summary_panel(
+            "Douyin Liked Videos Cached",
+            [
+                f"Liked videos: {len(rows)}",
+                "Manual video grade: S",
+                f"Cache CSV: {output_path}",
+                f"Video score CSV: {video_score_path}",
+            ],
+            border_style="green",
+        )
+    )
+    return {
+        "video_count": len(rows),
+        "output_path": str(output_path),
+        "video_score_path": str(video_score_path),
+    }
+
+
+def _upsert_manual_video_grades(db_path, video_ids, grade="S", note=""):
+    video_ids = sorted({str(item or "").strip() for item in (video_ids or []) if str(item or "").strip()})
+    if not video_ids:
+        return 0
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS douyin_video_manual_rating (
+                video_id TEXT PRIMARY KEY,
+                manual_grade TEXT NOT NULL,
+                note TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO douyin_video_manual_rating (video_id, manual_grade, note, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                manual_grade=excluded.manual_grade,
+                note=excluded.note,
+                updated_at=excluded.updated_at
+            """,
+            [(video_id, grade, note, updated_at) for video_id in video_ids],
+        )
+        conn.commit()
+    return len(video_ids)
 
 
 def run_score_videos_from_cache(*, refresh_inventory=True):
@@ -1024,6 +1163,62 @@ def _load_video_score_grades(db_path):
             )
         )
         return {}
+
+
+def _load_liked_video_state_rows(db_path):
+    db_path = Path(db_path) if db_path else None
+    if not db_path or not db_path.exists():
+        return []
+
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='douyin_video_state'"
+            ).fetchone()
+            if not exists:
+                return []
+
+            rows = conn.execute(
+                """
+                SELECT video_id, uploader_id, uploader_name, publish_timestamp, like_count,
+                       duration_seconds, source_mode, payload_json
+                FROM douyin_video_state
+                WHERE video_id IS NOT NULL AND TRIM(video_id) != ''
+                """
+            ).fetchall()
+    except Exception as exc:
+        get_console().print(
+            create_summary_panel(
+                "Liked Video Cache Read Failed",
+                [f"Database: {db_path}", f"Error: {exc}"],
+                border_style="yellow",
+            )
+        )
+        return []
+
+    videos = []
+    for raw in rows:
+        video_id, uploader_id, uploader_name, publish_timestamp, like_count, duration_seconds, source_mode, payload_json = raw
+        try:
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if str(source_mode or "").strip().lower() != "liked" and metadata.get("liked_cache") is not True:
+            continue
+        row = dict(payload)
+        row.setdefault("aweme_id", str(video_id or "").strip())
+        row.setdefault("video_id", str(video_id or "").strip())
+        row.setdefault("uploader_id", str(uploader_id or "").strip())
+        row.setdefault("uploader_name", str(uploader_name or "").strip())
+        row.setdefault("publish_timestamp", publish_timestamp)
+        row.setdefault("like_count", like_count)
+        row.setdefault("duration_seconds", duration_seconds)
+        row.setdefault("video_manual_grade", "S")
+        videos.append(row)
+    return videos
 
 
 def _load_downloader_aweme_status(db_path, aweme_ids):

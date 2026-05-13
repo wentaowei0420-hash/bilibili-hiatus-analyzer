@@ -246,33 +246,11 @@ class DouyinVideoScorer:
     def _load_video_rows(self):
         progress_videos = self._load_progress_video_rows()
         if progress_videos is not None:
+            progress_videos = self._merge_liked_state_videos(progress_videos)
             return progress_videos
 
         if self._table_exists("douyin_video_state"):
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                raw_rows = conn.execute(
-                    """
-                    SELECT video_id, uploader_id, uploader_name, publish_timestamp, like_count,
-                           duration_seconds, source_mode, is_available, payload_json
-                    FROM douyin_video_state
-                    WHERE video_id IS NOT NULL AND TRIM(video_id) != ''
-                    """
-                ).fetchall()
-            videos = []
-            for raw in raw_rows:
-                payload = _loads_json(raw["payload_json"]) or {}
-                video = dict(payload)
-                video.setdefault("aweme_id", raw["video_id"])
-                video.setdefault("uploader_id", raw["uploader_id"])
-                video.setdefault("uploader_name", raw["uploader_name"])
-                video.setdefault("publish_timestamp", raw["publish_timestamp"])
-                video.setdefault("like_count", raw["like_count"])
-                video.setdefault("duration_seconds", raw["duration_seconds"])
-                video["source_mode"] = raw["source_mode"] or video.get("source_mode", "")
-                video["is_available"] = int(raw["is_available"] or 0)
-                videos.append(video)
-            return videos
+            return self._load_video_state_rows()
 
         if not self._table_exists("douyin_video_raw"):
             return []
@@ -284,6 +262,56 @@ class DouyinVideoScorer:
             if isinstance(payload, dict):
                 videos.append(payload)
         return videos
+
+    def _load_video_state_rows(self, only_liked=False):
+        if not self._table_exists("douyin_video_state"):
+            return []
+        where = "WHERE video_id IS NOT NULL AND TRIM(video_id) != ''"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            raw_rows = conn.execute(
+                f"""
+                SELECT video_id, uploader_id, uploader_name, publish_timestamp, like_count,
+                       duration_seconds, source_mode, is_available, payload_json
+                FROM douyin_video_state
+                {where}
+                """
+            ).fetchall()
+        videos = []
+        for raw in raw_rows:
+            payload = _loads_json(raw["payload_json"]) or {}
+            video = dict(payload)
+            video.setdefault("aweme_id", raw["video_id"])
+            video.setdefault("video_id", raw["video_id"])
+            video.setdefault("uploader_id", raw["uploader_id"])
+            video.setdefault("uploader_name", raw["uploader_name"])
+            video.setdefault("publish_timestamp", raw["publish_timestamp"])
+            video.setdefault("like_count", raw["like_count"])
+            video.setdefault("duration_seconds", raw["duration_seconds"])
+            video["source_mode"] = raw["source_mode"] or video.get("source_mode", "")
+            video["is_available"] = int(raw["is_available"] or 0)
+            metadata = video.get("metadata") if isinstance(video.get("metadata"), dict) else {}
+            if only_liked and not (
+                str(video.get("source_mode") or "").strip().lower() == "liked"
+                or metadata.get("liked_cache") is True
+            ):
+                continue
+            videos.append(video)
+        return videos
+
+    def _merge_liked_state_videos(self, videos):
+        merged = list(videos or [])
+        seen_video_ids = {
+            str((video or {}).get("aweme_id") or (video or {}).get("video_id") or "").strip()
+            for video in merged
+            if isinstance(video, dict)
+        }
+        for video in self._load_video_state_rows(only_liked=True):
+            video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
+            if video_id and video_id not in seen_video_ids:
+                merged.append(video)
+                seen_video_ids.add(video_id)
+        return merged
 
     def _load_progress_video_rows(self):
         try:

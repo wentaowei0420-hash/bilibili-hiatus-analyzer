@@ -59,7 +59,7 @@ EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
 )
 EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
 EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
-AUTO_FULL_INTERVAL_MS = 5 * 60 * 60 * 1000
+AUTO_FULL_INTERVAL_MS = 3 * 60 * 60 * 1000
 
 BILIBILI_RUNTIME_FIELDS = [
     ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
@@ -449,6 +449,26 @@ class DouyinDataSyncThread(QThread):
             self.done.emit(True, message)
         except Exception as exc:
             self.done.emit(False, f"抖音数据同步失败：{exc}")
+
+
+class DouyinLikedVideoCacheThread(QThread):
+    done = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from douyin_analyzer.app import run_cache_liked_videos_as_s
+
+            result = run_cache_liked_videos_as_s()
+            self.done.emit(
+                True,
+                (
+                    "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u5b8c\u6210\uff1a"
+                    f"{result.get('video_count', 0)} \u6761\u89c6\u9891\u5df2\u5199\u5165\u672c\u5730\u7f13\u5b58\uff0c"
+                    "\u5e76\u7edf\u4e00\u8bbe\u7f6e\u4e3a S \u7ea7\u3002"
+                ),
+            )
+        except Exception as exc:
+            self.done.emit(False, f"\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u5931\u8d25\uff1a{exc}")
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -3500,6 +3520,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.cookie_checker = None
         self.data_sync_worker = None
+        self.liked_video_cache_worker = None
         self.log_dialog = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
@@ -3672,7 +3693,7 @@ class MainWindow(QMainWindow):
         self.high_like_spin.setMaximumWidth(180)
         self.high_like_spin.setToolTip("导出抖音高赞视频时使用，其它模式不会使用该参数。")
         self.auto_full_button = QPushButton("自动 full：关闭")
-        self.auto_full_button.setToolTip("开启后每 5 小时按当前界面参数自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
+        self.auto_full_button.setToolTip("开启后每 3 小时按当前界面参数自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
         self.auto_full_button.clicked.connect(self._toggle_auto_full_mode)
         add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", self.auto_full_button)
         layout.addWidget(settings_group)
@@ -3712,6 +3733,9 @@ class MainWindow(QMainWindow):
         self.douyin_status_reset_button.clicked.connect(self._open_douyin_status_reset)
         self.douyin_data_sync_button = QPushButton("抖音数据同步")
         self.douyin_data_sync_button.clicked.connect(self._start_douyin_data_sync)
+        self.liked_video_cache_button = QPushButton("\u7f13\u5b58\u559c\u6b22S\u7ea7")
+        self.liked_video_cache_button.setToolTip("\u6293\u53d6\u5f53\u524d\u767b\u5f55\u8d26\u53f7\u4e3b\u9875\u559c\u6b22\u9875\u7684\u89c6\u9891\uff0c\u5199\u5165\u672c\u5730\u7f13\u5b58\u5e76\u8bbe\u4e3a S \u7ea7\u3002")
+        self.liked_video_cache_button.clicked.connect(self._start_liked_video_cache)
         self.log_center_button = QPushButton("日志中心")
         self.log_center_button.clicked.connect(self._open_log_center)
         self.cookie_check_button = QPushButton("检测 B站 Cookie")
@@ -3733,6 +3757,7 @@ class MainWindow(QMainWindow):
             self.archive_button,
             self.douyin_status_reset_button,
             self.douyin_data_sync_button,
+            self.liked_video_cache_button,
             self.log_center_button,
             self.cookie_check_button,
             self.advanced_button,
@@ -3799,6 +3824,7 @@ class MainWindow(QMainWindow):
         self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
         self.high_like_spin.setEnabled(editable)
         self.high_like_export_button.setEnabled(editable)
+        self.liked_video_cache_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
         self.lock_button.setText("解除锁定" if self.config_locked else "锁定配置")
@@ -3957,7 +3983,7 @@ class MainWindow(QMainWindow):
         self.auto_full_enabled = not self.auto_full_enabled
         if self.auto_full_enabled:
             self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
-            self._append_log("自动 full 模式已开启：每 5 小时按当前界面参数运行一次。")
+            self._append_log("自动 full 模式已开启：每 3 小时按当前界面参数运行一次。")
         else:
             self.auto_full_next_run_at = None
             self._append_log("自动 full 模式已关闭。")
@@ -4012,6 +4038,7 @@ class MainWindow(QMainWindow):
         self.start_button.setText("运行中...")
         self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -4043,6 +4070,9 @@ class MainWindow(QMainWindow):
         if self.data_sync_worker and self.data_sync_worker.isRunning():
             self._show_info_dialog("同步运行中", "抖音数据同步还在运行，请等待完成。")
             return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
+            return
         if (
             QMessageBox.question(
                 self,
@@ -4070,6 +4100,42 @@ class MainWindow(QMainWindow):
         else:
             self._show_error_dialog("同步失败", message)
 
+    def _start_liked_video_cache(self):
+        if self.worker and self.worker.isRunning():
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+        if self.data_sync_worker and self.data_sync_worker.isRunning():
+            self._show_info_dialog("同步运行中", "抖音数据同步还在运行，请等待完成。")
+            return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "\u786e\u8ba4\u7f13\u5b58\u559c\u6b22\u89c6\u9891",
+                "\u5c06\u6253\u5f00\u6296\u97f3\u4e3b\u9875\u559c\u6b22\u9875\uff0c\u628a\u6293\u5230\u7684\u89c6\u9891\u5199\u5165\u672c\u5730\u7f13\u5b58\uff0c\u5e76\u7edf\u4e00\u8bbe\u7f6e\u4e3a S \u7ea7\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+
+        self.log_text.clear()
+        self._append_log("\u5f00\u59cb\u7f13\u5b58\u6296\u97f3\u4e3b\u9875\u559c\u6b22\u89c6\u9891\uff0c\u6293\u5230\u7684\u89c6\u9891\u5c06\u7edf\u4e00\u8bbe\u4e3a S \u7ea7\u3002")
+        self._start_task_progress("\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u4e2d\uff0c\u6b63\u5728\u6253\u5f00\u6296\u97f3\u4e3b\u9875...")
+        _set_button_busy(self.liked_video_cache_button, "\u7f13\u5b58\u4e2d...")
+        self.liked_video_cache_worker = DouyinLikedVideoCacheThread()
+        self.liked_video_cache_worker.done.connect(self._on_liked_video_cache_done)
+        self.liked_video_cache_worker.start()
+
+    def _on_liked_video_cache_done(self, ok, message):
+        _restore_button_busy(self.liked_video_cache_button)
+        self._append_log(message)
+        self._finish_task_progress(ok, message)
+        if ok:
+            self._show_info_dialog("\u7f13\u5b58\u5b8c\u6210", message)
+        else:
+            self._show_error_dialog("\u7f13\u5b58\u5931\u8d25", message)
+
     def _open_log_center(self):
         if self.log_dialog is None:
             self.log_dialog = LogCenterDialog(self)
@@ -4081,6 +4147,9 @@ class MainWindow(QMainWindow):
     def _start(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
             return
 
         config = self._collect_config()
@@ -4095,6 +4164,7 @@ class MainWindow(QMainWindow):
         self.start_button.setText("运行中...")
         self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -4106,6 +4176,9 @@ class MainWindow(QMainWindow):
     def _start_high_like_export(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
             return
 
         config = self._collect_config()
@@ -4120,6 +4193,7 @@ class MainWindow(QMainWindow):
         self.high_like_export_button.setEnabled(False)
         self.high_like_export_button.setText("导出中...")
         self.unfollow_cleanup_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -4209,6 +4283,9 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
             return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
+            return
 
         config = self._collect_config()
         config.platform = "douyin_non_followed_cleanup"
@@ -4221,6 +4298,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
         self.unfollow_cleanup_button.setText("清理中...")
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -4397,6 +4475,7 @@ class MainWindow(QMainWindow):
         self.high_like_export_button.setText("导出高赞视频")
         self.unfollow_cleanup_button.setEnabled(True)
         self.unfollow_cleanup_button.setText("清理非当前关注缓存")
+        self.liked_video_cache_button.setEnabled(not self.config_locked)
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):
             self.stop_button.setText("保存完成，可以关闭")

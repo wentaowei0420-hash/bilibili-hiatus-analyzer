@@ -754,6 +754,140 @@ class DouyinBrowserClient:
     def get_recent_videos_for_user(self, user, limit):
         return self._collect_videos_for_user(user, limit=max(1, int(limit or 1)))
 
+    def get_liked_videos_from_homepage(self, limit=None):
+        page = self.start()
+        patterns = [
+            getattr(self.config, "liked_video_api_pattern", ""),
+            "aweme/favorite",
+            "aweme/v1/web/aweme/favorite",
+            self.config.video_detail_api_pattern,
+        ]
+        collector_mode = "listen" if hasattr(page, "listen") else "response"
+        collected = []
+        handler = None
+        if collector_mode == "listen":
+            page.listen.start([pattern for pattern in patterns if pattern])
+        else:
+            collected, handler = self._create_response_collector(patterns)
+
+        try:
+            self._open_page(f"{self.config.self_user_url}?showTab=like", self.config.page_load_delay)
+            self._click_profile_like_tab()
+            if self._page_has_rate_limit():
+                raise DouyinRateLimitError("Douyin liked-video page triggered rate limiting")
+
+            videos_by_id = {}
+            empty_rounds = 0
+            stagnant_rounds = 0
+            received_has_more_false = False
+            max_empty_rounds = max(self.config.video_empty_round_limit, 3)
+            max_stagnant_rounds = max(self.config.video_empty_round_limit + 1, 4)
+
+            while True:
+                if limit and len(videos_by_id) >= int(limit):
+                    break
+
+                self._scroll_video_page_fast()
+                packets = (
+                    self._drain_listen_packets(timeout=self.config.video_packet_timeout)
+                    if collector_mode == "listen"
+                    else self._drain_response_collector(collected, self.config.video_packet_timeout)
+                )
+                packet_bodies = [
+                    self._extract_packet_body(packet) if collector_mode == "listen" else packet
+                    for packet in packets
+                ]
+                if not packet_bodies:
+                    empty_rounds += 1
+                    if empty_rounds >= max_empty_rounds:
+                        break
+                    continue
+
+                empty_rounds = 0
+                new_videos = 0
+                for data in packet_bodies:
+                    if self._packet_has_rate_limit(data):
+                        raise DouyinRateLimitError("Douyin liked-video API triggered rate limiting")
+                    if data.get("has_more") in (0, False):
+                        received_has_more_false = True
+                    for aweme in self._extract_awemes_from_packet_body(data):
+                        video = self._build_liked_video_row(aweme)
+                        if not video:
+                            continue
+                        video_id = str(video.get("aweme_id") or "").strip()
+                        if not video_id:
+                            continue
+                        if video_id not in videos_by_id:
+                            new_videos += 1
+                        videos_by_id[video_id] = video
+                        if limit and len(videos_by_id) >= int(limit):
+                            break
+                    if limit and len(videos_by_id) >= int(limit):
+                        break
+
+                stagnant_rounds = stagnant_rounds + 1 if new_videos == 0 else 0
+                if received_has_more_false or stagnant_rounds >= max_stagnant_rounds:
+                    break
+
+            videos = sorted(
+                videos_by_id.values(),
+                key=lambda item: item.get("publish_timestamp") or 0,
+                reverse=True,
+            )
+            if limit:
+                videos = videos[: int(limit)]
+            print(f"Douyin liked videos cached from homepage: {len(videos)}")
+            return videos
+        finally:
+            if collector_mode == "listen":
+                try:
+                    page.listen.stop()
+                except Exception:
+                    pass
+            elif handler is not None:
+                self._remove_response_collector(handler)
+
+    def _click_profile_like_tab(self):
+        script = r"""
+        const keyword = '\u559c\u6b22';
+        const visible = Array.from(document.querySelectorAll('a,button,div,span'))
+          .map(el => ({el, text: (el.innerText || el.textContent || '').trim(), rect: el.getBoundingClientRect()}))
+          .filter(item =>
+            item.text.includes(keyword) &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.top >= 40 &&
+            item.rect.top < Math.min(window.innerHeight, 360)
+          )
+          .sort((a, b) => {
+            const aExact = a.text === keyword ? 1 : 0;
+            const bExact = b.text === keyword ? 1 : 0;
+            if (aExact !== bExact) return bExact - aExact;
+            return a.text.length - b.text.length;
+          });
+        if (!visible.length) return {clicked: false};
+        const target = visible[0].el.closest('a,button,[role="button"]') || visible[0].el;
+        const rect = target.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          target.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window, clientX: x, clientY: y}));
+        }
+        return {clicked: true, text: visible[0].text};
+        """
+        try:
+            page = self.start()
+            if hasattr(page, "run_js"):
+                result = page.run_js(script)
+            elif hasattr(page, "evaluate"):
+                result = page.evaluate(script)
+            else:
+                return False
+            time.sleep(1.0)
+            return bool(isinstance(result, dict) and result.get("clicked"))
+        except Exception:
+            return False
+
     def refresh_user_profile_from_homepage(self, user):
         page = self.start()
         page.listen.start([self.config.post_api_pattern, self.config.video_detail_api_pattern])
@@ -1500,6 +1634,27 @@ class DouyinBrowserClient:
             "view_count": parse_view_count(statistics.get("play_count")),
             "video_url": f"https://www.douyin.com/video/{aweme_id}",
         }
+
+    def _build_liked_video_row(self, aweme):
+        author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+        user = {
+            "nickname": author.get("nickname") or author.get("name") or "liked_video_author",
+            "sec_uid": author.get("sec_uid") or author.get("uid") or author.get("short_id") or "",
+        }
+        video = self._build_video_row(user, aweme)
+        if not video:
+            return None
+        video["uploader_name"] = user["nickname"]
+        video["uploader_id"] = user["sec_uid"]
+        video["author_name"] = user["nickname"]
+        video["author_id"] = user["sec_uid"]
+        video["source_mode"] = "liked"
+        video["manual_grade"] = "S"
+        video["video_manual_grade"] = "S"
+        metadata = video.get("metadata") if isinstance(video.get("metadata"), dict) else {}
+        metadata.update({"liked_cache": True, "manual_grade": "S"})
+        video["metadata"] = metadata
+        return video
 
     def _update_user_profile_from_packet(self, user, data):
         follower_count = self._extract_follower_count(data)

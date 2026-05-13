@@ -1205,27 +1205,33 @@ class DouyinHiatusAnalyzer:
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
 
-        if not results and not summary_rows and not all_video_rows:
-            return
-
-        snapshot_results = sorted(
-            [dict(item) for item in results],
-            key=self._sort_days_since_value,
-            reverse=True,
+        save_cache_inventory_to_csv(
+            self.config,
+            self.build_cache_inventory_rows(
+                self.cache_store.load_followings_cache_payload(),
+                progress,
+            ),
         )
-        save_to_csv(self.config, snapshot_results, merge_existing=merge_existing)
 
-        if self.should_export_summary_analysis():
-            save_video_duration_analysis_to_csv(
-                self.config,
-                list(summary_rows),
-                merge_existing=merge_existing,
+        if results or summary_rows or all_video_rows:
+            snapshot_results = sorted(
+                [dict(item) for item in results],
+                key=self._sort_days_since_value,
+                reverse=True,
             )
-        if self.should_export_duration_analysis():
-            save_all_videos_to_csv(self.config, list(all_video_rows))
-            save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
+            save_to_csv(self.config, snapshot_results, merge_existing=merge_existing)
 
-        local_outputs = [self.config.output_csv]
+            if self.should_export_summary_analysis():
+                save_video_duration_analysis_to_csv(
+                    self.config,
+                    list(summary_rows),
+                    merge_existing=merge_existing,
+                )
+            if self.should_export_duration_analysis():
+                save_all_videos_to_csv(self.config, list(all_video_rows))
+                save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
+
+        local_outputs = [self.config.output_csv, self.config.cache_inventory_csv]
         if self.should_export_summary_analysis():
             local_outputs.append(self.config.video_duration_analysis_csv)
         if self.should_export_duration_analysis():
@@ -1978,10 +1984,28 @@ class DouyinHiatusAnalyzer:
                                 videos = recent_videos
                     except DouyinFullModeFrequencyError as exc:
                         print(f"⚠️  {exc}")
-                        raise
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index - 1,
+                            merge_existing=partial_run,
+                        )
+                        raise OperationCancelled(str(exc)) from exc
                     except DouyinLoginExpiredError as exc:
                         print(f"⚠️  {exc}")
-                        raise
+                        self.flush_partial_outputs(
+                            results,
+                            all_video_rows,
+                            summary_rows,
+                            progress,
+                            pending_progress_saves,
+                            index - 1,
+                            merge_existing=partial_run,
+                        )
+                        raise OperationCancelled(str(exc)) from exc
                     except DouyinRateLimitError as exc:
                         print(f"⚠️  {user['nickname']} 触发页面级速率限制: {exc}")
                         self.browser_client.restart(self.config.rate_limit_global_cooldown)

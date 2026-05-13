@@ -41,6 +41,7 @@ class DouyinAnalyzerConfig:
     self_user_url: str
     following_api_pattern: str
     post_api_pattern: str
+    liked_video_api_pattern: str
     output_csv: Path
     high_like_export_mirror_csv: Path
     high_like_failed_csv: Path
@@ -223,6 +224,10 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
             "following/list",
         ),
         post_api_pattern=os.getenv("DOUYIN_POST_API_PATTERN", "aweme/v1/web/aweme/post/"),
+        liked_video_api_pattern=os.getenv(
+            "DOUYIN_LIKED_VIDEO_API_PATTERN",
+            "aweme/v1/web/aweme/favorite/",
+        ),
         output_csv=output_dir / "douyin_hiatus_ranking.csv",
         high_like_export_mirror_csv=_resolve_path_env(
             "DOUYIN_HIGH_LIKE_EXPORT_MIRROR_PATH",
