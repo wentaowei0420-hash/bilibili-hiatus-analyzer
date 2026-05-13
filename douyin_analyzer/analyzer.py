@@ -457,10 +457,12 @@ class DouyinHiatusAnalyzer:
     def get_latest_video_from_entry(self, entry):
         if not isinstance(entry, dict):
             return None
+        candidates = []
         latest_video = entry.get("latest_video")
-        if latest_video:
-            return latest_video
-        return self.get_latest_video_from_videos(entry.get("videos", []))
+        if isinstance(latest_video, dict):
+            candidates.append(latest_video)
+        candidates.extend(video for video in entry.get("videos", []) or [] if isinstance(video, dict))
+        return self.get_latest_video_from_videos(candidates)
 
     def build_result_item(self, user, summary, latest_video):
         upload_timestamp = normalize_timestamp(latest_video.get("publish_timestamp"))

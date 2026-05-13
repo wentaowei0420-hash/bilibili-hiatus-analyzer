@@ -285,10 +285,7 @@ class DouyinCreatorScorer:
         return list(creators.values())
 
     def _load_video_stats(self):
-        if not self._table_exists("video_score_current"):
-            return {}
-
-        rows = self._read_table("video_score_current")
+        rows = self._read_table("video_score_current") if self._table_exists("video_score_current") else []
         grouped = {}
         for row in rows:
             uid = _pick_text(row, "UP主UID")
@@ -313,6 +310,36 @@ class DouyinCreatorScorer:
                 item["scores"].append(score)
                 item["videos"].append({"score": score, "publish_ts": publish_ts})
             if publish_ts > 0:
+                if item["earliest_publish_ts"] <= 0 or publish_ts < item["earliest_publish_ts"]:
+                    item["earliest_publish_ts"] = publish_ts
+                if publish_ts > item["latest_publish_ts"]:
+                    item["latest_publish_ts"] = publish_ts
+
+        if self._table_exists("douyin_video_state"):
+            with sqlite3.connect(self.db_path) as conn:
+                state_rows = conn.execute(
+                    """
+                    SELECT uploader_id, publish_timestamp
+                    FROM douyin_video_state
+                    WHERE uploader_id IS NOT NULL AND TRIM(uploader_id) != ''
+                      AND publish_timestamp IS NOT NULL AND TRIM(CAST(publish_timestamp AS TEXT)) != ''
+                    """
+                ).fetchall()
+            for uid, publish_timestamp in state_rows:
+                uid = str(uid or "").strip()
+                publish_ts = _safe_int(publish_timestamp, 0)
+                if not uid or publish_ts <= 0:
+                    continue
+                item = grouped.setdefault(
+                    uid,
+                    {
+                        "scores": [],
+                        "videos": [],
+                        "grade_counts": {grade_key: 0 for grade_key in ["S", "A", "B", "C", "D"]},
+                        "earliest_publish_ts": 0,
+                        "latest_publish_ts": 0,
+                    },
+                )
                 if item["earliest_publish_ts"] <= 0 or publish_ts < item["earliest_publish_ts"]:
                     item["earliest_publish_ts"] = publish_ts
                 if publish_ts > item["latest_publish_ts"]:
@@ -403,9 +430,9 @@ class DouyinCreatorScorer:
         follower_count = _safe_int(creator.get("follower_count"), 0)
         total_like_count = _safe_int(creator.get("total_like_count"), 0)
         avg_like_count = _safe_float(creator.get("avg_like_count"), 0)
-        inactive_days = creator.get("inactive_days")
-        if inactive_days is None:
-            inactive_days = _inactive_days_from_video_stats(video_stat, self.now_ts)
+        latest_publish_ts = _safe_int(video_stat.get("latest_publish_ts"), 0)
+        inactive_days_from_videos = _inactive_days_from_video_stats(video_stat, self.now_ts)
+        inactive_days = inactive_days_from_videos if inactive_days_from_videos is not None else creator.get("inactive_days")
         avg_update_days = creator.get("avg_update_days")
         video_count = max(_safe_int(creator.get("video_count"), 0), _safe_int(len(video_stat.get("videos", [])), 0))
         earliest_publish_ts = _safe_int(video_stat.get("earliest_publish_ts"), 0)
@@ -475,7 +502,7 @@ class DouyinCreatorScorer:
             "score_source": score_source,
             "follower_count": follower_count,
             "total_like_count": total_like_count,
-            "latest_publish_date": creator.get("latest_publish_date") or _format_unix_timestamp(video_stat.get("latest_publish_ts")),
+            "latest_publish_date": _format_unix_timestamp(latest_publish_ts) or creator.get("latest_publish_date"),
             "inactive_days": "" if inactive_days is None else round(inactive_days, 2),
             "avg_update_days": "" if avg_update_days is None else round(avg_update_days, 2),
             "video_count": video_count,

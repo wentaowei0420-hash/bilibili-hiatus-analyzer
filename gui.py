@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from PyQt5.QtCore import QThread, Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import QThread, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
@@ -59,6 +59,7 @@ EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
 )
 EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
 EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
+AUTO_FULL_INTERVAL_MS = 5 * 60 * 60 * 1000
 
 BILIBILI_RUNTIME_FIELDS = [
     ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
@@ -3507,6 +3508,11 @@ class MainWindow(QMainWindow):
         self.bilibili_runtime_settings = _load_default_bilibili_runtime_settings()
         self.douyin_runtime_settings = _load_default_douyin_runtime_settings()
         self.fetch_order_settings = _load_default_fetch_order_settings()
+        self.auto_full_enabled = False
+        self.auto_full_next_run_at = None
+        self.auto_full_timer = QTimer(self)
+        self.auto_full_timer.setInterval(AUTO_FULL_INTERVAL_MS)
+        self.auto_full_timer.timeout.connect(self._on_auto_full_timer)
         self._progress_current = 0
         self._progress_total = 0
         self._progress_running = False
@@ -3517,6 +3523,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_gui_config()
         self._sync_visible_options()
+        self._sync_auto_full_timer()
 
     def _apply_readable_style(self):
         self.setStyleSheet(
@@ -3664,7 +3671,10 @@ class MainWindow(QMainWindow):
         self.high_like_spin.setValue(10000)
         self.high_like_spin.setMaximumWidth(180)
         self.high_like_spin.setToolTip("导出抖音高赞视频时使用，其它模式不会使用该参数。")
-        add_setting(4, "高赞阈值", self.high_like_spin)
+        self.auto_full_button = QPushButton("自动 full：关闭")
+        self.auto_full_button.setToolTip("开启后每 5 小时按当前界面参数自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
+        self.auto_full_button.clicked.connect(self._toggle_auto_full_mode)
+        add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", self.auto_full_button)
         layout.addWidget(settings_group)
 
         self.log_dialog = LogCenterDialog(self)
@@ -3845,6 +3855,7 @@ class MainWindow(QMainWindow):
             "bilibili_runtime_settings": self.bilibili_runtime_settings,
             "douyin_runtime_settings": self.douyin_runtime_settings,
             "fetch_order_settings": self.fetch_order_settings,
+            "auto_full_enabled": self.auto_full_enabled,
         }
 
     def _save_gui_config(self):
@@ -3906,6 +3917,7 @@ class MainWindow(QMainWindow):
         )
 
         self.config_locked = bool(data.get("locked", False))
+        self.auto_full_enabled = bool(data.get("auto_full_enabled", False))
 
     def _open_advanced_settings(self):
         dialog = AdvancedSettingsDialog(
@@ -3940,6 +3952,73 @@ class MainWindow(QMainWindow):
             self._save_gui_config()
             self._append_log(f"配置已锁定，后续将按当前参数运行。配置文件: {GUI_CONFIG_PATH}")
         self._sync_visible_options()
+
+    def _toggle_auto_full_mode(self):
+        self.auto_full_enabled = not self.auto_full_enabled
+        if self.auto_full_enabled:
+            self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
+            self._append_log("自动 full 模式已开启：每 5 小时按当前界面参数运行一次。")
+        else:
+            self.auto_full_next_run_at = None
+            self._append_log("自动 full 模式已关闭。")
+        self._save_gui_config()
+        self._sync_auto_full_timer()
+
+    def _sync_auto_full_timer(self):
+        if not hasattr(self, "auto_full_button"):
+            return
+        if self.auto_full_enabled:
+            if not self.auto_full_timer.isActive():
+                self.auto_full_timer.start()
+            if self.auto_full_next_run_at is None:
+                self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
+            next_time = datetime.fromtimestamp(self.auto_full_next_run_at).strftime("%H:%M")
+            self.auto_full_button.setText(f"自动 full：开启（{next_time}）")
+            self.auto_full_button.setStyleSheet("font-weight: 700; color: #1565c0;")
+        else:
+            self.auto_full_timer.stop()
+            self.auto_full_button.setText("自动 full：关闭")
+            self.auto_full_button.setStyleSheet("")
+
+    def _on_auto_full_timer(self):
+        if not self.auto_full_enabled:
+            return
+        self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
+        self._sync_auto_full_timer()
+        self._start_auto_full_run()
+
+    def _start_auto_full_run(self):
+        if self.worker and self.worker.isRunning():
+            self._append_log("自动 full 触发时已有任务运行，本次跳过。")
+            return
+        if self.data_sync_worker and self.data_sync_worker.isRunning():
+            self._append_log("自动 full 触发时抖音数据同步仍在运行，本次跳过。")
+            return
+
+        config = self._collect_config()
+        config.platform = "douyin"
+        config.action = "fetch"
+        config.douyin_fetch_mode = "full"
+        if not self._validate_config(config):
+            self._append_log("自动 full 触发失败：当前配置校验未通过。")
+            return
+        if self.config_locked:
+            self._save_gui_config()
+
+        self.log_text.clear()
+        self._append_log("自动 full 定时触发：开始运行抖音完整模式。")
+        self._start_task_progress("自动 full 已启动，正在等待抓取总数...")
+        self.start_button.setEnabled(False)
+        self.start_button.setText("运行中...")
+        self.high_like_export_button.setEnabled(False)
+        self.unfollow_cleanup_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
+        self.worker = RunnerThread(config)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
 
     def _open_douyin_stats(self):
         dialog = DouyinStatsDialogV2(self, high_like_threshold=self.high_like_spin.value())

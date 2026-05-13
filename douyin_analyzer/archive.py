@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from .utils import normalize_timestamp, timestamp_to_date
+
 
 ARCHIVE_TABLE = "douyin_archived_creators"
 ACTIVE_STATUS = "active"
@@ -79,6 +81,81 @@ def _safe_int(value, default=0):
 
 def _json_dumps(data):
     return json.dumps(data or {}, ensure_ascii=False, default=str)
+
+
+def _inactive_days_from_timestamp(timestamp):
+    timestamp = normalize_timestamp(timestamp)
+    if not timestamp:
+        return None
+    try:
+        seconds = (datetime.now() - datetime.fromtimestamp(timestamp)).total_seconds()
+    except Exception:
+        return None
+    return round(max(seconds / 86400, 0), 2)
+
+
+def _video_title_from_payload(payload_json, fallback=""):
+    try:
+        payload = json.loads(payload_json or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return _text(
+        payload.get("video_title")
+        or payload.get("title")
+        or payload.get("desc")
+        or payload.get("description")
+        or fallback
+    )
+
+
+def _remember_latest_video(result, uid, timestamp, title="", video_id=""):
+    uid = _text(uid)
+    timestamp = normalize_timestamp(timestamp)
+    if not uid or timestamp <= 0:
+        return
+    current = result.get(uid) or {}
+    if timestamp <= normalize_timestamp(current.get("publish_timestamp")):
+        return
+    result[uid] = {
+        "publish_timestamp": timestamp,
+        "publish_time": timestamp_to_date(timestamp),
+        "video_title": _text(title),
+        "video_id": _text(video_id),
+    }
+
+
+def _load_latest_cached_videos(conn):
+    result = {}
+    if _table_exists(conn, "douyin_video_state"):
+        rows = conn.execute(
+            """
+            SELECT uploader_id, video_id, publish_timestamp, payload_json
+            FROM douyin_video_state
+            WHERE uploader_id IS NOT NULL AND TRIM(uploader_id) != ''
+              AND publish_timestamp IS NOT NULL AND TRIM(CAST(publish_timestamp AS TEXT)) != ''
+            """
+        ).fetchall()
+        for row in rows:
+            _remember_latest_video(
+                result,
+                row["uploader_id"],
+                row["publish_timestamp"],
+                _video_title_from_payload(row["payload_json"], row["video_id"]),
+                row["video_id"],
+            )
+
+    if _table_exists(conn, "video_score_current"):
+        for row in _read_table(conn, "video_score_current"):
+            _remember_latest_video(
+                result,
+                _pick(row, "UP主UID", "uploader_id"),
+                _pick(row, "发布时间戳", "publish_timestamp"),
+                _pick(row, "视频标题", "video_title", "title"),
+                _pick(row, "视频ID", "video_id", "aweme_id"),
+            )
+    return result
 
 
 def ensure_archive_table(db_path):
@@ -171,22 +248,30 @@ def _has_full_data(inventory_row):
     )
 
 
-def _merge_creator_snapshot(uid, inventory, main, analysis, score):
+def _merge_creator_snapshot(uid, inventory, main, analysis, score, latest_cached_video=None):
     inventory = inventory or {}
     main = main or {}
     analysis = analysis or {}
     score = score or {}
+    latest_cached_video = latest_cached_video or {}
     uploader_name = _pick(score, "UP主姓名") or _pick(main, "UP主姓名") or _pick(inventory, "UP主姓名")
     homepage_url = _pick(score, "UP主主页链接") or _pick(main, "UP主主页链接") or _pick(inventory, "UP主主页链接")
     latest_publish_time = (
-        _pick(score, "最近更新时间")
+        _pick(latest_cached_video, "publish_time")
+        or _pick(score, "最近更新时间")
         or _pick(main, "最后活跃/发布日期")
         or _pick(inventory, "缓存最新发布时间")
     )
-    inactive_days = _safe_float(
-        _pick(score, "未更新天数") or _pick(main, "未更新天数", "距离最后一个视频发布(天)"),
-        default=0.0,
+    inactive_days = (
+        _inactive_days_from_timestamp(_pick(latest_cached_video, "publish_timestamp"))
+        if latest_cached_video
+        else None
     )
+    if inactive_days is None:
+        inactive_days = _safe_float(
+            _pick(score, "未更新天数") or _pick(main, "未更新天数", "距离最后一个视频发布(天)"),
+            default=0.0,
+        )
     published_video_count = max(
         _safe_int(_pick(score, "视频数量"), 0),
         _safe_int(_pick(main, "发布视频数量"), 0),
@@ -205,7 +290,11 @@ def _merge_creator_snapshot(uid, inventory, main, analysis, score):
         "total_like_count": max(_safe_int(_pick(score, "获赞总数"), 0), _safe_int(_pick(main, "获赞总数"), 0), _safe_int(_pick(inventory, "获赞总数"), 0)),
         "published_video_count": published_video_count,
         "cached_video_count": _safe_int(_pick(inventory, "缓存视频数"), 0),
-        "latest_video_title": _pick(main, "最新视频标题") or _pick(inventory, "缓存最新视频标题"),
+        "latest_video_title": (
+            _pick(latest_cached_video, "video_title")
+            or _pick(main, "最新视频标题")
+            or _pick(inventory, "缓存最新视频标题")
+        ),
         "latest_publish_time": latest_publish_time,
         "inactive_days": inactive_days,
         "avg_update_days": _safe_float(_pick(score, "平均几天一更") or _pick(main, "平均几天一更"), 0.0),
@@ -239,6 +328,7 @@ def load_archive_candidates(db_path, inactive_days_threshold=100):
             _text(_pick(row, "UP主UID", "UP涓籙ID", "uploader_id")): row
             for row in _read_table(conn, "creator_score_current")
         }
+        latest_video_by_uid = _load_latest_cached_videos(conn)
         active_archived = load_active_archived_uids(db_path)
         manual_keep = _load_manual_keep_uids(conn)
 
@@ -261,6 +351,7 @@ def load_archive_candidates(db_path, inactive_days_threshold=100):
             main_by_uid.get(uid, {}),
             analysis_by_uid.get(uid, {}),
             score,
+            latest_video_by_uid.get(uid),
         )
         if row["inactive_days"] < threshold:
             continue
