@@ -4,7 +4,7 @@ import time
 from loguru import logger
 
 from common.platform_store import read_video_rows_for_uploader
-from common.domain_models import AnalysisResult
+from common.domain_models import AnalysisResult, VideoDurationSummary
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.console_reporter import RichAnalyzerReporter
@@ -17,14 +17,7 @@ from .browser_client import (
     DouyinServiceError,
 )
 from .archive import load_active_archived_uids
-from .exporters import (
-    save_all_videos_to_csv,
-    save_cache_inventory_to_csv,
-    save_full_fetch_mismatch_to_csv,
-    save_to_csv,
-    save_video_duration_analysis_to_csv,
-    save_video_duration_report,
-)
+from .export_service import DouyinExportService
 from .utils import (
     DEFAULT_GROUP_NAME,
     LONG_VIDEO_LABEL,
@@ -49,6 +42,7 @@ class DouyinHiatusAnalyzer:
         upload_callback=None,
         max_followings=None,
         reporter=None,
+        export_service=None,
     ):
         self.config = config
         self.browser_client = browser_client
@@ -56,6 +50,7 @@ class DouyinHiatusAnalyzer:
         self.cache_store = self.cache_repository
         self.upload_callback = upload_callback
         self.reporter = reporter or RichAnalyzerReporter()
+        self.export_service = export_service or DouyinExportService(config)
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):
@@ -474,42 +469,64 @@ class DouyinHiatusAnalyzer:
         days_since = calculate_days_since(upload_timestamp)
         published_video_count = self.resolve_published_video_count(user, summary)
         data_source = "douyin_video_api" if self.get_fetch_mode() == "full" else "douyin_recent_video_api"
-        return {
-            "uploader_name": user["nickname"],
+        result = AnalysisResult(
+            platform="douyin",
+            uploader_id=str(user["sec_uid"]),
+            uploader_name=str(user["nickname"]),
+            uploader_homepage=str(user["homepage"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            published_video_count=self._safe_int(published_video_count, 0),
+            average_like_count=self._safe_int(
+                self.resolve_average_like_count(
+                    user,
+                    summary,
+                    summary.get("average_like_count", 0),
+                ),
+                0,
+            ),
+            average_update_interval_days=summary.get("average_update_interval_days"),
+            upload_date=latest_video.get("publish_date", UNKNOWN_DATE),
+            days_since_update=days_since,
+            data_source=data_source,
+        ).to_dict()
+        result.update({
             "following_remark": user.get("remark_name", ""),
-            "uploader_id": user["sec_uid"],
-            "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
             "total_favorited": self.resolve_total_favorited(user, summary),
-            "published_video_count": published_video_count,
             "average_like_count": self.resolve_average_like_count(
                 user,
                 summary,
                 summary.get("average_like_count", 0),
             ),
-            "average_update_interval_days": summary.get("average_update_interval_days"),
             "latest_video_title": latest_video.get("video_title", "无标题视频"),
             "upload_timestamp": upload_timestamp,
-            "upload_date": latest_video.get("publish_date", UNKNOWN_DATE),
-            "days_since_update": days_since,
             "days_since_last_video": days_since,
             "view_count": latest_video.get("view_count", 0),
             "video_url": latest_video.get("video_url", ""),
-            "data_source": data_source,
-        }
+        })
+        return result
 
     def build_counts_only_result_item(self, user):
-        return {
-            "uploader_name": user["nickname"],
+        average_like_count = self.calculate_average_like_from_profile(user, "")
+        result = AnalysisResult(
+            platform="douyin",
+            uploader_id=str(user["sec_uid"]),
+            uploader_name=str(user["nickname"]),
+            uploader_homepage=str(user["homepage"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            published_video_count=self._safe_int(user.get("aweme_count"), 0),
+            average_like_count=self._safe_int(average_like_count, 0),
+            days_since_update=0,
+            data_source="douyin_followings_api",
+        ).to_dict()
+        result.update({
             "following_remark": user.get("remark_name", ""),
-            "uploader_id": user["sec_uid"],
-            "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count", ""),
             "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
-            "average_like_count": self.calculate_average_like_from_profile(user, ""),
+            "average_like_count": average_like_count,
             "average_update_interval_days": "",
             "latest_video_title": "",
             "upload_date": "",
@@ -517,75 +534,75 @@ class DouyinHiatusAnalyzer:
             "days_since_last_video": "",
             "view_count": "",
             "video_url": "",
-            "data_source": "douyin_followings_api",
-        }
+        })
+        return result
 
     def build_no_video_result_item(self, user):
-        return {
-            "uploader_name": user["nickname"],
+        result = AnalysisResult(
+            platform="douyin",
+            uploader_id=str(user["sec_uid"]),
+            uploader_name=str(user["nickname"]),
+            uploader_homepage=str(user["homepage"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            published_video_count=self._safe_int(user.get("aweme_count"), 0),
+            average_like_count=self._safe_int(self.calculate_average_like_from_profile(user, 0), 0),
+            upload_date=UNKNOWN_DATE,
+            days_since_update=0,
+            data_source="no_video",
+        ).to_dict()
+        result.update({
             "following_remark": user.get("remark_name", ""),
-            "uploader_id": user["sec_uid"],
-            "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
             "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
             "average_like_count": self.calculate_average_like_from_profile(user, 0),
-            "average_update_interval_days": None,
             "latest_video_title": "暂无公开视频",
-            "upload_date": UNKNOWN_DATE,
-            "days_since_update": 0,
             "days_since_last_video": 0,
             "view_count": 0,
             "video_url": "",
-            "data_source": "no_video",
-        }
+        })
+        return result
 
     def build_fetch_failed_result_item(self, user):
-        return {
-            "uploader_name": user["nickname"],
+        result = AnalysisResult(
+            platform="douyin",
+            uploader_id=str(user["sec_uid"]),
+            uploader_name=str(user["nickname"]),
+            uploader_homepage=str(user["homepage"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            published_video_count=self._safe_int(user.get("aweme_count"), 0),
+            average_like_count=self._safe_int(self.calculate_average_like_from_profile(user, 0), 0),
+            upload_date=UNKNOWN_DATE,
+            days_since_update=0,
+            data_source="fetch_failed",
+        ).to_dict()
+        result.update({
             "following_remark": user.get("remark_name", ""),
-            "uploader_id": user["sec_uid"],
-            "uploader_homepage": user["homepage"],
             "following_group_names": DEFAULT_GROUP_NAME,
             "follower_count": user.get("follower_count"),
             "total_favorited": user.get("total_favorited", ""),
             "published_video_count": user.get("aweme_count", 0),
             "average_like_count": self.calculate_average_like_from_profile(user, 0),
-            "average_update_interval_days": None,
             "latest_video_title": "抓取失败",
-            "upload_date": UNKNOWN_DATE,
-            "days_since_update": 0,
             "days_since_last_video": 0,
             "view_count": 0,
             "video_url": "",
-            "data_source": "fetch_failed",
-        }
+        })
+        return result
 
     def build_empty_summary(self, user):
         total_videos = user.get("aweme_count") or 0
-        return {
-            "uploader_name": user["nickname"],
-            "uploader_id": user["sec_uid"],
-            "follower_count": user.get("follower_count"),
-            "total_favorited": user.get("total_favorited", ""),
-            "total_videos": total_videos,
-            "latest_publish_timestamp": 0,
-            "total_duration_seconds": 0,
-            "average_duration_seconds": 0,
-            "average_duration_text": "00:00",
-            "average_like_count": self.calculate_average_like_from_profile(user, 0),
-            "average_update_interval_days": None,
-            "short_video_count": 0,
-            "short_video_ratio": "0.00%",
-            "medium_video_count": 0,
-            "medium_video_ratio": "0.00%",
-            "medium_long_video_count": 0,
-            "medium_long_video_ratio": "0.00%",
-            "long_video_count": 0,
-            "long_video_ratio": "0.00%",
-            "summary_scope": "empty",
-        }
+        return VideoDurationSummary(
+            platform="douyin",
+            uploader_name=str(user["nickname"]),
+            uploader_id=str(user["sec_uid"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            total_favorited=user.get("total_favorited", ""),
+            total_videos=self._safe_int(total_videos, 0),
+            average_like_count=self._safe_int(self.calculate_average_like_from_profile(user, 0), 0),
+            summary_scope="empty",
+        ).to_dict()
 
     def build_counts_only_summary(self, user):
         return {
@@ -839,31 +856,32 @@ class DouyinHiatusAnalyzer:
             default=0,
         )
 
-        return {
-            "uploader_name": user["nickname"],
-            "uploader_id": user["sec_uid"],
-            "follower_count": user.get("follower_count"),
-            "total_favorited": total_favorited,
-            "total_favorited_source": "public_video_like_sum" if complete_video_sample else "profile_total",
-            "total_videos": total_videos,
-            "latest_publish_timestamp": latest_publish_timestamp,
-            "total_duration_seconds": total_duration_seconds,
-            "average_duration_seconds": average_duration_seconds,
-            "average_duration_text": seconds_to_duration_text(average_duration_seconds),
-            "average_like_count": average_like_count,
-            "average_update_interval_days": calculate_average_update_interval_days(
+        return VideoDurationSummary(
+            platform="douyin",
+            uploader_name=str(user["nickname"]),
+            uploader_id=str(user["sec_uid"]),
+            follower_count=self._safe_int(user.get("follower_count"), 0),
+            total_favorited=total_favorited,
+            total_favorited_source="public_video_like_sum" if complete_video_sample else "profile_total",
+            total_videos=total_videos,
+            latest_publish_timestamp=latest_publish_timestamp,
+            total_duration_seconds=total_duration_seconds,
+            average_duration_seconds=average_duration_seconds,
+            average_duration_text=seconds_to_duration_text(average_duration_seconds),
+            average_like_count=average_like_count,
+            average_update_interval_days=calculate_average_update_interval_days(
                 video.get("publish_timestamp") for video in videos
             ),
-            "short_video_count": short_count,
-            "short_video_ratio": format_ratio(short_count, total_videos),
-            "medium_video_count": medium_count,
-            "medium_video_ratio": format_ratio(medium_count, total_videos),
-            "medium_long_video_count": medium_long_count,
-            "medium_long_video_ratio": format_ratio(medium_long_count, total_videos),
-            "long_video_count": long_count,
-            "long_video_ratio": format_ratio(long_count, total_videos),
-            "summary_scope": "full" if complete_video_sample else "partial",
-        }
+            short_video_count=short_count,
+            short_video_ratio=format_ratio(short_count, total_videos),
+            medium_video_count=medium_count,
+            medium_video_ratio=format_ratio(medium_count, total_videos),
+            medium_long_video_count=medium_long_count,
+            medium_long_video_ratio=format_ratio(medium_long_count, total_videos),
+            long_video_count=long_count,
+            long_video_ratio=format_ratio(long_count, total_videos),
+            summary_scope="full" if complete_video_sample else "partial",
+        ).to_dict()
 
     @staticmethod
     def _format_output_summary(paths):
@@ -1129,10 +1147,10 @@ class DouyinHiatusAnalyzer:
             key=self._sort_days_since_value,
             reverse=True,
         )
-        save_to_csv(self.config, results)
+        self.export_service.save_main_results(results)
         if self.should_export_summary_analysis():
-            save_video_duration_analysis_to_csv(self.config, summary_rows)
-        save_cache_inventory_to_csv(self.config, cache_rows)
+            self.export_service.save_summary_analysis(summary_rows)
+        self.export_service.save_cache_inventory(cache_rows)
         return bool(results)
 
     def display_top_results(self, results):
@@ -1211,8 +1229,7 @@ class DouyinHiatusAnalyzer:
         if pending_progress_saves:
             self.cache_store.save_progress(progress)
 
-        save_cache_inventory_to_csv(
-            self.config,
+        self.export_service.save_cache_inventory(
             self.build_cache_inventory_rows(
                 self.cache_store.load_followings_cache_payload(),
                 progress,
@@ -1225,17 +1242,15 @@ class DouyinHiatusAnalyzer:
                 key=self._sort_days_since_value,
                 reverse=True,
             )
-            save_to_csv(self.config, snapshot_results, merge_existing=merge_existing)
+            self.export_service.save_main_results(snapshot_results, merge_existing=merge_existing)
 
             if self.should_export_summary_analysis():
-                save_video_duration_analysis_to_csv(
-                    self.config,
+                self.export_service.save_summary_analysis(
                     list(summary_rows),
                     merge_existing=merge_existing,
                 )
             if self.should_export_duration_analysis():
-                save_all_videos_to_csv(self.config, list(all_video_rows))
-                save_video_duration_report(self.config, list(summary_rows), len(all_video_rows))
+                self.export_service.save_duration_outputs(list(all_video_rows), list(summary_rows))
 
         local_outputs = [self.config.output_csv, self.config.cache_inventory_csv]
         if self.should_export_summary_analysis():
@@ -1636,11 +1651,10 @@ class DouyinHiatusAnalyzer:
                         )
 
             self.display_counts_results(results)
-            save_to_csv(self.config, results, merge_existing=partial_run)
+            self.export_service.save_main_results(results, merge_existing=partial_run)
             if self.should_export_summary_analysis():
-                save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
-            save_cache_inventory_to_csv(
-                self.config,
+                self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
+            self.export_service.save_cache_inventory(
                 self.build_cache_inventory_rows(
                     self.cache_store.load_followings_cache_payload(),
                     self.cache_store.load_progress(),
@@ -1855,11 +1869,10 @@ class DouyinHiatusAnalyzer:
             self.merge_updated_followings_cache(cached_followings, verified_users)
 
             self.display_counts_results(results)
-            save_to_csv(self.config, results, merge_existing=partial_run)
+            self.export_service.save_main_results(results, merge_existing=partial_run)
             if self.should_export_summary_analysis():
-                save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
-            save_cache_inventory_to_csv(
-                self.config,
+                self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
+            self.export_service.save_cache_inventory(
                 self.build_cache_inventory_rows(
                     self.cache_store.load_followings_cache_payload(),
                     self.cache_store.load_progress(),
@@ -2216,22 +2229,20 @@ class DouyinHiatusAnalyzer:
 
         results.sort(key=self._sort_days_since_value, reverse=True)
         self.display_top_results(results)
-        save_to_csv(self.config, results, merge_existing=partial_run)
+        self.export_service.save_main_results(results, merge_existing=partial_run)
 
         if self.should_export_summary_analysis():
-            save_video_duration_analysis_to_csv(self.config, summary_rows, merge_existing=partial_run)
-        save_cache_inventory_to_csv(
-            self.config,
+            self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
+        self.export_service.save_cache_inventory(
             self.build_cache_inventory_rows(
                 self.cache_store.load_followings_cache_payload(),
                 progress,
             ),
         )
         if fetch_mode == "full":
-            save_full_fetch_mismatch_to_csv(self.config, full_fetch_mismatch_rows)
+            self.export_service.save_full_fetch_mismatch(full_fetch_mismatch_rows)
         if export_duration_analysis:
-            save_all_videos_to_csv(self.config, all_video_rows)
-            save_video_duration_report(self.config, summary_rows, len(all_video_rows))
+            self.export_service.save_duration_outputs(all_video_rows, summary_rows)
 
         exported = [self.config.output_csv, self.config.cache_inventory_csv]
         if self.should_export_summary_analysis():

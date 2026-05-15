@@ -5,16 +5,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-from common.domain_models import AnalysisResult
+from common.domain_models import AnalysisResult, VideoDurationSummary
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from .console_reporter import RichAnalyzerReporter
-from .exporters import (
-    save_all_videos_to_csv,
-    save_to_csv,
-    save_video_duration_analysis_to_csv,
-    save_video_duration_report,
-)
+from .export_service import BilibiliExportService
 from .http_client import RateLimitExceededError
 from .utils import (
     DEFAULT_GROUP_NAME,
@@ -34,12 +29,21 @@ from .utils import (
 
 
 class BilibiliHiatusAnalyzer:
-    def __init__(self, config, api, cache_store, max_followings=None, reporter=None):
+    def __init__(
+        self,
+        config,
+        api,
+        cache_store,
+        max_followings=None,
+        reporter=None,
+        export_service=None,
+    ):
         self.config = config
         self.api = api
         self.cache_repository = AnalyzerCacheRepository(cache_store, platform="bilibili")
         self.cache_store = self.cache_repository
         self.reporter = reporter or RichAnalyzerReporter()
+        self.export_service = export_service or BilibiliExportService(config)
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):
@@ -143,68 +147,71 @@ class BilibiliHiatusAnalyzer:
 
     def build_result_item(self, video_info):
         days_since = calculate_days_since(video_info["upload_timestamp"])
-        return {
-            "uploader_name": video_info["uploader_name"],
-            "uploader_id": video_info["uploader_id"],
-            "uploader_homepage": build_homepage_url(video_info["uploader_id"]),
+        result = AnalysisResult(
+            platform="bilibili",
+            uploader_id=str(video_info["uploader_id"]),
+            uploader_name=str(video_info["uploader_name"]),
+            uploader_homepage=build_homepage_url(video_info["uploader_id"]),
+            days_since_update=days_since,
+            upload_date=timestamp_to_date(video_info["upload_timestamp"]),
+            data_source="video_api",
+        ).to_dict()
+        result.update({
             "following_group_ids": "",
             "following_group_names": "",
-            "follower_count": 0,
-            "published_video_count": 0,
-            "average_like_count": 0,
-            "average_update_interval_days": None,
             "latest_video_title": video_info["video_title"],
             "upload_timestamp": normalize_timestamp(video_info["upload_timestamp"]),
-            "upload_date": timestamp_to_date(video_info["upload_timestamp"]),
-            "days_since_update": days_since,
             "days_since_last_video": days_since,
             "view_count": video_info["view_count"],
             "video_url": video_info.get("video_url")
             or f"https://www.bilibili.com/video/{video_info['bvid']}",
-            "data_source": "video_api",
-        }
+        })
+        return result
 
     def build_following_result_item(self, following):
         activity_timestamp = following.get("mtime") or 0
-        return {
-            "uploader_name": following.get("uname", "未知UP主"),
-            "uploader_id": following.get("mid"),
-            "uploader_homepage": build_homepage_url(following.get("mid")),
+        days_since = calculate_days_since(activity_timestamp)
+        result = AnalysisResult(
+            platform="bilibili",
+            uploader_id=str(following.get("mid") or ""),
+            uploader_name=str(following.get("uname", "未知UP主")),
+            uploader_homepage=build_homepage_url(following.get("mid")),
+            follower_count=self._safe_int(following.get("follower_count"), 0),
+            upload_date=timestamp_to_date(activity_timestamp),
+            days_since_update=days_since,
+            data_source="followings_mtime",
+        ).to_dict()
+        result.update({
             "following_group_ids": following.get("group_id_text", ""),
             "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
-            "follower_count": following.get("follower_count", 0),
-            "published_video_count": 0,
-            "average_like_count": 0,
-            "average_update_interval_days": None,
             "latest_video_title": "未抓取视频详情（回退模式，基于关注列表活跃时间）",
             "activity_timestamp": normalize_timestamp(activity_timestamp),
-            "upload_date": timestamp_to_date(activity_timestamp),
-            "days_since_update": calculate_days_since(activity_timestamp),
-            "days_since_last_video": calculate_days_since(activity_timestamp),
+            "days_since_last_video": days_since,
             "view_count": 0,
             "video_url": "",
-            "data_source": "followings_mtime",
-        }
+        })
+        return result
 
     def build_no_video_result_item(self, following):
-        return {
-            "uploader_name": following.get("uname", "未知UP主"),
-            "uploader_id": following.get("mid"),
-            "uploader_homepage": build_homepage_url(following.get("mid")),
+        result = AnalysisResult(
+            platform="bilibili",
+            uploader_id=str(following.get("mid") or ""),
+            uploader_name=str(following.get("uname", "未知UP主")),
+            uploader_homepage=build_homepage_url(following.get("mid")),
+            follower_count=self._safe_int(following.get("follower_count"), 0),
+            upload_date=UNKNOWN_DATE,
+            days_since_update=0,
+            data_source="no_video",
+        ).to_dict()
+        result.update({
             "following_group_ids": following.get("group_id_text", ""),
             "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
-            "follower_count": following.get("follower_count", 0),
-            "published_video_count": 0,
-            "average_like_count": 0,
-            "average_update_interval_days": None,
             "latest_video_title": "暂无公开视频",
-            "upload_date": UNKNOWN_DATE,
-            "days_since_update": 0,
             "days_since_last_video": 0,
             "view_count": 0,
             "video_url": "",
-            "data_source": "no_video",
-        }
+        })
+        return result
 
     def build_video_duration_summary(self, following, videos):
         total_videos = len(videos)
@@ -231,30 +238,31 @@ class BilibiliHiatusAnalyzer:
             1 for video in videos if video.get("bvid") and not video.get("like_count_fetched", False)
         )
 
-        return {
-            "uploader_name": following.get("uname", "未知UP主"),
-            "uploader_id": following.get("mid"),
-            "follower_count": following.get("follower_count", 0),
-            "total_videos": total_videos,
-            "latest_publish_timestamp": latest_publish_timestamp,
-            "total_duration_seconds": total_duration_seconds,
-            "average_duration_seconds": average_duration_seconds,
-            "average_duration_text": seconds_to_duration_text(average_duration_seconds),
-            "average_like_count": int(total_like_count / len(fetched_like_videos))
+        return VideoDurationSummary(
+            platform="bilibili",
+            uploader_name=str(following.get("uname", "未知UP主")),
+            uploader_id=str(following.get("mid") or ""),
+            follower_count=self._safe_int(following.get("follower_count"), 0),
+            total_videos=total_videos,
+            latest_publish_timestamp=latest_publish_timestamp,
+            total_duration_seconds=total_duration_seconds,
+            average_duration_seconds=average_duration_seconds,
+            average_duration_text=seconds_to_duration_text(average_duration_seconds),
+            average_like_count=int(total_like_count / len(fetched_like_videos))
             if fetched_like_videos
             else 0,
-            "average_update_interval_days": average_update_interval_days,
-            "missing_like_count": missing_like_count,
-            "like_data_complete": missing_like_count == 0,
-            "short_video_count": short_count,
-            "short_video_ratio": format_ratio(short_count, total_videos),
-            "medium_video_count": medium_count,
-            "medium_video_ratio": format_ratio(medium_count, total_videos),
-            "medium_long_video_count": medium_long_count,
-            "medium_long_video_ratio": format_ratio(medium_long_count, total_videos),
-            "long_video_count": long_count,
-            "long_video_ratio": format_ratio(long_count, total_videos),
-        }
+            average_update_interval_days=average_update_interval_days,
+            missing_like_count=missing_like_count,
+            like_data_complete=missing_like_count == 0,
+            short_video_count=short_count,
+            short_video_ratio=format_ratio(short_count, total_videos),
+            medium_video_count=medium_count,
+            medium_video_ratio=format_ratio(medium_count, total_videos),
+            medium_long_video_count=medium_long_count,
+            medium_long_video_ratio=format_ratio(medium_long_count, total_videos),
+            long_video_count=long_count,
+            long_video_ratio=format_ratio(long_count, total_videos),
+        ).to_dict()
 
     @staticmethod
     def _format_output_summary(paths):
@@ -602,9 +610,7 @@ class BilibiliHiatusAnalyzer:
             if summary:
                 summary_rows.append(summary)
 
-        save_all_videos_to_csv(self.config, all_video_rows)
-        save_video_duration_analysis_to_csv(self.config, summary_rows)
-        save_video_duration_report(self.config, summary_rows, len(all_video_rows))
+        self.export_service.save_video_duration_outputs(all_video_rows, summary_rows)
 
         self.reporter.panel(
             "🗂️ B站视频分析输出",
@@ -747,7 +753,7 @@ class BilibiliHiatusAnalyzer:
                     )
                     if results:
                         results.sort(key=lambda item: item["days_since_update"], reverse=True)
-                        save_to_csv(self.config, results)
+                        self.export_service.save_main_results(results)
                     raise
                 if start + self.config.batch_size < len(pending_followings):
                     cooldown = self.config.batch_cooldown + random.uniform(0, 5)
@@ -795,7 +801,7 @@ class BilibiliHiatusAnalyzer:
 
         results.sort(key=lambda item: item["days_since_update"], reverse=True)
         self.display_top_results(results)
-        save_to_csv(self.config, results, merge_existing=partial_run)
+        self.export_service.save_main_results(results, merge_existing=partial_run)
         self.reporter.panel(
             "🗂️ B站主榜输出",
             [
@@ -809,7 +815,7 @@ class BilibiliHiatusAnalyzer:
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
             self.enrich_results_with_profile_and_counts(results, duration_progress, followings)
-            save_to_csv(self.config, results, merge_existing=partial_run)
+            self.export_service.save_main_results(results, merge_existing=partial_run)
             self.reporter.panel(
                 "🔄 B站主榜回填完成",
                 [

@@ -54,8 +54,11 @@ class CreatorProfile:
             group_names=str(data.get("following_group_names") or data.get("group_name_text") or ""),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self, *, include_platform: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_platform:
+            data.pop("platform", None)
+        return data
 
 
 @dataclass(slots=True)
@@ -90,8 +93,11 @@ class VideoEntry:
             url=str(data.get("video_url") or data.get("url") or ""),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self, *, include_platform: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_platform:
+            data.pop("platform", None)
+        return data
 
 
 @dataclass(slots=True)
@@ -129,8 +135,11 @@ class AnalysisResult:
             data_source=str(data.get("data_source") or ""),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self, *, include_platform: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_platform:
+            data.pop("platform", None)
+        return data
 
 
 @dataclass(slots=True)
@@ -144,3 +153,43 @@ class AnalysisSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class VideoDurationSummary:
+    platform: str
+    uploader_id: str
+    uploader_name: str
+    follower_count: int = 0
+    total_videos: int = 0
+    latest_publish_timestamp: int = 0
+    total_duration_seconds: int = 0
+    average_duration_seconds: int = 0
+    average_duration_text: str = "00:00"
+    average_like_count: int = 0
+    average_update_interval_days: Optional[float] = None
+    short_video_count: int = 0
+    short_video_ratio: str = "0.00%"
+    medium_video_count: int = 0
+    medium_video_ratio: str = "0.00%"
+    medium_long_video_count: int = 0
+    medium_long_video_ratio: str = "0.00%"
+    long_video_count: int = 0
+    long_video_ratio: str = "0.00%"
+    total_favorited: Any = ""
+    total_favorited_source: str = ""
+    missing_like_count: int = 0
+    like_data_complete: bool = True
+    summary_scope: str = ""
+
+    def to_dict(self, *, include_empty_platform: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_empty_platform:
+            data.pop("platform", None)
+        if self.total_favorited == "":
+            data.pop("total_favorited", None)
+        if not self.total_favorited_source:
+            data.pop("total_favorited_source", None)
+        if not self.summary_scope:
+            data.pop("summary_scope", None)
+        return data
