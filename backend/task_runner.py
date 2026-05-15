@@ -203,6 +203,8 @@ def _build_runtime_env(request: JobCreateRequest) -> dict[str, str]:
 
 
 def _json_safe(value: Any) -> Any:
+    if hasattr(value, "to_dict"):
+        return _json_safe(value.to_dict())
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, (datetime,)):

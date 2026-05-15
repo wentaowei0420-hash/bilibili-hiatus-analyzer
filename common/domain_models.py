@@ -22,6 +22,7 @@ class CreatorProfile:
     follower_count: int = 0
     published_video_count: int = 0
     total_favorited: int = 0
+    average_like_count: int = 0
     group_ids: str = ""
     group_names: str = ""
 
@@ -50,6 +51,7 @@ class CreatorProfile:
                 or data.get("total_videos")
             ),
             total_favorited=_safe_int(data.get("total_favorited")),
+            average_like_count=_safe_int(data.get("average_like_count")),
             group_ids=str(data.get("following_group_ids") or data.get("group_id_text") or ""),
             group_names=str(data.get("following_group_names") or data.get("group_name_text") or ""),
         )
@@ -108,10 +110,20 @@ class AnalysisResult:
     days_since_update: int
     upload_date: str = ""
     uploader_homepage: str = ""
+    following_group_ids: str = ""
+    following_group_names: str = ""
+    following_remark: str = ""
     follower_count: int = 0
+    total_favorited: Any = ""
     published_video_count: int = 0
     average_like_count: int = 0
     average_update_interval_days: Optional[float] = None
+    latest_video_title: str = ""
+    upload_timestamp: Any = ""
+    activity_timestamp: Any = ""
+    days_since_last_video: Any = ""
+    view_count: Any = 0
+    video_url: str = ""
     data_source: str = ""
 
     @classmethod
@@ -128,10 +140,20 @@ class AnalysisResult:
             days_since_update=_safe_int(data.get("days_since_update")),
             upload_date=str(data.get("upload_date") or data.get("publish_date") or ""),
             uploader_homepage=str(data.get("uploader_homepage") or data.get("homepage") or ""),
+            following_group_ids=str(data.get("following_group_ids") or ""),
+            following_group_names=str(data.get("following_group_names") or ""),
+            following_remark=str(data.get("following_remark") or ""),
             follower_count=_safe_int(data.get("follower_count")),
+            total_favorited=data.get("total_favorited", ""),
             published_video_count=_safe_int(data.get("published_video_count") or data.get("total_videos")),
             average_like_count=_safe_int(data.get("average_like_count")),
             average_update_interval_days=interval_value,
+            latest_video_title=str(data.get("latest_video_title") or ""),
+            upload_timestamp=data.get("upload_timestamp", ""),
+            activity_timestamp=data.get("activity_timestamp", ""),
+            days_since_last_video=data.get("days_since_last_video", data.get("days_since_update", "")),
+            view_count=data.get("view_count", 0),
+            video_url=str(data.get("video_url") or ""),
             data_source=str(data.get("data_source") or ""),
         )
 

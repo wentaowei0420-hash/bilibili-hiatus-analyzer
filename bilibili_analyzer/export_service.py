@@ -13,7 +13,7 @@ class BilibiliExportService:
         self.config = config
 
     def save_main_results(self, results, *, merge_existing: bool = False):
-        return save_to_csv(self.config, results, merge_existing=merge_existing)
+        return save_to_csv(self.config, self._rows(results), merge_existing=merge_existing)
 
     def save_video_duration_outputs(self, all_video_rows, summary_rows):
         save_all_videos_to_csv(self.config, all_video_rows)
@@ -24,3 +24,13 @@ class BilibiliExportService:
             "analysis": self.config.video_duration_analysis_csv,
             "report": self.config.video_duration_report_md,
         }
+
+    @staticmethod
+    def _rows(items):
+        rows = []
+        for item in items or []:
+            if hasattr(item, "to_dict"):
+                rows.append(item.to_dict())
+            elif isinstance(item, dict):
+                rows.append(item)
+        return rows

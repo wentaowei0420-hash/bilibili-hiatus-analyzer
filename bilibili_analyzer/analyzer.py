@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-from common.domain_models import AnalysisResult, VideoDurationSummary
+from common.domain_models import AnalysisResult, CreatorProfile, VideoDurationSummary
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from .console_reporter import RichAnalyzerReporter
@@ -87,13 +87,12 @@ class BilibiliHiatusAnalyzer:
         for mid, result in (precise_progress or {}).items():
             if not isinstance(result, dict):
                 continue
-            key = str(result.get("uploader_id") or mid or "").strip()
+            profile = CreatorProfile.from_mapping(result, platform="bilibili")
+            key = str(profile.uploader_id or mid or "").strip()
             if not key:
                 continue
-            item = metric_index.setdefault(key, {})
-            item["follower_count"] = max(self._safe_int(item.get("follower_count"), 0), self._safe_int(result.get("follower_count"), 0))
-            item["published_video_count"] = max(self._safe_int(item.get("published_video_count"), 0), self._safe_int(result.get("published_video_count"), 0))
-            item["average_like_count"] = max(self._safe_int(item.get("average_like_count"), 0), self._safe_int(result.get("average_like_count"), 0))
+            existing = metric_index.get(key)
+            metric_index[key] = self._merge_creator_metrics(existing, profile)
 
         duration_progress = self.cache_repository.load_duration_progress()
         for mid, entry in (duration_progress or {}).items():
@@ -101,76 +100,86 @@ class BilibiliHiatusAnalyzer:
                 continue
             following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
             summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
-            key = str((following or {}).get("mid") or summary.get("uploader_id") or mid or "").strip()
+            profile = CreatorProfile.from_mapping(
+                {
+                    **summary,
+                    **following,
+                    "uploader_id": (following or {}).get("mid") or summary.get("uploader_id") or mid,
+                    "uploader_name": (following or {}).get("uname") or summary.get("uploader_name") or "",
+                    "published_video_count": summary.get("total_videos") or summary.get("published_video_count"),
+                },
+                platform="bilibili",
+            )
+            profile.average_like_count = self._safe_int(summary.get("average_like_count"), 0)
+            key = str(profile.uploader_id or mid or "").strip()
             if not key:
                 continue
-            item = metric_index.setdefault(key, {})
-            item["follower_count"] = max(
-                self._safe_int(item.get("follower_count"), 0),
-                self._safe_int((following or {}).get("follower_count") or summary.get("follower_count"), 0),
-            )
-            item["published_video_count"] = max(
-                self._safe_int(item.get("published_video_count"), 0),
-                self._safe_int(summary.get("total_videos") or summary.get("published_video_count"), 0),
-            )
-            item["average_like_count"] = max(
-                self._safe_int(item.get("average_like_count"), 0),
-                self._safe_int(summary.get("average_like_count"), 0),
-            )
+            existing = metric_index.get(key)
+            metric_index[key] = self._merge_creator_metrics(existing, profile)
 
         return metric_index
 
+    @staticmethod
+    def _merge_creator_metrics(existing, incoming):
+        if existing is None:
+            return incoming
+        existing.follower_count = max(existing.follower_count, incoming.follower_count)
+        existing.published_video_count = max(
+            existing.published_video_count,
+            incoming.published_video_count,
+        )
+        existing.average_like_count = max(
+            getattr(existing, "average_like_count", 0),
+            getattr(incoming, "average_like_count", 0),
+        )
+        return existing
+
     def _resolve_following_sort_value(self, following, field, metric_index):
-        following = following if isinstance(following, dict) else {}
-        mid = str(following.get("mid") or "").strip()
-        cached = metric_index.get(mid, {}) if mid else {}
+        profile = CreatorProfile.from_mapping(following if isinstance(following, dict) else {}, platform="bilibili")
+        mid = str(profile.uploader_id or "").strip()
+        cached = metric_index.get(mid) if mid else None
         if field == "published_video_count":
-            return self._safe_int(cached.get("published_video_count"), 0)
+            return cached.published_video_count if cached else 0
         if field == "average_like_count":
-            return self._safe_int(cached.get("average_like_count"), 0)
-        return self._safe_int(following.get("follower_count") or cached.get("follower_count"), 0)
+            return getattr(cached, "average_like_count", 0) if cached else 0
+        return profile.follower_count or (cached.follower_count if cached else 0)
 
     def sort_followings_by_follower_count(self, followings):
         field, descending, _label = self.get_following_fetch_order()
         metric_index = self._build_following_metric_index()
 
         def sort_key(following):
-            following = following if isinstance(following, dict) else {}
+            profile = CreatorProfile.from_mapping(following if isinstance(following, dict) else {}, platform="bilibili")
             value = self._resolve_following_sort_value(following, field, metric_index)
-            name = str(following.get("uname") or "")
-            mid = str(following.get("mid") or "")
             primary = -value if descending else value
-            return (primary, name, mid)
+            return (primary, profile.uploader_name, profile.uploader_id)
 
         return sorted(followings or [], key=sort_key)
 
     def build_result_item(self, video_info):
         days_since = calculate_days_since(video_info["upload_timestamp"])
-        result = AnalysisResult(
+        return AnalysisResult(
             platform="bilibili",
             uploader_id=str(video_info["uploader_id"]),
             uploader_name=str(video_info["uploader_name"]),
             uploader_homepage=build_homepage_url(video_info["uploader_id"]),
             days_since_update=days_since,
             upload_date=timestamp_to_date(video_info["upload_timestamp"]),
-            data_source="video_api",
-        ).to_dict()
-        result.update({
-            "following_group_ids": "",
-            "following_group_names": "",
-            "latest_video_title": video_info["video_title"],
-            "upload_timestamp": normalize_timestamp(video_info["upload_timestamp"]),
-            "days_since_last_video": days_since,
-            "view_count": video_info["view_count"],
-            "video_url": video_info.get("video_url")
+            following_group_ids="",
+            following_group_names="",
+            latest_video_title=video_info["video_title"],
+            upload_timestamp=normalize_timestamp(video_info["upload_timestamp"]),
+            days_since_last_video=days_since,
+            view_count=video_info["view_count"],
+            video_url=video_info.get("video_url")
             or f"https://www.bilibili.com/video/{video_info['bvid']}",
-        })
-        return result
+            data_source="video_api",
+        )
 
     def build_following_result_item(self, following):
         activity_timestamp = following.get("mtime") or 0
         days_since = calculate_days_since(activity_timestamp)
-        result = AnalysisResult(
+        return AnalysisResult(
             platform="bilibili",
             uploader_id=str(following.get("mid") or ""),
             uploader_name=str(following.get("uname", "未知UP主")),
@@ -178,21 +187,18 @@ class BilibiliHiatusAnalyzer:
             follower_count=self._safe_int(following.get("follower_count"), 0),
             upload_date=timestamp_to_date(activity_timestamp),
             days_since_update=days_since,
+            following_group_ids=following.get("group_id_text", ""),
+            following_group_names=following.get("group_name_text", DEFAULT_GROUP_NAME),
+            latest_video_title="未抓取视频详情（回退模式，基于关注列表活跃时间）",
+            activity_timestamp=normalize_timestamp(activity_timestamp),
+            days_since_last_video=days_since,
+            view_count=0,
+            video_url="",
             data_source="followings_mtime",
-        ).to_dict()
-        result.update({
-            "following_group_ids": following.get("group_id_text", ""),
-            "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
-            "latest_video_title": "未抓取视频详情（回退模式，基于关注列表活跃时间）",
-            "activity_timestamp": normalize_timestamp(activity_timestamp),
-            "days_since_last_video": days_since,
-            "view_count": 0,
-            "video_url": "",
-        })
-        return result
+        )
 
     def build_no_video_result_item(self, following):
-        result = AnalysisResult(
+        return AnalysisResult(
             platform="bilibili",
             uploader_id=str(following.get("mid") or ""),
             uploader_name=str(following.get("uname", "未知UP主")),
@@ -200,17 +206,14 @@ class BilibiliHiatusAnalyzer:
             follower_count=self._safe_int(following.get("follower_count"), 0),
             upload_date=UNKNOWN_DATE,
             days_since_update=0,
+            following_group_ids=following.get("group_id_text", ""),
+            following_group_names=following.get("group_name_text", DEFAULT_GROUP_NAME),
+            latest_video_title="暂无公开视频",
+            days_since_last_video=0,
+            view_count=0,
+            video_url="",
             data_source="no_video",
-        ).to_dict()
-        result.update({
-            "following_group_ids": following.get("group_id_text", ""),
-            "following_group_names": following.get("group_name_text", DEFAULT_GROUP_NAME),
-            "latest_video_title": "暂无公开视频",
-            "days_since_last_video": 0,
-            "view_count": 0,
-            "video_url": "",
-        })
-        return result
+        )
 
     def build_video_duration_summary(self, following, videos):
         total_videos = len(videos)
@@ -365,21 +368,23 @@ class BilibiliHiatusAnalyzer:
         progress = duration_progress or {}
         following_map = {str(following.get("mid")): following for following in (followings or [])}
 
-        for result in results:
-            uploader_id = result.get("uploader_id")
-            result["uploader_homepage"] = build_homepage_url(uploader_id)
+        enriched = []
+        for item in results:
+            result = item if isinstance(item, AnalysisResult) else AnalysisResult.from_mapping(item, platform="bilibili")
+            uploader_id = result.uploader_id
+            result.uploader_homepage = build_homepage_url(uploader_id)
 
             following = following_map.get(str(uploader_id), {})
             if following:
-                result["following_group_ids"] = following.get("group_id_text", "0")
-                result["following_group_names"] = following.get("group_name_text", DEFAULT_GROUP_NAME)
-                result["follower_count"] = following.get(
-                    "follower_count", result.get("follower_count", 0)
+                result.following_group_ids = following.get("group_id_text", "0")
+                result.following_group_names = following.get("group_name_text", DEFAULT_GROUP_NAME)
+                result.follower_count = self._safe_int(
+                    following.get("follower_count", result.follower_count),
+                    result.follower_count,
                 )
             else:
-                result["following_group_ids"] = result.get("following_group_ids") or "0"
-                result["following_group_names"] = result.get("following_group_names") or DEFAULT_GROUP_NAME
-                result.setdefault("follower_count", 0)
+                result.following_group_ids = result.following_group_ids or "0"
+                result.following_group_names = result.following_group_names or DEFAULT_GROUP_NAME
 
             entry = progress.get(str(uploader_id), {})
             summary = self.populate_duration_summary_defaults(
@@ -387,37 +392,37 @@ class BilibiliHiatusAnalyzer:
                 entry.get("videos", []),
             )
             if summary:
-                result["published_video_count"] = summary.get(
-                    "total_videos", result.get("published_video_count", 0)
+                result.published_video_count = self._safe_int(
+                    summary.get("total_videos", result.published_video_count),
+                    result.published_video_count,
                 )
-                result["average_like_count"] = summary.get(
-                    "average_like_count", result.get("average_like_count", 0)
+                result.average_like_count = self._safe_int(
+                    summary.get("average_like_count", result.average_like_count),
+                    result.average_like_count,
                 )
-                result["average_update_interval_days"] = summary.get(
+                result.average_update_interval_days = summary.get(
                     "average_update_interval_days",
-                    result.get("average_update_interval_days"),
+                    result.average_update_interval_days,
                 )
-            else:
-                result.setdefault("published_video_count", 0)
-                result.setdefault("average_like_count", 0)
-                result.setdefault("average_update_interval_days", None)
+            enriched.append(result)
 
-        return results
+        return enriched
 
     def save_precise_result(self, mid, result_item, results_by_mid, cached_video_results):
-        result_item["cached_at"] = int(time.time())
+        cache_row = result_item.to_dict() if hasattr(result_item, "to_dict") else dict(result_item)
+        cache_row["cached_at"] = int(time.time())
         mid_str = str(mid)
         results_by_mid[mid_str] = result_item
-        cached_video_results[mid_str] = result_item
+        cached_video_results[mid_str] = cache_row
         self.cache_repository.save_precise_results(cached_video_results)
 
     def handle_precise_video_result(self, following, video_info, results_by_mid, cached_video_results):
         mid = following.get("mid")
         if video_info:
             result_item = self.build_result_item(video_info)
-            result_item["following_group_ids"] = following.get("group_id_text", "")
-            result_item["following_group_names"] = following.get("group_name_text", DEFAULT_GROUP_NAME)
-            result_item["follower_count"] = following.get("follower_count", 0)
+            result_item.following_group_ids = following.get("group_id_text", "")
+            result_item.following_group_names = following.get("group_name_text", DEFAULT_GROUP_NAME)
+            result_item.follower_count = self._safe_int(following.get("follower_count"), 0)
             self.save_precise_result(mid, result_item, results_by_mid, cached_video_results)
             return True
 
@@ -639,7 +644,7 @@ class BilibiliHiatusAnalyzer:
         )
 
         for index, result in enumerate(results[:10], 1):
-            result_model = AnalysisResult.from_mapping(result, platform="bilibili")
+            result_model = result if isinstance(result, AnalysisResult) else AnalysisResult.from_mapping(result, platform="bilibili")
             average_update_interval_days = result_model.average_update_interval_days
             average_update_text = (
                 f"{average_update_interval_days:.2f}"
@@ -661,18 +666,17 @@ class BilibiliHiatusAnalyzer:
         self.reporter.render(table)
         self.reporter.render()
 
-    def analyze_hiatus(self):
-        self.api.check_cookie()
-
+    def _announce_analysis_start(self):
         self.reporter.message("=" * 60)
         self.reporter.message("🎯 B站催更分析器 - 寻找你关注的UP主中的「鸽王」")
         self.reporter.message("=" * 60)
         self.reporter.message()
 
+    def _fetch_and_prepare_followings(self):
         followings = self.api.get_followings_list()
         if not followings:
             self.reporter.message("❌ 无法获取关注列表，程序退出")
-            return None
+            return [], False
 
         for following in followings:
             check_stop()
@@ -681,6 +685,7 @@ class BilibiliHiatusAnalyzer:
                 following.get("uname", "UP主"),
             )
             following["follower_count"] = relation_stat.get("follower_count", 0)
+
         order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)
         total_followings = len(followings)
@@ -688,13 +693,14 @@ class BilibiliHiatusAnalyzer:
         if partial_run:
             followings = followings[: self.max_followings]
             self.reporter.message(
-                f"?? ????????? | ????={total_followings} ? | "
-                f"?????????? {len(followings)} ?"
+                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                f"本轮仅处理排序靠前的 {len(followings)} 位"
             )
-        self.reporter.message(
-            f"?? ??{order_label}{'????' if order_desc else '????'}????????"
-        )
+        direction_label = "从高到低" if order_desc else "从低到高"
+        self.reporter.message(f"📊 已按{order_label}{direction_label}排序后开始抓取。")
+        return followings, partial_run
 
+    def _split_cached_and_pending(self, followings):
         cached_video_results = self.cache_repository.load_precise_results()
         if cached_video_results:
             self.reporter.message(f"♻️  已加载 {len(cached_video_results)} 条历史抓取缓存。")
@@ -707,10 +713,18 @@ class BilibiliHiatusAnalyzer:
             if cached_result and not self.cache_repository.should_refresh_precise_result(following, cached_result):
                 refreshed_result = dict(cached_result)
                 self.cache_repository.refresh_result_runtime_fields(refreshed_result)
-                results_by_mid[mid] = refreshed_result
+                results_by_mid[mid] = AnalysisResult.from_mapping(refreshed_result, platform="bilibili")
             else:
                 pending_followings.append(following)
+        return results_by_mid, pending_followings, cached_video_results
 
+    def _execute_precise_fetch_with_retry(
+        self,
+        pending_followings,
+        results_by_mid,
+        cached_video_results,
+        followings,
+    ):
         self.reporter.message("🔍 正在精确抓取每位UP主最后一个视频时间...")
         if self.config.analysis_mode == "fallback":
             self.reporter.message("   如遇到无法补抓的UP主，将回退到关注列表活跃时间。")
@@ -744,15 +758,7 @@ class BilibiliHiatusAnalyzer:
                 try:
                     check_stop()
                 except OperationCancelled:
-                    duration_progress = self.cache_repository.load_duration_progress()
-                    results = self.enrich_results_with_profile_and_counts(
-                        list(results_by_mid.values()),
-                        duration_progress,
-                        followings,
-                    )
-                    if results:
-                        results.sort(key=lambda item: item["days_since_update"], reverse=True)
-                        self.export_service.save_main_results(results)
+                    self._save_partial_results(results_by_mid, followings)
                     raise
                 if start + self.config.batch_size < len(pending_followings):
                     cooldown = self.config.batch_cooldown + random.uniform(0, 5)
@@ -762,6 +768,13 @@ class BilibiliHiatusAnalyzer:
                     )
                     self.reporter.wait(cooldown, "B站精确抓取批次冷却中")
 
+        return self._retry_failed_precise_fetches(
+            failed_followings,
+            results_by_mid,
+            cached_video_results,
+        )
+
+    def _retry_failed_precise_fetches(self, failed_followings, results_by_mid, cached_video_results):
         for retry_round in range(1, self.config.max_failed_retry_rounds + 1):
             if not failed_followings:
                 break
@@ -776,20 +789,31 @@ class BilibiliHiatusAnalyzer:
                 results_by_mid,
                 cached_video_results,
             )
+        return failed_followings
 
-        if self.config.analysis_mode == "fallback" and failed_followings:
-            self.reporter.message(f"\n↩️  仍有 {len(failed_followings)} 位UP主未完成精确抓取，回退到关注列表活跃时间。")
-            for following in failed_followings:
-                mid = str(following.get("mid"))
-                if mid not in results_by_mid:
-                    results_by_mid[mid] = self.build_following_result_item(following)
+    def _apply_fallback_results(self, failed_followings, results_by_mid):
+        if self.config.analysis_mode != "fallback" or not failed_followings:
+            return
+        self.reporter.message(f"\n↩️  仍有 {len(failed_followings)} 位UP主未完成精确抓取，回退到关注列表活跃时间。")
+        for following in failed_followings:
+            mid = str(following.get("mid"))
+            if mid not in results_by_mid:
+                results_by_mid[mid] = self.build_following_result_item(following)
 
+    def _save_partial_results(self, results_by_mid, followings):
         duration_progress = self.cache_repository.load_duration_progress()
         results = self.enrich_results_with_profile_and_counts(
             list(results_by_mid.values()),
             duration_progress,
             followings,
         )
+        if results:
+            results.sort(key=lambda item: item.days_since_update, reverse=True)
+            self.export_service.save_main_results(results)
+
+    def _enrich_sort_and_export_results(self, raw_results, followings, failed_followings, partial_run):
+        duration_progress = self.cache_repository.load_duration_progress()
+        results = self.enrich_results_with_profile_and_counts(raw_results, duration_progress, followings)
         if not results:
             self.reporter.message("\n❌ 未能获取到任何视频数据")
             return None
@@ -798,7 +822,7 @@ class BilibiliHiatusAnalyzer:
             self.reporter.message(f"\n⚠️  仍有 {len(failed_followings)} 位UP主因频率限制未获取成功。")
             self.reporter.message("   下次运行会自动复用已保存进度，继续补抓剩余UP主。")
 
-        results.sort(key=lambda item: item["days_since_update"], reverse=True)
+        results.sort(key=lambda item: item.days_since_update, reverse=True)
         self.display_top_results(results)
         self.export_service.save_main_results(results, merge_existing=partial_run)
         self.reporter.panel(
@@ -810,6 +834,33 @@ class BilibiliHiatusAnalyzer:
             ],
             border_style="green",
         )
+        return results
+
+    def analyze_hiatus(self):
+        self.api.check_cookie()
+        self._announce_analysis_start()
+
+        followings, partial_run = self._fetch_and_prepare_followings()
+        if not followings:
+            return None
+
+        results_by_mid, pending_followings, cached_video_results = self._split_cached_and_pending(followings)
+        failed_followings = self._execute_precise_fetch_with_retry(
+            pending_followings,
+            results_by_mid,
+            cached_video_results,
+            followings,
+        )
+        self._apply_fallback_results(failed_followings, results_by_mid)
+
+        results = self._enrich_sort_and_export_results(
+            list(results_by_mid.values()),
+            followings,
+            failed_followings,
+            partial_run,
+        )
+        if not results:
+            return None
 
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
