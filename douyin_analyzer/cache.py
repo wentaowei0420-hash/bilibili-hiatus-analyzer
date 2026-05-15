@@ -1,7 +1,6 @@
 import hashlib
 import csv
 import json
-import sqlite3
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -9,7 +8,12 @@ from urllib.parse import urlparse
 from bilibili_analyzer.logging_utils import smart_print as print
 from common.export_store import delete_rows_by_values
 from common.file_io import atomic_write_json
-from common.platform_store import delete_uploader_rows, upsert_cache_entries, upsert_video_state_rows
+from common.platform_store import (
+    delete_uploader_rows,
+    load_uploader_ids_from_tables,
+    upsert_cache_entries,
+    upsert_video_state_rows,
+)
 
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date
 
@@ -600,11 +604,6 @@ class CacheStore:
             )
 
     def _load_cached_uploader_ids_from_store(self):
-        db_path = self.config.export_store_db
-        if not db_path.exists():
-            return set()
-
-        uploader_ids = set()
         table_targets = [
             ("douyin_creator_raw", "uploader_id"),
             ("douyin_video_raw", "uploader_id"),
@@ -614,40 +613,4 @@ class CacheStore:
             (self.config.export_analysis_table, None),
             (self.config.export_uid_analysis_table, None),
         ]
-        candidate_columns = ["UP主UID", "UP涓籙ID", "uploader_id", "target_uid"]
-
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            for table_name, preferred_column in table_targets:
-                cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                    (table_name,),
-                )
-                if cursor.fetchone() is None:
-                    continue
-
-                target_column = preferred_column
-                if not target_column:
-                    table_info = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
-                    columns = {str(row[1]) for row in table_info}
-                    target_column = next(
-                        (column for column in candidate_columns if column in columns),
-                        None,
-                    )
-                if not target_column:
-                    continue
-
-                try:
-                    rows = cursor.execute(
-                        f'SELECT DISTINCT "{target_column}" FROM "{table_name}" '
-                        f'WHERE "{target_column}" IS NOT NULL AND TRIM("{target_column}") <> \'\''
-                    ).fetchall()
-                except sqlite3.Error:
-                    continue
-
-                for (value,) in rows:
-                    normalized = str(value or "").strip()
-                    if normalized:
-                        uploader_ids.add(normalized)
-
-        return uploader_ids
+        return load_uploader_ids_from_tables(self.config.export_store_db, table_targets)

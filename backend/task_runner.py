@@ -336,6 +336,7 @@ def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:
             trigger_upload=False,
             max_followings=request.uid_limit,
             reporter=reporter,
+            export_outputs=request.persist_outputs,
         )
         if result is None:
             raise RuntimeError("Bilibili analysis did not complete successfully.")
@@ -345,6 +346,7 @@ def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:
             trigger_upload=True,
             max_followings=request.uid_limit,
             reporter=reporter,
+            export_outputs=True,
         )
         if result is None:
             raise RuntimeError("Bilibili analysis did not complete successfully.")
@@ -364,6 +366,7 @@ def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
             max_followings=request.uid_limit,
             recent_video_limit_override=request.monitor_video_limit,
             reporter=reporter,
+            export_outputs=request.persist_outputs,
         )
         if result is None:
             raise RuntimeError("Douyin analysis did not complete successfully.")
@@ -375,6 +378,7 @@ def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
             max_followings=request.uid_limit,
             recent_video_limit_override=request.monitor_video_limit,
             reporter=reporter,
+            export_outputs=True,
         )
         if result is None:
             raise RuntimeError("Douyin analysis did not complete successfully.")

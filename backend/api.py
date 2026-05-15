@@ -42,6 +42,9 @@ def capabilities() -> dict[str, object]:
     return {
         "platforms": ["bilibili", "douyin"],
         "queue": {"max_workers": 1},
+        "analysis_options": {
+            "persist_outputs": "Set false on fetch jobs to return results without writing analyzer export files.",
+        },
         "job_kinds": [
             "bilibili_analysis",
             "douyin_analysis",
@@ -98,4 +101,3 @@ def cancel_job(job_id: str) -> JobSummary:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
-

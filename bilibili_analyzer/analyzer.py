@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from common.domain_models import AnalysisResult, CreatorProfile, DataSource, VideoDurationSummary
+from common.output_ports import NoopExportService
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from .console_reporter import RichAnalyzerReporter
@@ -37,12 +38,15 @@ class BilibiliHiatusAnalyzer:
         max_followings=None,
         reporter=None,
         export_service=None,
+        export_outputs=True,
     ):
         self.config = config
         self.api = api
         self.cache_repository = AnalyzerCacheRepository(cache_store, platform="bilibili")
         self.reporter = reporter or RichAnalyzerReporter()
-        self.export_service = export_service or BilibiliExportService(config)
+        self.export_service = export_service or (
+            BilibiliExportService(config) if export_outputs else NoopExportService()
+        )
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):

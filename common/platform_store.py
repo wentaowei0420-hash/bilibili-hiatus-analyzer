@@ -416,6 +416,59 @@ def read_summary_rows(db_path, platform, summary_type):
     return [json.loads(item) for item in df["payload_json"].tolist()]
 
 
+def load_uploader_ids_from_tables(
+    db_path,
+    table_targets,
+    *,
+    candidate_columns=None,
+):
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return set()
+
+    candidate_columns = list(
+        candidate_columns
+        or ["UP主UID", "UP涓籙ID", "UP娑撶睓ID", "uploader_id", "target_uid"]
+    )
+    uploader_ids = set()
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        for table_name, preferred_column in table_targets or []:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            )
+            if cursor.fetchone() is None:
+                continue
+
+            target_column = preferred_column
+            if not target_column:
+                table_info = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                columns = {str(row[1]) for row in table_info}
+                target_column = next(
+                    (column for column in candidate_columns if column in columns),
+                    None,
+                )
+            if not target_column:
+                continue
+
+            try:
+                rows = cursor.execute(
+                    f'SELECT DISTINCT "{target_column}" FROM "{table_name}" '
+                    f'WHERE "{target_column}" IS NOT NULL AND TRIM("{target_column}") <> \'\''
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+
+            for (value,) in rows:
+                normalized = str(value or "").strip()
+                if normalized:
+                    uploader_ids.add(normalized)
+
+    return uploader_ids
+
+
 def delete_uploader_rows(db_path, platform, uploader_ids):
     db_path = Path(db_path)
     uploader_ids = sorted({str(item).strip() for item in (uploader_ids or []) if str(item).strip()})

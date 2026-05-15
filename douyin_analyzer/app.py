@@ -397,15 +397,17 @@ def run_analysis(
     max_followings=None,
     recent_video_limit_override=None,
     reporter=None,
+    export_outputs=True,
 ):
     config = load_analyzer_config(
         fetch_mode_override=fetch_mode_override,
         recent_video_limit_override=recent_video_limit_override,
     )
     setup_logging(config.log_dir, "douyin_app")
+    export_outputs = bool(export_outputs or trigger_upload)
 
     fetch_mode = (config.fetch_mode or "monitor").strip().lower()
-    enable_partial_upload = trigger_upload and fetch_mode != "counts"
+    enable_partial_upload = trigger_upload and export_outputs and fetch_mode != "counts"
 
     browser_client = create_douyin_browser_client(config)
     cache_store = CacheStore(config)
@@ -416,6 +418,7 @@ def run_analysis(
         upload_callback=run_partial_feishu_upload if enable_partial_upload else None,
         max_followings=max_followings,
         reporter=reporter,
+        export_outputs=export_outputs,
     )
 
     if enable_partial_upload:

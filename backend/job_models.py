@@ -59,6 +59,7 @@ class JobCreateRequest(BaseModel):
     douyin_backend: str = "drission"
     monitor_video_limit: int = Field(default=10, ge=1)
     uid_limit: Optional[int] = Field(default=None, ge=1)
+    persist_outputs: bool = True
     high_like_threshold: int = Field(default=10000, ge=0)
     unfollow_list_path: Optional[str] = None
     bilibili_uid_list_path: Optional[str] = None
@@ -88,4 +89,3 @@ class JobEventResponse(BaseModel):
     job_id: str
     next_offset: int
     lines: list[str]
-

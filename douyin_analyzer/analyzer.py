@@ -5,6 +5,7 @@ from loguru import logger
 
 from common.platform_store import read_video_rows_for_uploader
 from common.domain_models import AnalysisResult, CreatorSummary, VideoDurationSummary
+from common.output_ports import NoopExportService
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.console_reporter import RichAnalyzerReporter
@@ -43,13 +44,16 @@ class DouyinHiatusAnalyzer:
         max_followings=None,
         reporter=None,
         export_service=None,
+        export_outputs=True,
     ):
         self.config = config
         self.browser_client = browser_client
         self.cache_repository = AnalyzerCacheRepository(cache_store, platform="douyin")
         self.upload_callback = upload_callback
         self.reporter = reporter or RichAnalyzerReporter()
-        self.export_service = export_service or DouyinExportService(config)
+        self.export_service = export_service or (
+            DouyinExportService(config) if export_outputs else NoopExportService()
+        )
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):
