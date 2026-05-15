@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hiatus Analyzer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #20242a;
+      --muted: #667085;
+      --line: #d9dee7;
+      --primary: #1463ff;
+      --danger: #c0272d;
+      --ok: #157347;
+      --warn: #985f0d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    h1 {
+      font-size: 20px;
+      line-height: 1.2;
+      margin: 0;
+      letter-spacing: 0;
+    }
+    main {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 16px;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 12px 0 6px;
+    }
+    select,
+    input {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    button {
+      min-height: 36px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 14px;
+      cursor: pointer;
+      background: var(--primary);
+      color: #fff;
+    }
+    button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+    button.danger {
+      background: var(--danger);
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .status {
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      background: #eef2f7;
+    }
+    .status.succeeded { color: var(--ok); background: #e9f6ef; }
+    .status.failed,
+    .status.cancelled { color: var(--danger); background: #fbeaea; }
+    .status.running { color: var(--primary); background: #edf3ff; }
+    .status.queued { color: var(--warn); background: #fff4df; }
+    pre {
+      margin: 12px 0 0;
+      min-height: 360px;
+      max-height: 560px;
+      overflow: auto;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 10px;
+    }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; padding: 12px; }
+      header { padding: 14px 16px; align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bilibili / Douyin Hiatus Analyzer</h1>
+    <div id="health" class="hint">API checking...</div>
+  </header>
+  <main>
+    <section>
+      <h2>新建任务</h2>
+      <label for="kind">任务类型</label>
+      <select id="kind">
+        <option value="douyin_analysis">抖音分析</option>
+        <option value="bilibili_analysis">B站分析</option>
+        <option value="both_analysis">B站 + 抖音分析</option>
+        <option value="douyin_high_like_export">导出抖音高赞视频</option>
+        <option value="douyin_video_score">抖音视频评分</option>
+        <option value="douyin_creator_score">抖音UP主评分</option>
+        <option value="douyin_compact_export">导出抖音精简表</option>
+        <option value="bilibili_uid_fetch">B站 UID 全量抓取</option>
+        <option value="douyin_uid_fetch">抖音 UID 全量抓取</option>
+        <option value="douyin_unfollow">抖音取消关注</option>
+        <option value="douyin_prune_non_followed_cache">清理非当前关注缓存</option>
+        <option value="douyin_data_sync">抖音缓存同步</option>
+      </select>
+
+      <label for="action">分析动作</label>
+      <select id="action">
+        <option value="fetch">仅抓取</option>
+        <option value="fetch_upload">抓取并上传</option>
+        <option value="upload">仅上传</option>
+      </select>
+
+      <div class="row">
+        <div>
+          <label for="douyinMode">抖音模式</label>
+          <select id="douyinMode">
+            <option value="monitor">monitor</option>
+            <option value="counts">counts</option>
+            <option value="verify">verify</option>
+            <option value="delta">delta</option>
+            <option value="full">full</option>
+          </select>
+        </div>
+        <div>
+          <label for="douyinBackend">抖音后端</label>
+          <select id="douyinBackend">
+            <option value="drission">DrissionPage</option>
+            <option value="playwright">Playwright</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="limit">UID/关注数量上限</label>
+          <input id="limit" type="number" min="1" placeholder="空表示不限" />
+        </div>
+        <div>
+          <label for="videoLimit">监控视频数</label>
+          <input id="videoLimit" type="number" min="1" value="10" />
+        </div>
+      </div>
+
+      <label for="threshold">高赞阈值</label>
+      <input id="threshold" type="number" min="0" value="10000" />
+
+      <div class="actions">
+        <button id="start">启动任务</button>
+        <button id="refresh" class="secondary">刷新列表</button>
+        <button id="cancel" class="danger" disabled>取消当前</button>
+      </div>
+      <div class="hint">下载器目录 douyin-downloader-main 未接入本次 API 重构，保持隔离。</div>
+    </section>
+
+    <section>
+      <h2>任务队列</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>状态</th>
+            <th>类型</th>
+            <th>创建时间</th>
+            <th>消息</th>
+          </tr>
+        </thead>
+        <tbody id="jobs"></tbody>
+      </table>
+      <pre id="logs">选择或启动一个任务后，这里会显示后端日志。</pre>
+    </section>
+  </main>
+
+  <script>
+    let selectedJobId = null;
+    let logOffset = 0;
+    let timer = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || response.statusText);
+      }
+      return response.json();
+    }
+
+    function payloadFromForm() {
+      const uidLimit = $("limit").value ? Number($("limit").value) : null;
+      return {
+        kind: $("kind").value,
+        action: $("action").value,
+        douyin_fetch_mode: $("douyinMode").value,
+        douyin_backend: $("douyinBackend").value,
+        monitor_video_limit: Number($("videoLimit").value || 10),
+        uid_limit: uidLimit,
+        high_like_threshold: Number($("threshold").value || 10000)
+      };
+    }
+
+    function renderJobs(jobs) {
+      const rows = jobs.map((job) => {
+        const active = job.id === selectedJobId ? " style=\"background:#f6f9ff\"" : "";
+        return `<tr data-id="${job.id}"${active}>
+          <td><span class="status ${job.status}">${job.status}</span></td>
+          <td>${job.kind}</td>
+          <td>${new Date(job.created_at).toLocaleString()}</td>
+          <td>${job.message || ""}${job.error ? " | " + job.error : ""}</td>
+        </tr>`;
+      }).join("");
+      $("jobs").innerHTML = rows || "<tr><td colspan=\"4\">暂无任务</td></tr>";
+      [...$("jobs").querySelectorAll("tr[data-id]")].forEach((row) => {
+        row.addEventListener("click", () => selectJob(row.dataset.id));
+      });
+    }
+
+    async function refreshJobs() {
+      const jobs = await api("/api/jobs");
+      renderJobs(jobs);
+      const selected = jobs.find((job) => job.id === selectedJobId);
+      $("cancel").disabled = !selected || !["queued", "running"].includes(selected.status);
+      return jobs;
+    }
+
+    function selectJob(jobId) {
+      selectedJobId = jobId;
+      logOffset = 0;
+      $("logs").textContent = "";
+      refreshJobs();
+      pollLogs();
+    }
+
+    async function pollLogs() {
+      if (!selectedJobId) return;
+      const data = await api(`/api/jobs/${selectedJobId}/events?offset=${logOffset}`);
+      logOffset = data.next_offset;
+      if (data.lines.length) {
+        $("logs").textContent += data.lines.join("\n") + "\n";
+        $("logs").scrollTop = $("logs").scrollHeight;
+      }
+    }
+
+    async function startJob() {
+      const job = await api("/api/jobs", {
+        method: "POST",
+        body: JSON.stringify(payloadFromForm())
+      });
+      selectJob(job.id);
+    }
+
+    async function cancelSelected() {
+      if (!selectedJobId) return;
+      await api(`/api/jobs/${selectedJobId}/cancel`, { method: "POST" });
+      await refreshJobs();
+    }
+
+    async function checkHealth() {
+      try {
+        const data = await api("/api/health");
+        $("health").textContent = `API ${data.status}`;
+      } catch (error) {
+        $("health").textContent = `API unavailable: ${error.message}`;
+      }
+    }
+
+    $("start").addEventListener("click", () => startJob().catch((error) => alert(error.message)));
+    $("refresh").addEventListener("click", () => refreshJobs().catch((error) => alert(error.message)));
+    $("cancel").addEventListener("click", () => cancelSelected().catch((error) => alert(error.message)));
+
+    checkHealth();
+    refreshJobs();
+    timer = setInterval(() => {
+      refreshJobs().catch(() => {});
+      pollLogs().catch(() => {});
+    }, 1500);
+  </script>
+</body>
+</html>
