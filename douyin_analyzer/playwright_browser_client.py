@@ -1,4 +1,5 @@
 import random
+import re
 import time
 from pathlib import Path
 
@@ -106,9 +107,23 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
         self.context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        self._install_run_js_adapter(self.page)
         self._install_automation_stealth_hooks()
         self._prepare_window_after_launch()
         return self.page
+
+    @staticmethod
+    def _install_run_js_adapter(page):
+        if page is None or hasattr(page, "run_js"):
+            return
+
+        def run_js(script):
+            return page.evaluate(f"() => {{\n{script}\n}}")
+
+        try:
+            setattr(page, "run_js", run_js)
+        except Exception:
+            pass
 
     def _install_automation_stealth_hooks(self):
         script = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -762,8 +777,112 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
             self._remove_response_collector(handler)
         return None
 
+    def _profile_video_count_from_dom(self):
+        script = r"""
+        const worksText = '\u4f5c\u54c1';
+        const parseCount = (raw) => {
+          const text = String(raw || '').trim().toLowerCase();
+          const match = text.match(/([\d.]+)\s*(\u4ebf|\u4e07|\u5343|w)?/i);
+          if (!match) return 0;
+          let value = Number(match[1]);
+          if (!Number.isFinite(value)) return 0;
+          const unit = match[2] || '';
+          if (unit === '\u4ebf') value *= 100000000;
+          if (unit === '\u4e07' || unit === 'w') value *= 10000;
+          if (unit === '\u5343') value *= 1000;
+          return Math.round(value);
+        };
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            const count = parseCount(text);
+            return {rect, text, count};
+          })
+          .filter(item =>
+            item.count > 0 &&
+            item.text.includes(worksText) &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.left >= 0 &&
+            item.rect.left < window.innerWidth * 0.6 &&
+            item.rect.top >= 80 &&
+            item.rect.top <= 420
+          )
+          .map(item => {
+            let score = 0;
+            if (item.text.includes(worksText)) score += 30;
+            if (item.rect.top >= 120 && item.rect.top <= 260) score += 12;
+            if (item.rect.left <= 420) score += 10;
+            if (item.text.length <= 80) score += 8;
+            if (item.text.includes('\u63a8\u8350')) score += 6;
+            if (item.text.includes('\u559c\u6b22')) score += 6;
+            return {...item, score};
+          })
+          .sort((a, b) => b.score - a.score);
+        if (candidates.length) {
+          return {
+            count: candidates[0].count,
+            text: candidates[0].text.slice(0, 80),
+            rect: {
+              left: Math.round(candidates[0].rect.left),
+              top: Math.round(candidates[0].rect.top),
+              width: Math.round(candidates[0].rect.width),
+              height: Math.round(candidates[0].rect.height)
+            }
+          };
+        }
+        return {count: 0, source: 'not_found'};
+        """
+        try:
+            result = self.start().evaluate(f"() => {{\n{script}\n}}")
+            if isinstance(result, dict) and int(result.get("count") or 0) > 0:
+                logger.info("Douyin profile video count DOM parse | backend=playwright | result={}", result)
+                return int(result.get("count") or 0)
+        except Exception as exc:
+            logger.warning("Douyin profile video count DOM parse failed | backend=playwright | error={}", exc)
+
+        body_text = self._page_body_text()
+        match = re.search(r"\u4f5c\u54c1\s*([\d.]+\s*(?:\u4ebf|\u4e07|\u5343|w)?)", body_text, re.I)
+        return parse_view_count(match.group(1)) if match else 0
+
+    def _video_page_has_no_more_marker(self):
+        script = r"""
+        const noMoreText = '\u6682\u65f6\u6ca1\u6709\u66f4\u591a\u4e86';
+        const candidates = Array.from(document.querySelectorAll('*'))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = (el.innerText || el.textContent || '').trim();
+            return {rect, text};
+          })
+          .filter(item =>
+            item.text.includes(noMoreText) &&
+            item.rect.width > 0 &&
+            item.rect.height > 0 &&
+            item.rect.top < window.innerHeight + 500 &&
+            item.rect.bottom > -100
+          )
+          .sort((a, b) => b.rect.top - a.rect.top);
+        if (candidates.length) {
+          return {
+            seen: true,
+            text: candidates[0].text.slice(0, 40),
+            top: Math.round(candidates[0].rect.top)
+          };
+        }
+        return {seen: false};
+        """
+        try:
+            result = self.start().evaluate(f"() => {{\n{script}\n}}")
+            if isinstance(result, dict) and result.get("seen"):
+                logger.info("Douyin video no-more marker detected | backend=playwright | result={}", result)
+                return True
+        except Exception as exc:
+            logger.warning("Douyin video no-more marker check failed | backend=playwright | error={}", exc)
+        return "\u6682\u65f6\u6ca1\u6709\u66f4\u591a\u4e86" in self._page_body_text()
+
     def _collect_visible_aweme_ids_from_dom(self, limit=None):
-        result = self.start().evaluate(
+        result = self.start().run_js(
             """
             const anchors = Array.from(document.querySelectorAll('a[href*="/video/"]'));
             const ids = [];
@@ -817,7 +936,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         return recovered
 
     def _scroll_active_containers(self):
-        self.start().evaluate(
+        self.start().run_js(
             """
             const scoreScrollable = (el) => {
                 const style = getComputedStyle(el);
@@ -858,7 +977,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
 
     def _scroll_video_page_fast(self):
         for _ in range(self.config.video_scroll_steps_per_round):
-            self.start().evaluate(
+            self.start().run_js(
                 f"""
                 let distance = {self.config.video_scroll_distance};
                 let scrollables = Array.from(document.querySelectorAll('*')).filter(
@@ -926,7 +1045,7 @@ class PlaywrightDouyinBrowserClient(DouyinBrowserClient):
         return {"homepage": homepage, "status": "failed", "message": "取消后状态未变化"}
 
     def _detect_profile_follow_status(self):
-        result = self.start().evaluate(
+        result = self.start().run_js(
             """
             const candidates = Array.from(document.querySelectorAll('button, div, span, a'));
             const items = candidates

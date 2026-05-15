@@ -317,6 +317,21 @@ def _sync_progress_videos_to_state(config, progress):
     return processed_creators, processed_videos, skipped_creators
 
 
+def _resolve_completed_full_status_resets(config, progress):
+    resolved_uids = []
+    for uid, entry in (progress or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if CacheStore._entry_has_full_cache(entry):
+            resolved_uids.append(str(uid or "").strip())
+    if not resolved_uids:
+        return 0
+    return CacheStore(config).resolve_full_status_resets(
+        resolved_uids,
+        reason="data_sync_full_cache_present",
+    )
+
+
 def _refresh_inventory_video_counts(config):
     db_path = config.export_store_db
     if not db_path.exists():
@@ -516,6 +531,7 @@ def sync_progress_videos_to_state(config, *, rerun_scores=True):
 
     raw_videos_processed = _sync_raw_videos_to_state(config)
     processed_creators, processed_videos, skipped_creators = _sync_progress_videos_to_state(config, progress)
+    resolved_full_status_resets = _resolve_completed_full_status_resets(config, progress)
     inventory_rows_updated = _refresh_cache_inventory_current(config)
 
     video_score_path = None
@@ -534,6 +550,7 @@ def sync_progress_videos_to_state(config, *, rerun_scores=True):
         "skipped_creators": skipped_creators,
         "processed_videos": processed_videos,
         "raw_videos_processed": raw_videos_processed,
+        "resolved_full_status_resets": resolved_full_status_resets,
         "inventory_rows_updated": inventory_rows_updated,
         "video_state_before": before_state_count,
         "video_state_after": after_state_count,

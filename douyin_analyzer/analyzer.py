@@ -139,6 +139,14 @@ class DouyinHiatusAnalyzer:
     def should_preserve_full_cache(self, entry):
         return self.get_fetch_mode() != "full" and self.entry_has_full_cache(entry)
 
+    def force_refresh_reason_for_mode(self, user, entry, reset_uids, fetch_mode):
+        uid = str((user or {}).get("sec_uid") or "").strip()
+        if uid and uid in reset_uids:
+            return "full_status_reset"
+        if fetch_mode == "full" and not self.entry_has_full_cache(entry):
+            return "missing_full_cache"
+        return None
+
     @staticmethod
     def preserve_full_progress_entry(entry, observed_mode=None):
         preserved = dict(entry or {})
@@ -1443,6 +1451,9 @@ class DouyinHiatusAnalyzer:
         progress = self.cache_repository.load_run_progress()
         if progress:
             self.reporter.message(f"♻️  已加载 {len(progress)} 条抖音缓存")
+        store_reset_uids = self.load_full_status_reset_uids_from_store()
+        if store_reset_uids:
+            self.reporter.message(f"♻️  已加载 {len(store_reset_uids)} 条抖音全量状态重置指令")
 
         try:
             archived_uids = load_active_archived_uids(self.config.export_store_db)
@@ -1495,11 +1506,18 @@ class DouyinHiatusAnalyzer:
                 for user in followings:
                     uid = user.get("sec_uid") if isinstance(user, dict) else None
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
+                    force_refresh_reason = self.force_refresh_reason_for_mode(
+                        user,
+                        entry,
+                        store_reset_uids,
+                        fetch_mode,
+                    )
                     refresh_needed, _ = self.cache_repository.should_refresh_profile(
                         user,
                         entry,
                         return_reason=True,
                         refresh_on_profile_change=enable_profile_change_refresh,
+                        force_refresh_reason=force_refresh_reason,
                     )
                     if refresh_needed:
                         due_followings.append(user)
@@ -1565,6 +1583,8 @@ class DouyinHiatusAnalyzer:
             "aweme_count_changed": 0,
             "latest_publish_timestamp_newer": 0,
             "zero_aweme_count_candidate": 0,
+            "full_status_reset": 0,
+            "missing_full_cache": 0,
         }
         failed_profile_keys = (
             self.cache_repository.load_failed_profile_keys(fetch_mode)
@@ -1717,11 +1737,18 @@ class DouyinHiatusAnalyzer:
                         continue
 
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
+                    force_refresh_reason = self.force_refresh_reason_for_mode(
+                        user,
+                        entry,
+                        store_reset_uids,
+                        fetch_mode,
+                    )
                     refresh_needed, refresh_reason = self.cache_repository.should_refresh_profile(
                         user,
                         entry,
                         return_reason=True,
                         refresh_on_profile_change=False,
+                        force_refresh_reason=force_refresh_reason,
                     )
                     if self.is_zero_video_candidate(user) and not refresh_needed:
                         refresh_needed = True
@@ -1950,11 +1977,18 @@ class DouyinHiatusAnalyzer:
                     user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
 
                 latest_video = self.get_latest_video_from_entry(entry)
+                force_refresh_reason = self.force_refresh_reason_for_mode(
+                    user,
+                    entry,
+                    store_reset_uids,
+                    fetch_mode,
+                )
                 refresh_needed, refresh_reason = self.cache_repository.should_refresh_profile(
                     user,
                     entry,
                     return_reason=True,
                     refresh_on_profile_change=enable_profile_change_refresh,
+                    force_refresh_reason=force_refresh_reason,
                 )
                 if self.is_zero_video_candidate(user) and not refresh_needed:
                     refresh_needed = True
@@ -2143,6 +2177,11 @@ class DouyinHiatusAnalyzer:
                         {user["sec_uid"]: progress[user["sec_uid"]]},
                         source_mode="full" if preserve_full_cache else fetch_mode,
                     )
+                    if fetch_mode == "full" and user.get("_full_fetch_validated"):
+                        self.cache_repository.resolve_full_status_reset(
+                            user["sec_uid"],
+                            reason="full_refetched",
+                        )
                     refreshed_user_count += 1
                     pending_progress_saves += 1
 
@@ -2243,6 +2282,8 @@ class DouyinHiatusAnalyzer:
                     f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
                     f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
                     f"作品为 0 待确认: {refresh_reason_counts['zero_aweme_count_candidate']}",
+                    f"全量状态重置: {refresh_reason_counts['full_status_reset']}",
+                    f"缺少 full 缓存: {refresh_reason_counts['missing_full_cache']}",
                     f"失败名单跳过: {failed_profile_skip_count}",
                 ],
                 border_style="blue",

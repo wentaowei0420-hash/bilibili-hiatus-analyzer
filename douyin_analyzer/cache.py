@@ -1,6 +1,7 @@
 import hashlib
 import csv
 import json
+import sqlite3
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -137,6 +138,8 @@ class CacheStore:
         normalized_homepage = self._normalize_homepage_url(homepage)
         target_uploader_id = str(uploader_id or "").strip()
         removed_uids = set()
+        if target_uploader_id:
+            removed_uids.add(target_uploader_id)
 
         followings_payload = self.load_followings_cache_payload()
         followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
@@ -161,7 +164,7 @@ class CacheStore:
             if len(kept_followings) != len(followings):
                 self.save_followings_cache(kept_followings)
 
-        if normalized_homepage and not removed_uids:
+        if normalized_homepage:
             progress = self.load_progress()
             for uid, entry in (progress or {}).items():
                 user = (entry or {}).get("user", {}) if isinstance(entry, dict) else {}
@@ -365,15 +368,26 @@ class CacheStore:
         progress_entry,
         return_reason=False,
         refresh_on_profile_change=True,
+        force_refresh_reason=None,
     ):
         def _result(needs_refresh, reason=None):
             return (needs_refresh, reason) if return_reason else needs_refresh
+
+        if force_refresh_reason:
+            return _result(True, force_refresh_reason)
 
         if not isinstance(progress_entry, dict):
             return _result(True, "missing_entry")
         if self.is_cache_expired(progress_entry.get("cached_at")):
             return _result(True, "expired")
         summary = progress_entry.get("summary", {})
+        summary_scope = (
+            str(summary.get("summary_scope") or "").strip().lower()
+            if isinstance(summary, dict)
+            else ""
+        )
+        if progress_entry.get("full_status_reset") or summary_scope == "status_reset":
+            return _result(True, "full_status_reset")
         if not isinstance(summary, dict) or "total_videos" not in summary:
             return _result(True, "missing_summary")
 
@@ -568,6 +582,12 @@ class CacheStore:
             self.config.export_main_table,
             self.config.export_analysis_table,
             self.config.export_uid_analysis_table,
+            "video_score_current",
+            "creator_score_current",
+            "cache_inventory_current",
+            "douyin_creator_manual_rating",
+            "douyin_full_status_reset",
+            "douyin_archived_creators",
         ]:
             delete_rows_by_values(self.config.export_store_db, table_name, uploader_ids)
 
@@ -597,6 +617,53 @@ class CacheStore:
                 source_mode=source_mode or self.config.fetch_mode,
             )
 
+    def resolve_full_status_reset(self, uploader_id, reason="full_refetched"):
+        return self.resolve_full_status_resets([uploader_id], reason=reason)
+
+    def resolve_full_status_resets(self, uploader_ids, reason="full_refetched"):
+        uploader_ids = sorted({str(item or "").strip() for item in (uploader_ids or []) if str(item or "").strip()})
+        if not uploader_ids or not self.config.export_store_db.exists():
+            return 0
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with sqlite3.connect(self.config.export_store_db) as conn:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='douyin_full_status_reset'"
+                ).fetchone()
+                if not exists:
+                    return 0
+                try:
+                    conn.execute("ALTER TABLE douyin_full_status_reset ADD COLUMN resolved_at TEXT")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE douyin_full_status_reset ADD COLUMN resolve_reason TEXT")
+                except sqlite3.OperationalError:
+                    pass
+
+                updated = 0
+                for offset in range(0, len(uploader_ids), 900):
+                    chunk = uploader_ids[offset : offset + 900]
+                    placeholders = ",".join("?" for _ in chunk)
+                    cursor = conn.execute(
+                        f"""
+                        UPDATE douyin_full_status_reset
+                        SET reset_status='resolved',
+                            resolved_at=?,
+                            resolve_reason=?
+                        WHERE reset_status='active'
+                          AND uploader_id IN ({placeholders})
+                        """,
+                        [now_text, reason] + chunk,
+                    )
+                    updated += cursor.rowcount if cursor.rowcount > 0 else 0
+                conn.commit()
+                return updated
+        except Exception as exc:
+            print(f"更新抖音 full 状态重置记录失败: {exc}")
+            return 0
+
     def _load_cached_uploader_ids_from_store(self):
         table_targets = [
             ("douyin_creator_raw", "uploader_id"),
@@ -606,5 +673,8 @@ class CacheStore:
             (self.config.export_main_table, None),
             (self.config.export_analysis_table, None),
             (self.config.export_uid_analysis_table, None),
+            ("video_score_current", None),
+            ("creator_score_current", None),
+            ("cache_inventory_current", None),
         ]
         return load_uploader_ids_from_tables(self.config.export_store_db, table_targets)

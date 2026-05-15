@@ -430,6 +430,8 @@ def load_uploader_ids_from_tables(
         candidate_columns
         or ["UP主UID", "UP涓籙ID", "UP娑撶睓ID", "uploader_id", "target_uid"]
     )
+    if "UP主UID" not in candidate_columns:
+        candidate_columns.insert(0, "UP主UID")
     uploader_ids = set()
 
     with sqlite3.connect(db_path) as conn:

@@ -234,6 +234,7 @@ class DouyinCreatorScorer:
     def _load_creator_rows(self):
         main_rows = self._read_table("main_sheet_current")
         analysis_rows = self._read_table("analysis_sheet_current")
+        inventory_rows = self._read_table("cache_inventory_current")
         creators = {}
 
         for row in main_rows:
@@ -281,6 +282,49 @@ class DouyinCreatorScorer:
                 item["avg_like_count"] = _safe_float(_pick(row, "平均点赞数"), 0)
             if item.get("avg_update_days") is None:
                 item["avg_update_days"] = _safe_float(_pick(row, "平均几天一更"), None)
+
+        for row in inventory_rows:
+            values = list(row.values())
+            uid = str(values[2] if len(values) > 2 else "").strip()
+            if not uid:
+                continue
+            item = creators.setdefault(
+                uid,
+                {
+                    "uploader_id": uid,
+                    "uploader_name": str(values[0] if len(values) > 0 else "").strip(),
+                    "homepage_url": str(values[3] if len(values) > 3 else "").strip(),
+                    "latest_publish_date": str(values[24] if len(values) > 24 else "").strip(),
+                    "inactive_days": None,
+                    "avg_update_days": None,
+                    "follower_count": 0,
+                    "total_like_count": 0,
+                    "video_count": 0,
+                    "avg_like_count": 0,
+                },
+            )
+            if not item.get("uploader_name") and len(values) > 0:
+                item["uploader_name"] = str(values[0] or "").strip()
+            if not item.get("homepage_url") and len(values) > 3:
+                item["homepage_url"] = str(values[3] or "").strip()
+            if not item.get("latest_publish_date") and len(values) > 24:
+                item["latest_publish_date"] = str(values[24] or "").strip()
+
+            published_count = _safe_int(values[6] if len(values) > 6 else 0, 0)
+            cached_video_count = _safe_int(values[21] if len(values) > 21 else 0, 0)
+            item["follower_count"] = max(
+                _safe_int(item.get("follower_count"), 0),
+                _safe_int(values[4] if len(values) > 4 else 0, 0),
+            )
+            item["total_like_count"] = max(
+                _safe_int(item.get("total_like_count"), 0),
+                _safe_int(values[5] if len(values) > 5 else 0, 0),
+            )
+            item["video_count"] = max(
+                _safe_int(item.get("video_count"), 0),
+                published_count,
+                cached_video_count,
+            )
 
         return list(creators.values())
 

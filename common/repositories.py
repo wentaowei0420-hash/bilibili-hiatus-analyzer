@@ -237,6 +237,12 @@ class AnalyzerCacheRepository:
             source_mode=source_mode,
         )
 
+    def resolve_full_status_reset(self, uploader_id, **kwargs) -> Any:
+        return self._cache_store.resolve_full_status_reset(uploader_id, **kwargs)
+
+    def resolve_full_status_resets(self, uploader_ids, **kwargs) -> Any:
+        return self._cache_store.resolve_full_status_resets(uploader_ids, **kwargs)
+
     def remove_unfollowed_user(self, *args, **kwargs) -> Any:
         return self._cache_store.remove_unfollowed_user(*args, **kwargs)
 

@@ -433,6 +433,7 @@ class DouyinDataSyncThread(QThread):
                 f"同步UP {result['processed_creators']} 位，"
                 f"progress视频 {result['processed_videos']} 条，"
                 f"raw视频 {result.get('raw_videos_processed', 0)} 条；"
+                f"解除full重置 {result.get('resolved_full_status_resets', 0)} 位；"
                 f"清单缓存数更新 {result.get('inventory_rows_updated', 0)} 行；"
                 f"douyin_video_state {result['video_state_before']} -> {result['video_state_after']}；"
                 f"video_score_current {result['video_score_before']} -> {result['video_score_after']}；"
@@ -1557,6 +1558,22 @@ class DouyinRatingOverviewDialog(QDialog):
         ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def _missing_eligible_score_count(self, conn, table):
+        if not self._table_exists(conn, table):
+            return 0
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        if "UP涓籙ID" not in columns:
+            return 0
+        row = conn.execute(
+            f'''
+            SELECT COUNT(*)
+            FROM "{self.ELIGIBLE_UID_TABLE}" AS e
+            LEFT JOIN "{table}" AS s ON s."UP涓籙ID" = e.uid
+            WHERE s."UP涓籙ID" IS NULL
+            '''
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
     def _query_rows(self, conn, sql, limit=30, params=()):
         if limit is None:
             return conn.execute(sql, tuple(params)).fetchall()
@@ -1998,6 +2015,11 @@ class DouyinRatingOverviewDialog(QDialog):
                     if has_eligible_filter and has_creator
                     else 0
                 )
+                missing_creator_score_count = (
+                    self._missing_eligible_score_count(conn, self.CREATOR_TABLE)
+                    if has_eligible_filter and has_creator
+                    else 0
+                )
                 stale_video_count = 0
 
                 if not has_creator and not has_video:
@@ -2153,6 +2175,8 @@ class DouyinRatingOverviewDialog(QDialog):
                 warning_parts.append(f"已排除 active 归档UP {archived_count} 位")
             if stale_creator_count:
                 warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
+            if missing_creator_score_count:
+                warning_parts.append(f"full UP缺少评分 {missing_creator_score_count} 位，请重新运行抖音数据同步/UP主评分")
             if has_video:
                 warning_parts.append("视频榜展示当前缓存视频全集")
             warning_text = f"\n范围：{'；'.join(warning_parts)}" if warning_parts else ""

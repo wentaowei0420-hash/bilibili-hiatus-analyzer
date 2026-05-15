@@ -313,6 +313,8 @@ def delete_rows_by_values(db_path, table_name, values, candidate_columns=None):
         return 0
 
     candidate_columns = list(candidate_columns or ["UP主UID", "UP涓籙ID", "uploader_id", "target_uid"])
+    if "UP主UID" not in candidate_columns:
+        candidate_columns.insert(0, "UP主UID")
     placeholders = ",".join("?" for _ in values)
 
     with sqlite3.connect(db_path) as conn:
