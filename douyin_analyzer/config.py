@@ -104,7 +104,6 @@ class DouyinAnalyzerConfig:
     precise_cache_max_age_hours: int
     skip_failed_profiles: bool
     failed_profile_skip_max_age_hours: int
-    progress_trim_video_limit: int
     enable_video_duration_analysis: bool
     compact_output_only: bool
     unfollow_interval_seconds: float
@@ -338,7 +337,6 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         failed_profile_skip_max_age_hours=int(
             os.getenv("DOUYIN_FAILED_PROFILE_SKIP_MAX_AGE_HOURS", "24")
         ),
-        progress_trim_video_limit=int(os.getenv("DOUYIN_PROGRESS_TRIM_VIDEO_LIMIT", "50")),
         enable_video_duration_analysis=_get_bool(
             "DOUYIN_ENABLE_VIDEO_DURATION_ANALYSIS", True
         ),

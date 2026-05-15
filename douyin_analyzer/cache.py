@@ -469,13 +469,7 @@ class CacheStore:
     def _trim_progress_entry(self, entry):
         if not isinstance(entry, dict):
             return entry
-        trimmed_entry = dict(entry)
-        if self.config.fetch_mode == "full" or self._entry_has_full_cache(trimmed_entry):
-            return trimmed_entry
-        videos = trimmed_entry.get("videos")
-        if isinstance(videos, list) and len(videos) > self.config.progress_trim_video_limit:
-            trimmed_entry["videos"] = videos[: self.config.progress_trim_video_limit]
-        return trimmed_entry
+        return dict(entry)
 
     def _write_split_followings(self, manifest_path, directory, payload, error_message):
         try:

@@ -157,6 +157,24 @@ class DouyinHiatusAnalyzer:
         preserved["last_fetch_mode"] = "full"
         return preserved
 
+    def update_preserved_full_progress_entry(
+        self,
+        entry,
+        observed_mode,
+        *,
+        user,
+        videos,
+        summary,
+        latest_video,
+    ):
+        preserved = self.preserve_full_progress_entry(entry, observed_mode)
+        preserved["cached_at"] = int(time.time())
+        preserved["user"] = user
+        preserved["videos"] = videos or []
+        preserved["summary"] = summary or {}
+        preserved["latest_video"] = latest_video
+        return preserved
+
     def merge_updated_followings_cache(self, original_followings, updated_users):
         updates = {
             str((user or {}).get("sec_uid") or "").strip(): user
@@ -1779,7 +1797,19 @@ class DouyinHiatusAnalyzer:
                         latest_video = self.get_latest_video_from_entry(entry)
                         preserve_full_cache = self.should_preserve_full_cache(entry)
                         if preserve_full_cache:
-                            progress[uid] = self.preserve_full_progress_entry(entry, "verify")
+                            progress_user = {
+                                key: value
+                                for key, value in user.items()
+                                if not str(key).startswith("_")
+                            }
+                            progress[uid] = self.update_preserved_full_progress_entry(
+                                entry,
+                                "verify",
+                                user=progress_user,
+                                videos=videos,
+                                summary=summary,
+                                latest_video=latest_video,
+                            )
                         else:
                             existing_modes = set()
                             if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
@@ -2091,7 +2121,14 @@ class DouyinHiatusAnalyzer:
                     }
                     preserve_full_cache = self.should_preserve_full_cache(entry)
                     if preserve_full_cache:
-                        progress[user["sec_uid"]] = self.preserve_full_progress_entry(entry, fetch_mode)
+                        progress[user["sec_uid"]] = self.update_preserved_full_progress_entry(
+                            entry,
+                            fetch_mode,
+                            user=progress_user,
+                            videos=videos,
+                            summary=summary,
+                            latest_video=latest_video,
+                        )
                     else:
                         progress[user["sec_uid"]] = {
                             "cached_at": int(time.time()),
