@@ -40,6 +40,39 @@ class AnalyzerCacheRepository:
             if isinstance(row, dict)
         ]
 
+    def load_followings(self):
+        return self._cache_store.load_followings_cache()
+
+    def load_followings_payload(self):
+        return self._cache_store.load_followings_cache_payload()
+
+    def load_run_progress(self):
+        return self._cache_store.load_progress()
+
+    def load_precise_results(self):
+        return self._cache_store.load_precise_progress()
+
+    def load_duration_progress(self):
+        return self._cache_store.load_video_duration_progress()
+
+    def load_failed_profile_keys(self, *args, **kwargs):
+        return self._cache_store.load_failed_profile_keys(*args, **kwargs)
+
+    def should_refresh_precise_result(self, following, cached_result) -> bool:
+        return self._cache_store.should_refresh_precise_cache(following, cached_result)
+
+    def should_refresh_duration_result(self, following, progress_entry) -> bool:
+        return self._cache_store.should_refresh_video_duration_cache(following, progress_entry)
+
+    def should_refresh_profile(self, user, entry, **kwargs):
+        return self._cache_store.should_refresh_cache(user, entry, **kwargs)
+
+    def refresh_result_runtime_fields(self, result) -> Any:
+        return self._cache_store.refresh_result_runtime_fields(result)
+
+    def normalize_homepage_url(self, homepage: str) -> str:
+        return self._cache_store._normalize_homepage_url(homepage)
+
     def save_followings_cache(self, followings) -> Any:
         return self._cache_store.save_followings_cache(followings)
 

@@ -47,7 +47,6 @@ class DouyinHiatusAnalyzer:
         self.config = config
         self.browser_client = browser_client
         self.cache_repository = AnalyzerCacheRepository(cache_store, platform="douyin")
-        self.cache_store = self.cache_repository
         self.upload_callback = upload_callback
         self.reporter = reporter or RichAnalyzerReporter()
         self.export_service = export_service or DouyinExportService(config)
@@ -681,12 +680,12 @@ class DouyinHiatusAnalyzer:
                 result["upload_timestamp"] = latest_publish_timestamp
                 result["data_source"] = "douyin_cached_summary"
 
-        self.cache_store.refresh_result_runtime_fields(result)
+        self.cache_repository.refresh_result_runtime_fields(result)
         return result
 
     def rebuild_summary_rows_from_cache(self, followings=None, progress=None):
-        followings = followings if isinstance(followings, list) else self.cache_store.load_followings_cache()
-        progress = progress if isinstance(progress, dict) else self.cache_store.load_progress()
+        followings = followings if isinstance(followings, list) else self.cache_repository.load_followings()
+        progress = progress if isinstance(progress, dict) else self.cache_repository.load_run_progress()
 
         summary_rows = []
         for user in self.sort_followings_by_follower_count(followings):
@@ -1071,8 +1070,8 @@ class DouyinHiatusAnalyzer:
         return rows
 
     def build_cached_snapshot(self):
-        followings_payload = self.cache_store.load_followings_cache_payload()
-        progress = self.cache_store.load_progress()
+        followings_payload = self.cache_repository.load_followings_payload()
+        progress = self.cache_repository.load_run_progress()
         followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
         followings_by_uid = {
             user.get("sec_uid"): user
@@ -1110,7 +1109,7 @@ class DouyinHiatusAnalyzer:
                 summary = self.build_counts_only_summary(user)
                 result = self.build_counts_only_result_item(user)
 
-            self.cache_store.refresh_result_runtime_fields(result)
+            self.cache_repository.refresh_result_runtime_fields(result)
             results.append(result)
             if self.should_export_summary_analysis():
                 summary_rows.append(summary)
@@ -1212,7 +1211,7 @@ class DouyinHiatusAnalyzer:
 
         self.export_service.save_cache_inventory(
             self.build_cache_inventory_rows(
-                self.cache_store.load_followings_cache_payload(),
+                self.cache_repository.load_followings_payload(),
                 progress,
             ),
         )
@@ -1294,7 +1293,7 @@ class DouyinHiatusAnalyzer:
         if not failed_keys:
             return False
         uid = str((user or {}).get("sec_uid") or "").strip()
-        homepage = self.cache_store._normalize_homepage_url((user or {}).get("homepage", ""))
+        homepage = self.cache_repository.normalize_homepage_url((user or {}).get("homepage", ""))
         return (uid and f"uid:{uid}" in failed_keys) or (
             homepage and f"homepage:{homepage}" in failed_keys
         )
@@ -1322,7 +1321,7 @@ class DouyinHiatusAnalyzer:
     def analyze_hiatus(self):
         self.browser_client.ensure_login()
         fetch_mode = self.get_fetch_mode()
-        cached_followings = self.cache_store.load_followings_cache()
+        cached_followings = self.cache_repository.load_followings()
         logger.info(
             "Douyin analysis start | mode={} | cached_followings={} | intermediate_upload_interval={}",
             fetch_mode,
@@ -1419,7 +1418,7 @@ class DouyinHiatusAnalyzer:
             self.reporter.message("❌ 未能获取到任何抖音关注列表")
             return None
 
-        progress = self.cache_store.load_progress()
+        progress = self.cache_repository.load_run_progress()
         if progress:
             self.reporter.message(f"♻️  已加载 {len(progress)} 条抖音缓存")
 
@@ -1474,7 +1473,7 @@ class DouyinHiatusAnalyzer:
                 for user in followings:
                     uid = user.get("sec_uid") if isinstance(user, dict) else None
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
-                    refresh_needed, _ = self.cache_store.should_refresh_cache(
+                    refresh_needed, _ = self.cache_repository.should_refresh_profile(
                         user,
                         entry,
                         return_reason=True,
@@ -1546,7 +1545,7 @@ class DouyinHiatusAnalyzer:
             "zero_aweme_count_candidate": 0,
         }
         failed_profile_keys = (
-            self.cache_store.load_failed_profile_keys(fetch_mode)
+            self.cache_repository.load_failed_profile_keys(fetch_mode)
             if getattr(self.config, "skip_failed_profiles", False)
             else set()
         )
@@ -1637,8 +1636,8 @@ class DouyinHiatusAnalyzer:
                 self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
             self.export_service.save_cache_inventory(
                 self.build_cache_inventory_rows(
-                    self.cache_store.load_followings_cache_payload(),
-                    self.cache_store.load_progress(),
+                    self.cache_repository.load_followings_payload(),
+                    self.cache_repository.load_run_progress(),
                 ),
             )
 
@@ -1696,7 +1695,7 @@ class DouyinHiatusAnalyzer:
                         continue
 
                     entry = progress.get(uid) if isinstance(progress, dict) and uid else None
-                    refresh_needed, refresh_reason = self.cache_store.should_refresh_cache(
+                    refresh_needed, refresh_reason = self.cache_repository.should_refresh_profile(
                         user,
                         entry,
                         return_reason=True,
@@ -1855,8 +1854,8 @@ class DouyinHiatusAnalyzer:
                 self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
             self.export_service.save_cache_inventory(
                 self.build_cache_inventory_rows(
-                    self.cache_store.load_followings_cache_payload(),
-                    self.cache_store.load_progress(),
+                    self.cache_repository.load_followings_payload(),
+                    self.cache_repository.load_run_progress(),
                 ),
             )
 
@@ -1917,7 +1916,7 @@ class DouyinHiatusAnalyzer:
                     user.setdefault("latest_publish_timestamp", entry["user"].get("latest_publish_timestamp"))
 
                 latest_video = self.get_latest_video_from_entry(entry)
-                refresh_needed, refresh_reason = self.cache_store.should_refresh_cache(
+                refresh_needed, refresh_reason = self.cache_repository.should_refresh_profile(
                     user,
                     entry,
                     return_reason=True,
@@ -2147,7 +2146,7 @@ class DouyinHiatusAnalyzer:
                 else:
                     result = self.build_no_video_result_item(user)
 
-                self.cache_store.refresh_result_runtime_fields(result)
+                self.cache_repository.refresh_result_runtime_fields(result)
                 self.append_fetch_manifest_record(
                     user,
                     "refreshed" if refresh_needed else "cache_hit",
@@ -2216,7 +2215,7 @@ class DouyinHiatusAnalyzer:
             self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
         self.export_service.save_cache_inventory(
             self.build_cache_inventory_rows(
-                self.cache_store.load_followings_cache_payload(),
+                self.cache_repository.load_followings_payload(),
                 progress,
             ),
         )
@@ -2250,5 +2249,6 @@ class DouyinHiatusAnalyzer:
             border_style="green",
         )
         return results
+
 
 

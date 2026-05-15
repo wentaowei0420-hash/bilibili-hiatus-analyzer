@@ -41,7 +41,6 @@ class BilibiliHiatusAnalyzer:
         self.config = config
         self.api = api
         self.cache_repository = AnalyzerCacheRepository(cache_store, platform="bilibili")
-        self.cache_store = self.cache_repository
         self.reporter = reporter or RichAnalyzerReporter()
         self.export_service = export_service or BilibiliExportService(config)
         try:
@@ -84,7 +83,7 @@ class BilibiliHiatusAnalyzer:
     def _build_following_metric_index(self):
         metric_index = {}
 
-        precise_progress = self.cache_store.load_precise_progress()
+        precise_progress = self.cache_repository.load_precise_results()
         for mid, result in (precise_progress or {}).items():
             if not isinstance(result, dict):
                 continue
@@ -96,7 +95,7 @@ class BilibiliHiatusAnalyzer:
             item["published_video_count"] = max(self._safe_int(item.get("published_video_count"), 0), self._safe_int(result.get("published_video_count"), 0))
             item["average_like_count"] = max(self._safe_int(item.get("average_like_count"), 0), self._safe_int(result.get("average_like_count"), 0))
 
-        duration_progress = self.cache_store.load_video_duration_progress()
+        duration_progress = self.cache_repository.load_duration_progress()
         for mid, entry in (duration_progress or {}).items():
             if not isinstance(entry, dict):
                 continue
@@ -499,7 +498,7 @@ class BilibiliHiatusAnalyzer:
         self.reporter.message("=" * 60)
         self.reporter.message(f"   当前视频时长分析并发数: {self.config.video_analysis_workers}")
 
-        duration_progress = self.cache_store.load_video_duration_progress()
+        duration_progress = self.cache_repository.load_duration_progress()
         like_fetch_budget = self.config.video_stat_max_requests_per_run
         like_rate_limited = False
         like_budget_exhausted_notified = False
@@ -518,7 +517,7 @@ class BilibiliHiatusAnalyzer:
         pending_followings = [
             following
             for following in followings
-            if self.cache_store.should_refresh_video_duration_cache(
+            if self.cache_repository.should_refresh_duration_result(
                 following, duration_progress.get(str(following.get("mid")))
             )
         ]
@@ -696,7 +695,7 @@ class BilibiliHiatusAnalyzer:
             f"?? ??{order_label}{'????' if order_desc else '????'}????????"
         )
 
-        cached_video_results = self.cache_store.load_precise_progress()
+        cached_video_results = self.cache_repository.load_precise_results()
         if cached_video_results:
             self.reporter.message(f"♻️  已加载 {len(cached_video_results)} 条历史抓取缓存。")
 
@@ -705,9 +704,9 @@ class BilibiliHiatusAnalyzer:
         for following in followings:
             mid = str(following.get("mid"))
             cached_result = cached_video_results.get(mid)
-            if cached_result and not self.cache_store.should_refresh_precise_cache(following, cached_result):
+            if cached_result and not self.cache_repository.should_refresh_precise_result(following, cached_result):
                 refreshed_result = dict(cached_result)
-                self.cache_store.refresh_result_runtime_fields(refreshed_result)
+                self.cache_repository.refresh_result_runtime_fields(refreshed_result)
                 results_by_mid[mid] = refreshed_result
             else:
                 pending_followings.append(following)
@@ -745,7 +744,7 @@ class BilibiliHiatusAnalyzer:
                 try:
                     check_stop()
                 except OperationCancelled:
-                    duration_progress = self.cache_store.load_video_duration_progress()
+                    duration_progress = self.cache_repository.load_duration_progress()
                     results = self.enrich_results_with_profile_and_counts(
                         list(results_by_mid.values()),
                         duration_progress,
@@ -785,7 +784,7 @@ class BilibiliHiatusAnalyzer:
                 if mid not in results_by_mid:
                     results_by_mid[mid] = self.build_following_result_item(following)
 
-        duration_progress = self.cache_store.load_video_duration_progress()
+        duration_progress = self.cache_repository.load_duration_progress()
         results = self.enrich_results_with_profile_and_counts(
             list(results_by_mid.values()),
             duration_progress,
@@ -826,5 +825,6 @@ class BilibiliHiatusAnalyzer:
             )
 
         return results
+
 
 
