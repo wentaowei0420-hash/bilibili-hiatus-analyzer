@@ -41,3 +41,16 @@ polls status and logs, and may request cancellation. The worker queue is
 single-threaded by default because Douyin browser automation and the shared
 runtime stop flag are not safe to run concurrently.
 
+## Internal Boundaries
+
+- `common.domain_models` defines typed creator, video, and analysis result
+  models used as the migration target away from raw dictionaries.
+- `common.reporting` defines the reporter/progress interface used by
+  analyzers.
+- `bilibili_analyzer.console_reporter.RichAnalyzerReporter` preserves the
+  existing Rich console behavior for CLI runs.
+- `backend.reporting.JobReporter` sends analyzer messages and progress into
+  the job log stream for API/Web runs.
+- `common.repositories.AnalyzerCacheRepository` wraps platform cache stores so
+  cache access can move behind a repository boundary without changing existing
+  JSON/CSV cache files.

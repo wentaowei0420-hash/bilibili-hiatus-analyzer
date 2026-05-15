@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterator, Optional
 from common.runtime_control import OperationCancelled, check_stop, clear_stop
 
 from .job_models import AnalysisAction, JobCreateRequest, JobKind
+from .reporting import JobReporter
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -227,11 +228,12 @@ def run_job(request: JobCreateRequest, context: TaskContext) -> Any:
     clear_stop()
     env = _build_runtime_env(request)
     writer = LineWriter(context.emit)
+    reporter = JobReporter(context.emit, context.update)
     context.update(message=f"Starting {request.kind.value}")
 
     with _temporary_env(env), redirect_stdout(writer), redirect_stderr(writer):
         try:
-            result = _dispatch_job(request, context)
+            result = _dispatch_job(request, context, reporter)
             writer.flush()
             context.update(message=f"Finished {request.kind.value}")
             return _json_safe(result)
@@ -245,7 +247,7 @@ def run_job(request: JobCreateRequest, context: TaskContext) -> Any:
             raise
 
 
-def _dispatch_job(request: JobCreateRequest, context: TaskContext) -> Any:
+def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> Any:
     kind = request.kind
     context.emit(f"Job kind: {kind.value}")
     context.emit(f"Action: {request.action.value}")
@@ -254,13 +256,13 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext) -> Any:
     context.emit("-" * 60)
 
     if kind == JobKind.BILIBILI_ANALYSIS:
-        return _run_bilibili_main(request)
+        return _run_bilibili_main(request, reporter)
     if kind == JobKind.DOUYIN_ANALYSIS:
-        return _run_douyin_main(request)
+        return _run_douyin_main(request, reporter)
     if kind == JobKind.BOTH_ANALYSIS:
-        first = _run_bilibili_main(request)
+        first = _run_bilibili_main(request, reporter)
         check_stop()
-        second = _run_douyin_main(request)
+        second = _run_douyin_main(request, reporter)
         return {"bilibili": _json_safe(first), "douyin": _json_safe(second)}
     if kind == JobKind.BILIBILI_UPLOAD:
         from bilibili_analyzer.app import run_feishu_upload
@@ -324,16 +326,24 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext) -> Any:
     raise ValueError(f"Unsupported job kind: {kind.value}")
 
 
-def _run_bilibili_main(request: JobCreateRequest) -> Any:
+def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:
     from bilibili_analyzer.app import run_analysis, run_feishu_upload
 
     if request.action == AnalysisAction.FETCH:
-        result = run_analysis(trigger_upload=False, max_followings=request.uid_limit)
+        result = run_analysis(
+            trigger_upload=False,
+            max_followings=request.uid_limit,
+            reporter=reporter,
+        )
         if result is None:
             raise RuntimeError("Bilibili analysis did not complete successfully.")
         return result
     if request.action == AnalysisAction.FETCH_UPLOAD:
-        result = run_analysis(trigger_upload=True, max_followings=request.uid_limit)
+        result = run_analysis(
+            trigger_upload=True,
+            max_followings=request.uid_limit,
+            reporter=reporter,
+        )
         if result is None:
             raise RuntimeError("Bilibili analysis did not complete successfully.")
         return result
@@ -342,7 +352,7 @@ def _run_bilibili_main(request: JobCreateRequest) -> Any:
     raise ValueError(f"Unsupported Bilibili action: {request.action.value}")
 
 
-def _run_douyin_main(request: JobCreateRequest) -> Any:
+def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
     from douyin_analyzer.app import run_analysis, run_feishu_upload
 
     if request.action == AnalysisAction.FETCH:
@@ -351,6 +361,7 @@ def _run_douyin_main(request: JobCreateRequest) -> Any:
             fetch_mode_override=request.douyin_fetch_mode,
             max_followings=request.uid_limit,
             recent_video_limit_override=request.monitor_video_limit,
+            reporter=reporter,
         )
         if result is None:
             raise RuntimeError("Douyin analysis did not complete successfully.")
@@ -361,6 +372,7 @@ def _run_douyin_main(request: JobCreateRequest) -> Any:
             fetch_mode_override=request.douyin_fetch_mode,
             max_followings=request.uid_limit,
             recent_video_limit_override=request.monitor_video_limit,
+            reporter=reporter,
         )
         if result is None:
             raise RuntimeError("Douyin analysis did not complete successfully.")

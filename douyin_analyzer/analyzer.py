@@ -1,18 +1,13 @@
-import os
+﻿import os
 import time
 
 from loguru import logger
 
 from common.platform_store import read_video_rows_for_uploader
+from common.domain_models import AnalysisResult
+from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
-from bilibili_analyzer.logging_utils import (
-    create_progress,
-    create_summary_panel,
-    create_table,
-    get_console,
-    smart_print as print,
-    wait_with_progress,
-)
+from bilibili_analyzer.console_reporter import RichAnalyzerReporter
 
 from .browser_client import (
     DouyinFullModeFrequencyError,
@@ -46,11 +41,21 @@ from .utils import (
 
 
 class DouyinHiatusAnalyzer:
-    def __init__(self, config, browser_client, cache_store, upload_callback=None, max_followings=None):
+    def __init__(
+        self,
+        config,
+        browser_client,
+        cache_store,
+        upload_callback=None,
+        max_followings=None,
+        reporter=None,
+    ):
         self.config = config
         self.browser_client = browser_client
-        self.cache_store = cache_store
+        self.cache_repository = AnalyzerCacheRepository(cache_store, platform="douyin")
+        self.cache_store = self.cache_repository
         self.upload_callback = upload_callback
+        self.reporter = reporter or RichAnalyzerReporter()
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):
@@ -279,11 +284,11 @@ class DouyinHiatusAnalyzer:
         if not homepage:
             return False
 
-        print(f"🧹 {nickname} 主页已确认作品清空，立即执行取消关注并清理缓存。")
+        self.reporter.message(f"🧹 {nickname} 主页已确认作品清空，立即执行取消关注并清理缓存。")
         try:
             unfollow_result = self.browser_client.unfollow_user_by_homepage(homepage)
         except Exception as exc:
-            print(f"⚠️  {nickname} 自动取消关注失败，暂不清理缓存: {exc}")
+            self.reporter.message(f"⚠️  {nickname} 自动取消关注失败，暂不清理缓存: {exc}")
             logger.warning(
                 "Douyin auto unfollow failed for empty profile | uid={} | homepage={} | error={}",
                 user.get("sec_uid"),
@@ -294,7 +299,7 @@ class DouyinHiatusAnalyzer:
 
         status = str((unfollow_result or {}).get("status") or "")
         if status not in {"unfollowed", "skipped"}:
-            print(f"⚠️  {nickname} 自动取消关注未成功，暂不清理缓存: {unfollow_result}")
+            self.reporter.message(f"⚠️  {nickname} 自动取消关注未成功，暂不清理缓存: {unfollow_result}")
             logger.warning(
                 "Douyin auto unfollow did not complete for empty profile | uid={} | homepage={} | result={}",
                 user.get("sec_uid"),
@@ -317,7 +322,7 @@ class DouyinHiatusAnalyzer:
             user.get("sec_uid"),
             removed_uids,
         )
-        print(
+        self.reporter.message(
             f"✅ {nickname} 已完成自动取消关注，并清理本地缓存"
             f"{'：' + ', '.join(removed_uids) if removed_uids else ''}"
         )
@@ -1131,7 +1136,7 @@ class DouyinHiatusAnalyzer:
         return bool(results)
 
     def display_top_results(self, results):
-        table = create_table(
+        table = self.reporter.create_table(
             "🏆 抖音断更排行榜 Top 10",
             [
                 ("排名", "right", "bold"),
@@ -1146,7 +1151,8 @@ class DouyinHiatusAnalyzer:
         )
 
         for index, result in enumerate(results[:10], 1):
-            average_update_interval_days = result.get("average_update_interval_days")
+            result_model = AnalysisResult.from_mapping(result, platform="douyin")
+            average_update_interval_days = result_model.average_update_interval_days
             average_update_text = (
                 f"{average_update_interval_days:.2f}"
                 if isinstance(average_update_interval_days, (int, float))
@@ -1154,21 +1160,21 @@ class DouyinHiatusAnalyzer:
             )
             table.add_row(
                 str(index),
-                str(result["uploader_name"]),
-                str(result["days_since_update"]),
-                str(result.get("follower_count") or "暂无"),
-                str(result.get("published_video_count", 0)),
-                str(result.get("average_like_count", 0)),
+                result_model.uploader_name,
+                str(result_model.days_since_update),
+                str(result_model.follower_count or "暂无"),
+                str(result_model.published_video_count),
+                str(result_model.average_like_count),
                 average_update_text,
-                str(result.get("upload_date", UNKNOWN_DATE)),
+                result_model.upload_date or UNKNOWN_DATE,
             )
 
-        get_console().print()
-        get_console().print(table)
-        get_console().print()
+        self.reporter.render()
+        self.reporter.render(table)
+        self.reporter.render()
 
     def display_counts_results(self, results):
-        table = create_table(
+        table = self.reporter.create_table(
             "📋 抖音基础监控 Top 10",
             [
                 ("排名", "right", "bold"),
@@ -1188,9 +1194,9 @@ class DouyinHiatusAnalyzer:
                 str(result["uploader_homepage"]),
             )
 
-        get_console().print()
-        get_console().print(table)
-        get_console().print()
+        self.reporter.render()
+        self.reporter.render(table)
+        self.reporter.render()
 
     def flush_partial_outputs(
         self,
@@ -1237,32 +1243,28 @@ class DouyinHiatusAnalyzer:
         if self.should_export_duration_analysis():
             local_outputs.extend([self.config.all_videos_csv, self.config.video_duration_report_md])
 
-        get_console().print(
-            create_summary_panel(
-                "💾 本地阶段保存",
-                [
-                    f"已安全保存到本地: 已处理 {processed_count} 位博主",
-                    f"已更新文件: {self._format_output_summary(local_outputs)}",
-                ],
-                border_style="green",
-            )
+        self.reporter.panel(
+            "💾 本地阶段保存",
+            [
+                f"已安全保存到本地: 已处理 {processed_count} 位博主",
+                f"已更新文件: {self._format_output_summary(local_outputs)}",
+            ],
+            border_style="green",
         )
 
         if self.upload_callback is not None:
-            get_console().print(
-                create_summary_panel(
-                    "☁️ 抖音阶段同步",
-                    [
-                        f"已处理博主: {processed_count}",
-                        f"待上传文件: {self._format_output_summary(local_outputs)}",
-                    ],
-                    border_style="cyan",
-                )
+            self.reporter.panel(
+                "☁️ 抖音阶段同步",
+                [
+                    f"已处理博主: {processed_count}",
+                    f"待上传文件: {self._format_output_summary(local_outputs)}",
+                ],
+                border_style="cyan",
             )
             try:
                 self.upload_callback(processed_count)
             except Exception as exc:
-                print(f"⚠️  阶段性飞书上传失败，但分析会继续执行: {exc}")
+                self.reporter.message(f"⚠️  阶段性飞书上传失败，但分析会继续执行: {exc}")
 
     def append_fetch_manifest_record(
         self,
@@ -1341,7 +1343,7 @@ class DouyinHiatusAnalyzer:
             if not cached_followings:
                 raise RuntimeError("抖音非基础模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
             followings = cached_followings
-            print(
+            self.reporter.message(
                 f"♻️  已复用 {len(followings)} 位抖音关注列表缓存，"
                 "本模式不重新滚动关注列表，将直接按缓存主页链接进入主页。"
             )
@@ -1354,14 +1356,14 @@ class DouyinHiatusAnalyzer:
             if not cached_followings:
                 raise RuntimeError("抖音监控模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
             try:
-                print(
+                self.reporter.message(
                     f"🧭 监控模式将先刷新关注缓存，用于比较最新发布时间 | 本地缓存={len(cached_followings)} 条"
                 )
                 followings = self.browser_client.get_followings()
                 if followings:
                     self.cache_store.save_followings_cache(followings)
                     cached_followings = followings
-                    print(
+                    self.reporter.message(
                         f"🧭 监控模式关注缓存已刷新 | 已写入缓存={len(followings)} 条 | 后续将据此判断是否需要进主页"
                     )
                     logger.info(
@@ -1370,7 +1372,7 @@ class DouyinHiatusAnalyzer:
                     )
                 else:
                     followings = cached_followings
-                    print(
+                    self.reporter.message(
                         f"⚠️  监控模式未拿到新的关注列表数据，已回退本地缓存继续运行 | 缓存条数={len(followings)}"
                     )
                     logger.warning(
@@ -1381,7 +1383,7 @@ class DouyinHiatusAnalyzer:
                 if self._is_following_integrity_error(exc):
                     raise
                 followings = cached_followings
-                print(
+                self.reporter.message(
                     f"⚠️  监控模式刷新关注缓存失败，已回退本地缓存继续运行 | 缓存条数={len(followings)} | 原因={exc}"
                 )
                 logger.warning(
@@ -1391,24 +1393,24 @@ class DouyinHiatusAnalyzer:
                 )
         else:
             try:
-                print(
+                self.reporter.message(
                     f"🧭 关注列表刷新开始 | 模式={fetch_mode} | "
                     f"本地关注缓存={len(cached_followings or [])} 条"
                 )
                 followings = self.browser_client.get_followings()
                 if followings:
                     self.cache_store.save_followings_cache(followings)
-                    print(f"🧭 关注列表刷新成功 | 已写入缓存={len(followings)} 条")
+                    self.reporter.message(f"🧭 关注列表刷新成功 | 已写入缓存={len(followings)} 条")
                     logger.info("Douyin followings refreshed | rows={}", len(followings))
             except Exception as exc:
                 if self._is_following_integrity_error(exc):
-                    print(f"❌ 关注列表完整性校验失败，不回退旧缓存，避免未关注博主重新进入表格: {exc}")
+                    self.reporter.message(f"❌ 关注列表完整性校验失败，不回退旧缓存，避免未关注博主重新进入表格: {exc}")
                     logger.error("Douyin followings integrity failed | error={}", exc)
                     raise
                 if cached_followings:
                     followings = cached_followings
-                    print(f"🧭 关注列表回退缓存 | 缓存条数={len(followings)} | 失败原因={exc}")
-                    print(f"⚠️  刷新抖音关注列表失败，已回退到本地缓存继续分析: {exc}")
+                    self.reporter.message(f"🧭 关注列表回退缓存 | 缓存条数={len(followings)} | 失败原因={exc}")
+                    self.reporter.message(f"⚠️  刷新抖音关注列表失败，已回退到本地缓存继续分析: {exc}")
                     logger.warning(
                         "Douyin followings fallback cache used | cached_rows={} | error={}",
                         len(followings),
@@ -1418,12 +1420,12 @@ class DouyinHiatusAnalyzer:
                     raise
 
         if not followings:
-            print("❌ 未能获取到任何抖音关注列表")
+            self.reporter.message("❌ 未能获取到任何抖音关注列表")
             return None
 
         progress = self.cache_store.load_progress()
         if progress:
-            print(f"♻️  已加载 {len(progress)} 条抖音缓存")
+            self.reporter.message(f"♻️  已加载 {len(progress)} 条抖音缓存")
 
         try:
             archived_uids = load_active_archived_uids(self.config.export_store_db)
@@ -1442,7 +1444,7 @@ class DouyinHiatusAnalyzer:
             ]
             skipped_archived = before_archive_filter - len(followings)
             if skipped_archived:
-                print(
+                self.reporter.message(
                     f"🗄️  已跳过 {skipped_archived} 位处于 active 归档状态的长期未更新 UP，"
                     "本轮不再进入主页校验/监控/全量处理。"
                 )
@@ -1452,7 +1454,7 @@ class DouyinHiatusAnalyzer:
                     len(followings),
                 )
             if not followings:
-                print("🗄️  当前关注列表全部命中 active 归档状态，本轮无需继续处理。")
+                self.reporter.message("🗄️  当前关注列表全部命中 active 归档状态，本轮无需继续处理。")
                 return None
 
         order_field, order_desc, order_label = self.get_following_fetch_order()
@@ -1462,7 +1464,7 @@ class DouyinHiatusAnalyzer:
         if partial_run:
             if fetch_mode == "counts":
                 followings = followings[: self.max_followings]
-                print(
+                self.reporter.message(
                     f"\U0001f9e9 \u90e8\u5206\u6293\u53d6\u6a21\u5f0f\u5df2\u751f\u6548 | \u5168\u90e8\u5173\u6ce8={total_followings} \u4f4d | "
                     f"\u672c\u8f6e\u4ec5\u5904\u7406\u6392\u5e8f\u9760\u524d\u7684 {len(followings)} \u4f4d"
                 )
@@ -1486,7 +1488,7 @@ class DouyinHiatusAnalyzer:
                         due_followings.append(user)
                 due_total = len(due_followings)
                 followings = due_followings[: self.max_followings]
-                print(
+                self.reporter.message(
                     f"\U0001f9e9 \u90e8\u5206\u6293\u53d6\u6a21\u5f0f\u5df2\u751f\u6548 | \u5168\u90e8\u5173\u6ce8={total_followings} \u4f4d | "
                     f"\u8fbe\u5230\u6293\u53d6\u6761\u4ef6={due_total} \u4f4d | \u672c\u8f6e\u4ec5\u5904\u7406\u6392\u5e8f\u9760\u524d\u7684 {len(followings)} \u4f4d\u8d85\u65f6\u6216\u65e0\u8bb0\u5f55\u535a\u4e3b"
                 )
@@ -1500,7 +1502,7 @@ class DouyinHiatusAnalyzer:
         if followings:
             top_user = followings[0] if isinstance(followings[0], dict) else {}
             top_metric = self._resolve_following_sort_value(top_user, order_field)
-            print(
+            self.reporter.message(
                 f"\U0001f4ca \u5173\u6ce8\u5217\u8868\u51c6\u5907\u5b8c\u6210 | \u672c\u8f6e\u5904\u7406={len(followings)} \u4f4d | "
                 f"{order_label}\u6700\u9760\u524d={top_user.get('nickname', '')}({top_metric})"
             )
@@ -1511,26 +1513,26 @@ class DouyinHiatusAnalyzer:
                 top_metric,
                 order_field,
             )
-        print(
+        self.reporter.message(
             f"\U0001f4f1 \u5df2\u6309{order_label}{'\u4ece\u9ad8\u5230\u4f4e' if order_desc else '\u4ece\u4f4e\u5230\u9ad8'}\u6392\u5e8f\u540e\u5f00\u59cb\u6293\u53d6\u3002"
         )
 
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
-            print("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
+            self.reporter.message("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
         elif fetch_mode == "verify":
-            print("🔎 当前为主页校验模式：复用基础缓存主页链接，逐个进入主页校验获赞总数等主页数据。")
+            self.reporter.message("🔎 当前为主页校验模式：复用基础缓存主页链接，逐个进入主页校验获赞总数等主页数据。")
         elif fetch_mode == "monitor":
-            print(f"🪶 当前为轻量监控模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品。")
+            self.reporter.message(f"🪶 当前为轻量监控模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品。")
         elif fetch_mode == "delta":
-            print(f"🧩 当前为增量模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品并合并到缓存。")
+            self.reporter.message(f"🧩 当前为增量模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品并合并到缓存。")
         else:
-            print("📚 当前为全量模式：会抓取博主全部作品，并生成完整时长分析。")
+            self.reporter.message("📚 当前为全量模式：会抓取博主全部作品，并生成完整时长分析。")
         if fetch_mode != "counts":
             cache_days = self.config.precise_cache_max_age_hours / 24
-            print(f"🏷️  非基础模式抓取标记已启用：{cache_days:.0f} 天内已抓取博主将复用缓存，不重复进主页。")
+            self.reporter.message(f"🏷️  非基础模式抓取标记已启用：{cache_days:.0f} 天内已抓取博主将复用缓存，不重复进主页。")
         if self.config.enable_video_duration_analysis and not export_duration_analysis:
-            print("⏭️  当前模式已跳过全量视频时长分析导出，以降低风控概率。")
+            self.reporter.message("⏭️  当前模式已跳过全量视频时长分析导出，以降低风控概率。")
 
         results = []
         all_video_rows = []
@@ -1554,13 +1556,13 @@ class DouyinHiatusAnalyzer:
         )
         failed_profile_skip_count = 0
         if failed_profile_keys:
-            print(
+            self.reporter.message(
                 f"🧯 已启用失败博主跳过：{len(failed_profile_keys)} 个失败标记在有效期内，"
                 f"有效期={self.config.failed_profile_skip_max_age_hours} 小时"
             )
 
         if fetch_mode == "counts":
-            with create_progress() as progress_bar:
+            with self.reporter.progress() as progress_bar:
                 task_id = progress_bar.add_task("统计抖音博主基础数据", total=len(followings))
                 for index, user in enumerate(followings, 1):
                     try:
@@ -1599,10 +1601,10 @@ class DouyinHiatusAnalyzer:
                         try:
                             self.browser_client.refresh_user_profile_from_homepage(user)
                         except (DouyinRateLimitError, DouyinServiceError) as exc:
-                            print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认失败，暂时保留: {exc}")
+                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认失败，暂时保留: {exc}")
                             self.record_profile_failure(user, exc, "counts_empty_confirm")
                         except Exception as exc:
-                            print(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认异常，暂时保留: {exc}")
+                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 空主页确认异常，暂时保留: {exc}")
                             self.record_profile_failure(user, exc, "counts_empty_confirm")
                         if self.handle_empty_video_profile(
                             user,
@@ -1655,7 +1657,7 @@ class DouyinHiatusAnalyzer:
                 len(summary_rows),
                 [str(path) for path in exported],
             )
-            print(
+            self.reporter.message(
                 f"🗂️  抖音 counts 模式已输出：{self._format_output_summary(exported)}，"
                 f"共 {len(results)} 位博主"
             )
@@ -1664,7 +1666,7 @@ class DouyinHiatusAnalyzer:
         if fetch_mode == "verify":
             verified_users = []
             profile_verified_count = 0
-            with create_progress() as progress_bar:
+            with self.reporter.progress() as progress_bar:
                 task_id = progress_bar.add_task("校验抖音博主主页数据", total=len(followings))
                 for index, user in enumerate(followings, 1):
                     uid = user.get("sec_uid")
@@ -1719,15 +1721,15 @@ class DouyinHiatusAnalyzer:
                             profile_verified_count += 1
                             refreshed_user_count += 1
                         except DouyinRateLimitError as exc:
-                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
+                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
                             self.record_profile_failure(user, exc, "verify_rate_limit")
                             self.browser_client.restart(self.config.rate_limit_global_cooldown)
                         except DouyinServiceError as exc:
-                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
+                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
                             self.record_profile_failure(user, exc, "verify_service_error")
                             self.browser_client.restart(self.config.service_error_global_cooldown)
                         except Exception as exc:
-                            print(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
+                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
                             self.record_profile_failure(user, exc, "verify_profile")
                     else:
                         cache_hit_count += 1
@@ -1816,18 +1818,18 @@ class DouyinHiatusAnalyzer:
                         and refreshed_user_count % self.config.refresh_batch_size == 0
                     ):
                         cooldown = self.config.refresh_batch_cooldown
-                        print(
+                        self.reporter.message(
                             f"⏸️  已连续主页校验 {refreshed_user_count} 位博主，"
                             f"批次冷却 {cooldown:.0f} 秒后继续..."
                         )
-                        wait_with_progress(cooldown, "抖音主页校验批次冷却中")
+                        self.reporter.wait(cooldown, "抖音主页校验批次冷却中")
 
                     if (
                         profile_verified
                         and self.config.browser_restart_interval_users > 0
                         and refreshed_user_count % self.config.browser_restart_interval_users == 0
                     ):
-                        print(
+                        self.reporter.message(
                             f"🔧 已主页校验 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
                         )
                         self.browser_client.restart(5)
@@ -1875,13 +1877,13 @@ class DouyinHiatusAnalyzer:
                 len(results),
                 [str(path) for path in exported],
             )
-            print(
+            self.reporter.message(
                 f"🗂️  抖音 verify 模式已输出：{self._format_output_summary(exported)}，"
                 f"本轮进主页校验 {profile_verified_count} 位，复用未到期缓存 {cache_hit_count} 位"
             )
             return results
 
-        with create_progress() as progress_bar:
+        with self.reporter.progress() as progress_bar:
             task_id = progress_bar.add_task("分析抖音博主", total=len(followings))
             for index, user in enumerate(followings, 1):
                 try:
@@ -1950,12 +1952,12 @@ class DouyinHiatusAnalyzer:
                                     videos = self.merge_videos(videos, exc.videos)
                                     latest_video = self.get_latest_video_from_videos(videos)
                                     full_fetch_validation_error = exc
-                                    print(
+                                    self.reporter.message(
                                         f"⚠️  {user['nickname']} 全量数量校验未通过 "
                                         f"({exc.actual_count}/{exc.expected_count or '未知'})：{exc}"
                                     )
                                     if full_fetch_attempts < 2:
-                                        print(f"🔁 正在重新进入 {user['nickname']} 主页执行第 2 次全量抓取校验...")
+                                        self.reporter.message(f"🔁 正在重新进入 {user['nickname']} 主页执行第 2 次全量抓取校验...")
                                         continue
                                     user["_full_fetch_validated"] = False
                                     full_fetch_mismatch_rows.append(
@@ -1965,7 +1967,7 @@ class DouyinHiatusAnalyzer:
                                             full_fetch_attempts,
                                         )
                                     )
-                                    print(
+                                    self.reporter.message(
                                         f"📝 {user['nickname']} 全量两次抓取后作品数仍未对齐，"
                                         f"已记录到 {self.config.full_fetch_mismatch_csv.name}，继续下一个博主。"
                                     )
@@ -1983,7 +1985,7 @@ class DouyinHiatusAnalyzer:
                             else:
                                 videos = recent_videos
                     except DouyinFullModeFrequencyError as exc:
-                        print(f"⚠️  {exc}")
+                        self.reporter.message(f"⚠️  {exc}")
                         self.flush_partial_outputs(
                             results,
                             all_video_rows,
@@ -1995,7 +1997,7 @@ class DouyinHiatusAnalyzer:
                         )
                         raise OperationCancelled(str(exc)) from exc
                     except DouyinLoginExpiredError as exc:
-                        print(f"⚠️  {exc}")
+                        self.reporter.message(f"⚠️  {exc}")
                         self.flush_partial_outputs(
                             results,
                             all_video_rows,
@@ -2007,7 +2009,7 @@ class DouyinHiatusAnalyzer:
                         )
                         raise OperationCancelled(str(exc)) from exc
                     except DouyinRateLimitError as exc:
-                        print(f"⚠️  {user['nickname']} 触发页面级速率限制: {exc}")
+                        self.reporter.message(f"⚠️  {user['nickname']} 触发页面级速率限制: {exc}")
                         self.browser_client.restart(self.config.rate_limit_global_cooldown)
                         if entry:
                             videos = entry.get("videos", [])
@@ -2018,7 +2020,7 @@ class DouyinHiatusAnalyzer:
                             progress_bar.advance(task_id)
                             continue
                     except DouyinServiceError as exc:
-                        print(f"⚠️  {user['nickname']} 触发页面级限制: {exc}")
+                        self.reporter.message(f"⚠️  {user['nickname']} 触发页面级限制: {exc}")
                         self.browser_client.restart(self.config.service_error_global_cooldown)
                         if entry:
                             videos = entry.get("videos", [])
@@ -2029,7 +2031,7 @@ class DouyinHiatusAnalyzer:
                             progress_bar.advance(task_id)
                             continue
                     except Exception as exc:
-                        print(f"⚠️  {user['nickname']} 抓取失败: {exc}")
+                        self.reporter.message(f"⚠️  {user['nickname']} 抓取失败: {exc}")
                         if entry:
                             videos = entry.get("videos", [])
                             latest_video = self.get_latest_video_from_entry(entry)
@@ -2119,17 +2121,17 @@ class DouyinHiatusAnalyzer:
                         and refreshed_user_count % self.config.refresh_batch_size == 0
                     ):
                         cooldown = self.config.refresh_batch_cooldown
-                        print(
+                        self.reporter.message(
                             f"⏸️  已连续刷新 {refreshed_user_count} 位博主，"
                             f"批次冷却 {cooldown:.0f} 秒后继续..."
                         )
-                        wait_with_progress(cooldown, "抖音抓取批次冷却中")
+                        self.reporter.wait(cooldown, "抖音抓取批次冷却中")
 
                     if (
                         self.config.browser_restart_interval_users > 0
                         and refreshed_user_count % self.config.browser_restart_interval_users == 0
                     ):
-                        print(
+                        self.reporter.message(
                             f"🔧 已刷新 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
                         )
                         self.browser_client.restart(5)
@@ -2196,22 +2198,20 @@ class DouyinHiatusAnalyzer:
                 refreshed_total,
                 refresh_reason_counts,
             )
-            get_console().print(
-                create_summary_panel(
-                    "📦 抖音缓存命中摘要",
-                    [
-                        f"复用缓存: {cache_hit_count}",
-                        f"重新抓取: {refreshed_total}",
-                        f"无缓存: {refresh_reason_counts['missing_entry']}",
-                        f"缓存过期: {refresh_reason_counts['expired']}",
-                        f"摘要缺失: {refresh_reason_counts['missing_summary']}",
-                        f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
-                        f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
-                        f"作品为 0 待确认: {refresh_reason_counts['zero_aweme_count_candidate']}",
-                        f"失败名单跳过: {failed_profile_skip_count}",
-                    ],
-                    border_style="blue",
-                )
+            self.reporter.panel(
+                "📦 抖音缓存命中摘要",
+                [
+                    f"复用缓存: {cache_hit_count}",
+                    f"重新抓取: {refreshed_total}",
+                    f"无缓存: {refresh_reason_counts['missing_entry']}",
+                    f"缓存过期: {refresh_reason_counts['expired']}",
+                    f"摘要缺失: {refresh_reason_counts['missing_summary']}",
+                    f"视频数变化: {refresh_reason_counts['aweme_count_changed']}",
+                    f"最新发布时间变新: {refresh_reason_counts['latest_publish_timestamp_newer']}",
+                    f"作品为 0 待确认: {refresh_reason_counts['zero_aweme_count_candidate']}",
+                    f"失败名单跳过: {failed_profile_skip_count}",
+                ],
+                border_style="blue",
             )
 
         results.sort(key=self._sort_days_since_value, reverse=True)
@@ -2248,15 +2248,14 @@ class DouyinHiatusAnalyzer:
             len(all_video_rows),
             [str(path) for path in exported],
         )
-        get_console().print(
-            create_summary_panel(
-                f"🗂️ 抖音 {fetch_mode} 模式输出",
-                [
-                    f"输出文件数: {len(exported)}",
-                    f"文件列表: {self._format_output_summary(exported)}",
-                    f"结果数: {len(results)} 位博主",
-                ],
-                border_style="green",
-            )
+        self.reporter.panel(
+            f"🗂️ 抖音 {fetch_mode} 模式输出",
+            [
+                f"输出文件数: {len(exported)}",
+                f"文件列表: {self._format_output_summary(exported)}",
+                f"结果数: {len(results)} 位博主",
+            ],
+            border_style="green",
         )
         return results
+

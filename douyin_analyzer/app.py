@@ -396,6 +396,7 @@ def run_analysis(
     fetch_mode_override=None,
     max_followings=None,
     recent_video_limit_override=None,
+    reporter=None,
 ):
     config = load_analyzer_config(
         fetch_mode_override=fetch_mode_override,
@@ -414,6 +415,7 @@ def run_analysis(
         cache_store,
         upload_callback=run_partial_feishu_upload if enable_partial_upload else None,
         max_followings=max_followings,
+        reporter=reporter,
     )
 
     if enable_partial_upload:

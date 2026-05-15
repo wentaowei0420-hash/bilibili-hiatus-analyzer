@@ -274,14 +274,20 @@ def write_uid_analysis_output(config, analysis_rows):
     return analysis_path
 
 
-def run_analysis(trigger_upload=True, max_followings=None):
+def run_analysis(trigger_upload=True, max_followings=None, reporter=None):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "bilibili_app")
 
     client = BilibiliHttpClient(config)
     api = BilibiliApi(config, client)
     cache_store = CacheStore(config)
-    analyzer = BilibiliHiatusAnalyzer(config, api, cache_store, max_followings=max_followings)
+    analyzer = BilibiliHiatusAnalyzer(
+        config,
+        api,
+        cache_store,
+        max_followings=max_followings,
+        reporter=reporter,
+    )
     results = analyzer.analyze_hiatus()
 
     if trigger_upload and results is not None:

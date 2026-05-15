@@ -1,11 +1,14 @@
-import os
+﻿import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+from common.domain_models import AnalysisResult
+from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
+from .console_reporter import RichAnalyzerReporter
 from .exporters import (
     save_all_videos_to_csv,
     save_to_csv,
@@ -13,14 +16,6 @@ from .exporters import (
     save_video_duration_report,
 )
 from .http_client import RateLimitExceededError
-from .logging_utils import (
-    create_progress,
-    create_summary_panel,
-    create_table,
-    get_console,
-    smart_print as print,
-    wait_with_progress,
-)
 from .utils import (
     DEFAULT_GROUP_NAME,
     LONG_VIDEO_LABEL,
@@ -39,10 +34,12 @@ from .utils import (
 
 
 class BilibiliHiatusAnalyzer:
-    def __init__(self, config, api, cache_store, max_followings=None):
+    def __init__(self, config, api, cache_store, max_followings=None, reporter=None):
         self.config = config
         self.api = api
-        self.cache_store = cache_store
+        self.cache_repository = AnalyzerCacheRepository(cache_store, platform="bilibili")
+        self.cache_store = self.cache_repository
+        self.reporter = reporter or RichAnalyzerReporter()
         try:
             self.max_followings = int(max_followings) if max_followings is not None else None
         except (TypeError, ValueError):
@@ -327,9 +324,9 @@ class BilibiliHiatusAnalyzer:
         ]
 
         if pending_entries:
-            print(f"👍 准备为 {len(pending_entries)} 位UP主补抓历史点赞数据...")
+            self.reporter.message(f"👍 准备为 {len(pending_entries)} 位UP主补抓历史点赞数据...")
 
-        with create_progress() as progress:
+        with self.reporter.progress() as progress:
             task_id = progress.add_task("补抓历史点赞", total=len(pending_entries))
             for mid, entry in pending_entries:
                 progress.advance(task_id)
@@ -354,7 +351,7 @@ class BilibiliHiatusAnalyzer:
                     break
 
         if refreshed_count:
-            print(f"✅ 已补齐 {refreshed_count} 位UP主缓存中的部分真实点赞数据。")
+            self.reporter.message(f"✅ 已补齐 {refreshed_count} 位UP主缓存中的部分真实点赞数据。")
         return duration_progress, remaining_budget, rate_limit_hit
 
     def enrich_results_with_profile_and_counts(self, results, duration_progress=None, followings=None):
@@ -436,12 +433,12 @@ class BilibiliHiatusAnalyzer:
                 time.sleep(random.uniform(0, 1.5))
                 return following, self.api.get_latest_video(following.get("mid"), uname), None
             except RateLimitExceededError:
-                print(f"   ⏭️  {uname} - 当前风控较严，先加入稍后重试队列")
+                self.reporter.message(f"   ⏭️  {uname} - 当前风控较严，先加入稍后重试队列")
                 return following, None, "rate_limit"
             except Exception as exc:
                 return following, None, exc
 
-        with create_progress() as progress:
+        with self.reporter.progress() as progress:
             task_id = progress.add_task(f"精确抓取 {label}", total=len(followings))
             with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
                 futures = {
@@ -457,7 +454,7 @@ class BilibiliHiatusAnalyzer:
                         remaining_followings.append(following)
                         continue
                     if error is not None:
-                        print(f"   ❌ {following.get('uname')} - 抓取异常: {error}")
+                        self.reporter.message(f"   ❌ {following.get('uname')} - 抓取异常: {error}")
                         error_count += 1
                         remaining_followings.append(following)
                         continue
@@ -472,17 +469,15 @@ class BilibiliHiatusAnalyzer:
                     ):
                         remaining_followings.append(following)
 
-        get_console().print(
-            create_summary_panel(
-                f"📌 精确抓取批次 {label}",
-                [
-                    f"成功抓取: {success_count}",
-                    f"无公开视频: {no_video_count}",
-                    f"待补抓: {len(remaining_followings)}",
-                    f"异常/失败: {error_count}",
-                ],
-                border_style="blue",
-            )
+        self.reporter.panel(
+            f"📌 精确抓取批次 {label}",
+            [
+                f"成功抓取: {success_count}",
+                f"无公开视频: {no_video_count}",
+                f"待补抓: {len(remaining_followings)}",
+                f"异常/失败: {error_count}",
+            ],
+            border_style="blue",
         )
         return remaining_followings
 
@@ -490,11 +485,11 @@ class BilibiliHiatusAnalyzer:
         if not self.config.enable_video_duration_analysis:
             return {}
 
-        print()
-        print("=" * 60)
-        print("📊 正在分析所有关注UP主的全部视频时长...")
-        print("=" * 60)
-        print(f"   当前视频时长分析并发数: {self.config.video_analysis_workers}")
+        self.reporter.message()
+        self.reporter.message("=" * 60)
+        self.reporter.message("📊 正在分析所有关注UP主的全部视频时长...")
+        self.reporter.message("=" * 60)
+        self.reporter.message(f"   当前视频时长分析并发数: {self.config.video_analysis_workers}")
 
         duration_progress = self.cache_store.load_video_duration_progress()
         like_fetch_budget = self.config.video_stat_max_requests_per_run
@@ -502,7 +497,7 @@ class BilibiliHiatusAnalyzer:
         like_budget_exhausted_notified = False
 
         if duration_progress:
-            print(f"♻️  已加载 {len(duration_progress)} 条视频时长分析缓存。")
+            self.reporter.message(f"♻️  已加载 {len(duration_progress)} 条视频时长分析缓存。")
             if self.config.enable_cached_video_like_backfill:
                 duration_progress, like_fetch_budget, like_rate_limited = self.enrich_cached_video_like_counts(
                     followings,
@@ -510,7 +505,7 @@ class BilibiliHiatusAnalyzer:
                     like_fetch_budget,
                 )
             elif self.config.enable_real_video_like_fetch:
-                print("⏭️  已跳过历史缓存视频的自动点赞补抓，避免本轮一开始触发风控。")
+                self.reporter.message("⏭️  已跳过历史缓存视频的自动点赞补抓，避免本轮一开始触发风控。")
 
         pending_followings = [
             following
@@ -527,15 +522,15 @@ class BilibiliHiatusAnalyzer:
                 time.sleep(random.uniform(0, 1.5))
                 return following, self.api.get_all_videos_for_up(following.get("mid"), uname), None
             except RateLimitExceededError:
-                print(f"   ⏭️  {uname} - 当前风控较严，先加入稍后重试队列")
+                self.reporter.message(f"   ⏭️  {uname} - 当前风控较严，先加入稍后重试队列")
                 return following, None, "rate_limit"
             except requests.exceptions.RequestException as exc:
-                print(f"   ⚠️  {uname} - 网络异常: {exc.__class__.__name__}，先加入稍后重试队列")
+                self.reporter.message(f"   ⚠️  {uname} - 网络异常: {exc.__class__.__name__}，先加入稍后重试队列")
                 return following, None, "network"
             except Exception as exc:
                 return following, None, exc
 
-        with create_progress() as progress:
+        with self.reporter.progress() as progress:
             task_id = progress.add_task("全量视频时长分析", total=len(pending_followings))
             for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
                 check_stop()
@@ -561,13 +556,13 @@ class BilibiliHiatusAnalyzer:
                                 like_fetch_budget,
                             )
                             if like_rate_limited:
-                                print("⚠️  本轮真实点赞补抓已暂停，剩余视频先保留到后续运行再补抓。")
+                                self.reporter.message("⚠️  本轮真实点赞补抓已暂停，剩余视频先保留到后续运行再补抓。")
                         elif (
                             self.config.enable_real_video_like_fetch
                             and like_fetch_budget <= 0
                             and not like_budget_exhausted_notified
                         ):
-                            print("⏭️  本轮真实点赞补抓预算已用完，剩余视频跳过点赞补抓。")
+                            self.reporter.message("⏭️  本轮真实点赞补抓预算已用完，剩余视频跳过点赞补抓。")
                             like_budget_exhausted_notified = True
 
                         summary = self.build_video_duration_summary(following, videos)
@@ -588,11 +583,11 @@ class BilibiliHiatusAnalyzer:
 
                 if start + self.config.video_analysis_batch_size < len(pending_followings):
                     cooldown = self.config.video_analysis_batch_cooldown + random.uniform(0, 5)
-                    print(
+                    self.reporter.message(
                         f"⏸️  视频分析已完成 {start + len(batch)} 位UP主，"
                         f"批次冷却 {cooldown:.0f} 秒后继续..."
                     )
-                    wait_with_progress(cooldown, "B站视频分析批次冷却中")
+                    self.reporter.wait(cooldown, "B站视频分析批次冷却中")
 
         all_video_rows = []
         summary_rows = []
@@ -611,22 +606,20 @@ class BilibiliHiatusAnalyzer:
         save_video_duration_analysis_to_csv(self.config, summary_rows)
         save_video_duration_report(self.config, summary_rows, len(all_video_rows))
 
-        get_console().print(
-            create_summary_panel(
-                "🗂️ B站视频分析输出",
-                [
-                    f"输出文件: {self._format_output_summary([self.config.all_videos_csv, self.config.video_duration_analysis_csv, self.config.video_duration_report_md])}",
-                    f"视频明细: {len(all_video_rows)} 条",
-                    f"UP 汇总: {len(summary_rows)} 位",
-                    f"待下轮补抓: {len(failed_followings)} 位" if failed_followings else "待下轮补抓: 0 位",
-                ],
-                border_style="magenta",
-            )
+        self.reporter.panel(
+            "🗂️ B站视频分析输出",
+            [
+                f"输出文件: {self._format_output_summary([self.config.all_videos_csv, self.config.video_duration_analysis_csv, self.config.video_duration_report_md])}",
+                f"视频明细: {len(all_video_rows)} 条",
+                f"UP 汇总: {len(summary_rows)} 位",
+                f"待下轮补抓: {len(failed_followings)} 位" if failed_followings else "待下轮补抓: 0 位",
+            ],
+            border_style="magenta",
         )
         return duration_progress
 
     def display_top_results(self, results):
-        table = create_table(
+        table = self.reporter.create_table(
             "🏆 B站鸽王排行榜 Top 10",
             [
                 ("排名", "right", "bold"),
@@ -641,7 +634,8 @@ class BilibiliHiatusAnalyzer:
         )
 
         for index, result in enumerate(results[:10], 1):
-            average_update_interval_days = result.get("average_update_interval_days")
+            result_model = AnalysisResult.from_mapping(result, platform="bilibili")
+            average_update_interval_days = result_model.average_update_interval_days
             average_update_text = (
                 f"{average_update_interval_days:.2f}"
                 if isinstance(average_update_interval_days, (int, float))
@@ -649,30 +643,30 @@ class BilibiliHiatusAnalyzer:
             )
             table.add_row(
                 str(index),
-                str(result["uploader_name"]),
-                str(result["days_since_update"]),
-                f"{int(result.get('follower_count') or 0):,}",
-                str(result.get("published_video_count", 0)),
-                str(result.get("average_like_count", 0)),
+                result_model.uploader_name,
+                str(result_model.days_since_update),
+                f"{result_model.follower_count:,}",
+                str(result_model.published_video_count),
+                str(result_model.average_like_count),
                 average_update_text,
-                str(result.get("upload_date", UNKNOWN_DATE)),
+                result_model.upload_date or UNKNOWN_DATE,
             )
 
-        get_console().print()
-        get_console().print(table)
-        get_console().print()
+        self.reporter.render()
+        self.reporter.render(table)
+        self.reporter.render()
 
     def analyze_hiatus(self):
         self.api.check_cookie()
 
-        print("=" * 60)
-        print("🎯 B站催更分析器 - 寻找你关注的UP主中的「鸽王」")
-        print("=" * 60)
-        print()
+        self.reporter.message("=" * 60)
+        self.reporter.message("🎯 B站催更分析器 - 寻找你关注的UP主中的「鸽王」")
+        self.reporter.message("=" * 60)
+        self.reporter.message()
 
         followings = self.api.get_followings_list()
         if not followings:
-            print("❌ 无法获取关注列表，程序退出")
+            self.reporter.message("❌ 无法获取关注列表，程序退出")
             return None
 
         for following in followings:
@@ -688,17 +682,17 @@ class BilibiliHiatusAnalyzer:
         partial_run = self.max_followings is not None and self.max_followings < total_followings
         if partial_run:
             followings = followings[: self.max_followings]
-            print(
+            self.reporter.message(
                 f"?? ????????? | ????={total_followings} ? | "
                 f"?????????? {len(followings)} ?"
             )
-        print(
+        self.reporter.message(
             f"?? ??{order_label}{'????' if order_desc else '????'}????????"
         )
 
         cached_video_results = self.cache_store.load_precise_progress()
         if cached_video_results:
-            print(f"♻️  已加载 {len(cached_video_results)} 条历史抓取缓存。")
+            self.reporter.message(f"♻️  已加载 {len(cached_video_results)} 条历史抓取缓存。")
 
         results_by_mid = {}
         pending_followings = []
@@ -712,21 +706,21 @@ class BilibiliHiatusAnalyzer:
             else:
                 pending_followings.append(following)
 
-        print("🔍 正在精确抓取每位UP主最后一个视频时间...")
+        self.reporter.message("🔍 正在精确抓取每位UP主最后一个视频时间...")
         if self.config.analysis_mode == "fallback":
-            print("   如遇到无法补抓的UP主，将回退到关注列表活跃时间。")
+            self.reporter.message("   如遇到无法补抓的UP主，将回退到关注列表活跃时间。")
         else:
-            print("   当前为精确模式：仅接受视频动态时间作为最终结果。")
-        print()
+            self.reporter.message("   当前为精确模式：仅接受视频动态时间作为最终结果。")
+        self.reporter.message()
 
         failed_followings = []
         if pending_followings:
-            print(f"🎬 仍有 {len(pending_followings)} 位UP主需要精确抓取。")
-            print(
+            self.reporter.message(f"🎬 仍有 {len(pending_followings)} 位UP主需要精确抓取。")
+            self.reporter.message(
                 f"⏸️  先冷却 {self.config.video_analysis_start_delay} 秒，"
                 "降低进入视频动态接口时立刻触发风控的概率..."
             )
-            wait_with_progress(
+            self.reporter.wait(
                 self.config.video_analysis_start_delay,
                 "B站视频分析启动冷却中",
             )
@@ -757,20 +751,20 @@ class BilibiliHiatusAnalyzer:
                     raise
                 if start + self.config.batch_size < len(pending_followings):
                     cooldown = self.config.batch_cooldown + random.uniform(0, 5)
-                    print(
+                    self.reporter.message(
                         f"⏸️  已完成 {start + len(batch)} 位UP主，"
                         f"批次冷却 {cooldown:.0f} 秒后继续..."
                     )
-                    wait_with_progress(cooldown, "B站精确抓取批次冷却中")
+                    self.reporter.wait(cooldown, "B站精确抓取批次冷却中")
 
         for retry_round in range(1, self.config.max_failed_retry_rounds + 1):
             if not failed_followings:
                 break
 
             cooldown = self.config.failed_retry_cooldown * retry_round + random.uniform(0, 10)
-            print()
-            print(f"🔁  第 {retry_round} 轮补抓开始，先冷却 {cooldown:.0f} 秒...")
-            wait_with_progress(cooldown, f"B站补抓第 {retry_round} 轮冷却中")
+            self.reporter.message()
+            self.reporter.message(f"🔁  第 {retry_round} 轮补抓开始，先冷却 {cooldown:.0f} 秒...")
+            self.reporter.wait(cooldown, f"B站补抓第 {retry_round} 轮冷却中")
             failed_followings = self.run_precise_fetch_round(
                 failed_followings,
                 f"补抓第{retry_round}轮",
@@ -779,7 +773,7 @@ class BilibiliHiatusAnalyzer:
             )
 
         if self.config.analysis_mode == "fallback" and failed_followings:
-            print(f"\n↩️  仍有 {len(failed_followings)} 位UP主未完成精确抓取，回退到关注列表活跃时间。")
+            self.reporter.message(f"\n↩️  仍有 {len(failed_followings)} 位UP主未完成精确抓取，回退到关注列表活跃时间。")
             for following in failed_followings:
                 mid = str(following.get("mid"))
                 if mid not in results_by_mid:
@@ -792,41 +786,38 @@ class BilibiliHiatusAnalyzer:
             followings,
         )
         if not results:
-            print("\n❌ 未能获取到任何视频数据")
+            self.reporter.message("\n❌ 未能获取到任何视频数据")
             return None
 
         if self.config.analysis_mode == "precise" and failed_followings:
-            print(f"\n⚠️  仍有 {len(failed_followings)} 位UP主因频率限制未获取成功。")
-            print("   下次运行会自动复用已保存进度，继续补抓剩余UP主。")
+            self.reporter.message(f"\n⚠️  仍有 {len(failed_followings)} 位UP主因频率限制未获取成功。")
+            self.reporter.message("   下次运行会自动复用已保存进度，继续补抓剩余UP主。")
 
         results.sort(key=lambda item: item["days_since_update"], reverse=True)
         self.display_top_results(results)
         save_to_csv(self.config, results, merge_existing=partial_run)
-        get_console().print(
-            create_summary_panel(
-                "🗂️ B站主榜输出",
-                [
-                    f"文件: {self.config.output_csv.name}",
-                    f"结果数: {len(results)} 位UP主",
-                    f"未完成精确抓取: {len(failed_followings)} 位" if failed_followings else "未完成精确抓取: 0 位",
-                ],
-                border_style="green",
-            )
+        self.reporter.panel(
+            "🗂️ B站主榜输出",
+            [
+                f"文件: {self.config.output_csv.name}",
+                f"结果数: {len(results)} 位UP主",
+                f"未完成精确抓取: {len(failed_followings)} 位" if failed_followings else "未完成精确抓取: 0 位",
+            ],
+            border_style="green",
         )
 
         duration_progress = self.analyze_video_durations(followings)
         if duration_progress:
             self.enrich_results_with_profile_and_counts(results, duration_progress, followings)
             save_to_csv(self.config, results, merge_existing=partial_run)
-            get_console().print(
-                create_summary_panel(
-                    "🔄 B站主榜回填完成",
-                    [
-                        f"已回填文件: {self.config.output_csv.name}",
-                        f"视频分析缓存: {len(duration_progress)} 条",
-                    ],
-                    border_style="yellow",
-                )
+            self.reporter.panel(
+                "🔄 B站主榜回填完成",
+                [
+                    f"已回填文件: {self.config.output_csv.name}",
+                    f"视频分析缓存: {len(duration_progress)} 条",
+                ],
+                border_style="yellow",
             )
 
         return results
+
