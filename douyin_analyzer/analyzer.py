@@ -4,7 +4,7 @@ import time
 from loguru import logger
 
 from common.platform_store import read_video_rows_for_uploader
-from common.domain_models import AnalysisResult, VideoDurationSummary
+from common.domain_models import AnalysisResult, CreatorSummary, VideoDurationSummary
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.console_reporter import RichAnalyzerReporter
@@ -180,7 +180,7 @@ class DouyinHiatusAnalyzer:
             if uid not in seen:
                 merged.append(user)
 
-        self.cache_store.save_followings_cache(merged)
+        self.cache_repository.save_followings(merged)
 
     @staticmethod
     def _is_following_integrity_error(error):
@@ -303,7 +303,7 @@ class DouyinHiatusAnalyzer:
             )
             return False
 
-        removed_uids = self.cache_store.remove_unfollowed_user(
+        removed_uids = self.cache_repository.remove_unfollowed_profile(
             homepage=homepage,
             uploader_id=(user or {}).get("sec_uid", ""),
         )
@@ -605,57 +605,34 @@ class DouyinHiatusAnalyzer:
         ).to_dict()
 
     def build_counts_only_summary(self, user):
-        return {
-            "uploader_name": user["nickname"],
-            "uploader_id": user["sec_uid"],
-            "follower_count": user.get("follower_count", ""),
-            "total_favorited": user.get("total_favorited", ""),
+        return CreatorSummary(
+            platform="douyin",
+            uploader_name=str(user["nickname"]),
+            uploader_id=str(user["sec_uid"]),
+            follower_count=user.get("follower_count", ""),
+            total_favorited=user.get("total_favorited", ""),
             # counts 模式只抓基础主页信息，因此分析表至少保留真实视频总数。
-            "total_videos": user.get("aweme_count", ""),
-            "latest_publish_timestamp": "",
-            "total_duration_seconds": "",
-            "average_duration_seconds": "",
-            "average_duration_text": "",
-            "average_like_count": self.calculate_average_like_from_profile(user, ""),
-            "average_update_interval_days": "",
-            "short_video_count": "",
-            "short_video_ratio": "",
-            "medium_video_count": "",
-            "medium_video_ratio": "",
-            "medium_long_video_count": "",
-            "medium_long_video_ratio": "",
-            "long_video_count": "",
-            "long_video_ratio": "",
-            "summary_scope": "counts",
-        }
+            total_videos=user.get("aweme_count", ""),
+            average_like_count=self.calculate_average_like_from_profile(user, ""),
+            summary_scope="counts",
+        ).to_dict()
 
     def build_partial_summary(self, user, latest_video=None):
         latest_publish_timestamp = 0
         if isinstance(latest_video, dict):
             latest_publish_timestamp = normalize_timestamp(latest_video.get("publish_timestamp"))
 
-        return {
-            "uploader_name": user["nickname"],
-            "uploader_id": user["sec_uid"],
-            "follower_count": user.get("follower_count", ""),
-            "total_favorited": user.get("total_favorited", ""),
-            "total_videos": user.get("aweme_count", ""),
-            "latest_publish_timestamp": latest_publish_timestamp,
-            "total_duration_seconds": "",
-            "average_duration_seconds": "",
-            "average_duration_text": "",
-            "average_like_count": self.calculate_average_like_from_profile(user, ""),
-            "average_update_interval_days": "",
-            "short_video_count": "",
-            "short_video_ratio": "",
-            "medium_video_count": "",
-            "medium_video_ratio": "",
-            "medium_long_video_count": "",
-            "medium_long_video_ratio": "",
-            "long_video_count": "",
-            "long_video_ratio": "",
-            "summary_scope": "partial",
-        }
+        return CreatorSummary(
+            platform="douyin",
+            uploader_name=str(user["nickname"]),
+            uploader_id=str(user["sec_uid"]),
+            follower_count=user.get("follower_count", ""),
+            total_favorited=user.get("total_favorited", ""),
+            total_videos=user.get("aweme_count", ""),
+            latest_publish_timestamp=latest_publish_timestamp,
+            average_like_count=self.calculate_average_like_from_profile(user, ""),
+            summary_scope="partial",
+        ).to_dict()
 
     def build_summary_from_cached_entry(self, user, entry):
         if not isinstance(user, dict):
@@ -796,27 +773,31 @@ class DouyinHiatusAnalyzer:
         return False
 
     def build_preserved_full_summary(self, user, summary, latest_video=None):
-        preserved = self.build_partial_summary(user, latest_video)
-        for key in [
-            "total_favorited",
-            "total_favorited_source",
-            "total_duration_seconds",
-            "average_duration_seconds",
-            "average_duration_text",
-            "average_like_count",
-            "average_update_interval_days",
-            "short_video_count",
-            "short_video_ratio",
-            "medium_video_count",
-            "medium_video_ratio",
-            "medium_long_video_count",
-            "medium_long_video_ratio",
-            "long_video_count",
-            "long_video_ratio",
-        ]:
-            preserved[key] = summary.get(key, preserved.get(key))
-        preserved["summary_scope"] = "preserved_full"
-        return preserved
+        partial = self.build_partial_summary(user, latest_video)
+        return CreatorSummary(
+            platform="douyin",
+            uploader_name=partial.get("uploader_name", str(user.get("nickname", ""))),
+            uploader_id=partial.get("uploader_id", str(user.get("sec_uid", ""))),
+            follower_count=partial.get("follower_count", ""),
+            total_favorited=summary.get("total_favorited", partial.get("total_favorited", "")),
+            total_favorited_source=summary.get("total_favorited_source", ""),
+            total_videos=partial.get("total_videos", ""),
+            latest_publish_timestamp=partial.get("latest_publish_timestamp", ""),
+            total_duration_seconds=summary.get("total_duration_seconds", partial.get("total_duration_seconds", "")),
+            average_duration_seconds=summary.get("average_duration_seconds", partial.get("average_duration_seconds", "")),
+            average_duration_text=summary.get("average_duration_text", partial.get("average_duration_text", "")),
+            average_like_count=summary.get("average_like_count", partial.get("average_like_count", "")),
+            average_update_interval_days=summary.get("average_update_interval_days", partial.get("average_update_interval_days", "")),
+            short_video_count=summary.get("short_video_count", partial.get("short_video_count", "")),
+            short_video_ratio=summary.get("short_video_ratio", partial.get("short_video_ratio", "")),
+            medium_video_count=summary.get("medium_video_count", partial.get("medium_video_count", "")),
+            medium_video_ratio=summary.get("medium_video_ratio", partial.get("medium_video_ratio", "")),
+            medium_long_video_count=summary.get("medium_long_video_count", partial.get("medium_long_video_count", "")),
+            medium_long_video_ratio=summary.get("medium_long_video_ratio", partial.get("medium_long_video_ratio", "")),
+            long_video_count=summary.get("long_video_count", partial.get("long_video_count", "")),
+            long_video_ratio=summary.get("long_video_ratio", partial.get("long_video_ratio", "")),
+            summary_scope="preserved_full",
+        ).to_dict()
 
     def normalize_summary_for_mode(self, user, summary, videos, latest_video):
         if self.get_fetch_mode() == "full":
@@ -1227,7 +1208,7 @@ class DouyinHiatusAnalyzer:
         merge_existing=False,
     ):
         if pending_progress_saves:
-            self.cache_store.save_progress(progress)
+            self.cache_repository.save_run_progress(progress)
 
         self.export_service.save_cache_inventory(
             self.build_cache_inventory_rows(
@@ -1293,7 +1274,7 @@ class DouyinHiatusAnalyzer:
     ):
         latest_video = latest_video if isinstance(latest_video, dict) else {}
         result = result if isinstance(result, dict) else {}
-        self.cache_store.append_fetch_manifest(
+        self.cache_repository.record_fetch_manifest(
             {
                 "mode": self.get_fetch_mode(),
                 "uploader_id": (user or {}).get("sec_uid") or result.get("uploader_id") or "",
@@ -1324,7 +1305,7 @@ class DouyinHiatusAnalyzer:
         return result
 
     def record_profile_failure(self, user, exc, stage):
-        self.cache_store.append_failed_profile(
+        self.cache_repository.record_failed_profile(
             user,
             reason=str(exc),
             stage=stage,
@@ -1376,7 +1357,7 @@ class DouyinHiatusAnalyzer:
                 )
                 followings = self.browser_client.get_followings()
                 if followings:
-                    self.cache_store.save_followings_cache(followings)
+                    self.cache_repository.save_followings(followings)
                     cached_followings = followings
                     self.reporter.message(
                         f"🧭 监控模式关注缓存已刷新 | 已写入缓存={len(followings)} 条 | 后续将据此判断是否需要进主页"
@@ -1414,7 +1395,7 @@ class DouyinHiatusAnalyzer:
                 )
                 followings = self.browser_client.get_followings()
                 if followings:
-                    self.cache_store.save_followings_cache(followings)
+                    self.cache_repository.save_followings(followings)
                     self.reporter.message(f"🧭 关注列表刷新成功 | 已写入缓存={len(followings)} 条")
                     logger.info("Douyin followings refreshed | rows={}", len(followings))
             except Exception as exc:
@@ -1814,7 +1795,7 @@ class DouyinHiatusAnalyzer:
                                 "last_fetch_mode": fetch_mode,
                                 "cache_modes": sorted(existing_modes),
                             }
-                        self.cache_store.upsert_video_state_from_progress_entries(
+                        self.cache_repository.save_video_state_entries(
                             {uid: progress[uid]},
                             source_mode="full" if preserve_full_cache else fetch_mode,
                         )
@@ -1823,7 +1804,7 @@ class DouyinHiatusAnalyzer:
                     progress_bar.advance(task_id)
 
                     if pending_progress_saves >= self.config.progress_save_interval_users:
-                        self.cache_store.save_progress(progress)
+                        self.cache_repository.save_run_progress(progress)
                         pending_progress_saves = 0
 
                     if (
@@ -1865,7 +1846,7 @@ class DouyinHiatusAnalyzer:
                         pending_progress_saves = 0
 
             if pending_progress_saves:
-                self.cache_store.save_progress(progress)
+                self.cache_repository.save_run_progress(progress)
             self.merge_updated_followings_cache(cached_followings, verified_users)
 
             self.display_counts_results(results)
@@ -2118,7 +2099,7 @@ class DouyinHiatusAnalyzer:
                             "last_fetch_mode": fetch_mode,
                             "cache_modes": sorted(existing_modes),
                         }
-                    self.cache_store.upsert_video_state_from_progress_entries(
+                    self.cache_repository.save_video_state_entries(
                         {user["sec_uid"]: progress[user["sec_uid"]]},
                         source_mode="full" if preserve_full_cache else fetch_mode,
                     )
@@ -2126,7 +2107,7 @@ class DouyinHiatusAnalyzer:
                     pending_progress_saves += 1
 
                     if pending_progress_saves >= self.config.progress_save_interval_users:
-                        self.cache_store.save_progress(progress)
+                        self.cache_repository.save_run_progress(progress)
                         pending_progress_saves = 0
 
                     if (
@@ -2200,7 +2181,7 @@ class DouyinHiatusAnalyzer:
                     pending_progress_saves = 0
 
         if pending_progress_saves:
-            self.cache_store.save_progress(progress)
+            self.cache_repository.save_run_progress(progress)
 
         if fetch_mode != "full":
             refreshed_total = sum(refresh_reason_counts.values())
@@ -2269,4 +2250,5 @@ class DouyinHiatusAnalyzer:
             border_style="green",
         )
         return results
+
 

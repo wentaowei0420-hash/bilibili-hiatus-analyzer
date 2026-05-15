@@ -352,7 +352,7 @@ class BilibiliHiatusAnalyzer:
                 entry["summary"] = self.build_video_duration_summary(following, videos)
                 entry["cached_at"] = int(time.time())
                 duration_progress[str(mid)] = entry
-                self.cache_store.save_video_duration_progress(duration_progress)
+                self.cache_repository.save_duration_progress(duration_progress)
                 refreshed_count += 1
 
                 if rate_limit_hit:
@@ -410,7 +410,7 @@ class BilibiliHiatusAnalyzer:
         mid_str = str(mid)
         results_by_mid[mid_str] = result_item
         cached_video_results[mid_str] = result_item
-        self.cache_store.save_precise_progress(cached_video_results)
+        self.cache_repository.save_precise_results(cached_video_results)
 
     def handle_precise_video_result(self, following, video_info, results_by_mid, cached_video_results):
         mid = following.get("mid")
@@ -581,12 +581,12 @@ class BilibiliHiatusAnalyzer:
                             "videos": videos,
                             "summary": summary,
                         }
-                        self.cache_store.save_video_duration_progress(duration_progress)
+                        self.cache_repository.save_duration_progress(duration_progress)
 
                 try:
                     check_stop()
                 except OperationCancelled:
-                    self.cache_store.save_video_duration_progress(duration_progress)
+                    self.cache_repository.save_duration_progress(duration_progress)
                     break
 
                 if start + self.config.video_analysis_batch_size < len(pending_followings):
@@ -826,4 +826,5 @@ class BilibiliHiatusAnalyzer:
             )
 
         return results
+
 

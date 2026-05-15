@@ -39,3 +39,57 @@ class AnalyzerCacheRepository:
             for row in (rows or [])
             if isinstance(row, dict)
         ]
+
+    def save_followings_cache(self, followings) -> Any:
+        return self._cache_store.save_followings_cache(followings)
+
+    def save_followings(self, followings) -> Any:
+        return self.save_followings_cache(followings)
+
+    def save_progress(self, progress) -> Any:
+        return self._cache_store.save_progress(progress)
+
+    def save_run_progress(self, progress) -> Any:
+        return self.save_progress(progress)
+
+    def save_precise_progress(self, progress) -> Any:
+        return self._cache_store.save_precise_progress(progress)
+
+    def save_precise_results(self, progress) -> Any:
+        return self.save_precise_progress(progress)
+
+    def save_video_duration_progress(self, progress) -> Any:
+        return self._cache_store.save_video_duration_progress(progress)
+
+    def save_duration_progress(self, progress) -> Any:
+        return self.save_video_duration_progress(progress)
+
+    def append_fetch_manifest(self, row: dict[str, Any]) -> Any:
+        return self._cache_store.append_fetch_manifest(row)
+
+    def record_fetch_manifest(self, row: dict[str, Any]) -> Any:
+        return self.append_fetch_manifest(row)
+
+    def append_failed_profile(self, *args, **kwargs) -> Any:
+        return self._cache_store.append_failed_profile(*args, **kwargs)
+
+    def record_failed_profile(self, *args, **kwargs) -> Any:
+        return self.append_failed_profile(*args, **kwargs)
+
+    def upsert_video_state_from_progress_entries(self, entries, *, source_mode: str) -> Any:
+        return self._cache_store.upsert_video_state_from_progress_entries(
+            entries,
+            source_mode=source_mode,
+        )
+
+    def save_video_state_entries(self, entries, *, source_mode: str) -> Any:
+        return self.upsert_video_state_from_progress_entries(
+            entries,
+            source_mode=source_mode,
+        )
+
+    def remove_unfollowed_user(self, *args, **kwargs) -> Any:
+        return self._cache_store.remove_unfollowed_user(*args, **kwargs)
+
+    def remove_unfollowed_profile(self, *args, **kwargs) -> Any:
+        return self.remove_unfollowed_user(*args, **kwargs)

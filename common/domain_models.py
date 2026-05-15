@@ -193,3 +193,37 @@ class VideoDurationSummary:
         if not self.summary_scope:
             data.pop("summary_scope", None)
         return data
+
+
+@dataclass(slots=True)
+class CreatorSummary:
+    platform: str
+    uploader_id: str
+    uploader_name: str
+    follower_count: Any = ""
+    total_favorited: Any = ""
+    total_videos: Any = ""
+    latest_publish_timestamp: Any = ""
+    total_duration_seconds: Any = ""
+    average_duration_seconds: Any = ""
+    average_duration_text: Any = ""
+    average_like_count: Any = ""
+    average_update_interval_days: Any = ""
+    short_video_count: Any = ""
+    short_video_ratio: Any = ""
+    medium_video_count: Any = ""
+    medium_video_ratio: Any = ""
+    medium_long_video_count: Any = ""
+    medium_long_video_ratio: Any = ""
+    long_video_count: Any = ""
+    long_video_ratio: Any = ""
+    total_favorited_source: Any = ""
+    summary_scope: str = ""
+
+    def to_dict(self, *, include_platform: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_platform:
+            data.pop("platform", None)
+        if not self.total_favorited_source:
+            data.pop("total_favorited_source", None)
+        return data
