@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-from common.domain_models import AnalysisResult, CreatorProfile, VideoDurationSummary
+from common.domain_models import AnalysisResult, CreatorProfile, DataSource, VideoDurationSummary
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from .console_reporter import RichAnalyzerReporter
@@ -81,58 +81,18 @@ class BilibiliHiatusAnalyzer:
         return field, descending, cls.FETCH_ORDER_LABELS[field]
 
     def _build_following_metric_index(self):
-        metric_index = {}
+        return self.cache_repository.get_creator_metric_index()
 
-        precise_progress = self.cache_repository.load_precise_results()
-        for mid, result in (precise_progress or {}).items():
-            if not isinstance(result, dict):
-                continue
-            profile = CreatorProfile.from_mapping(result, platform="bilibili")
-            key = str(profile.uploader_id or mid or "").strip()
-            if not key:
-                continue
-            existing = metric_index.get(key)
-            metric_index[key] = self._merge_creator_metrics(existing, profile)
-
-        duration_progress = self.cache_repository.load_duration_progress()
-        for mid, entry in (duration_progress or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
-            summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
-            profile = CreatorProfile.from_mapping(
-                {
-                    **summary,
-                    **following,
-                    "uploader_id": (following or {}).get("mid") or summary.get("uploader_id") or mid,
-                    "uploader_name": (following or {}).get("uname") or summary.get("uploader_name") or "",
-                    "published_video_count": summary.get("total_videos") or summary.get("published_video_count"),
-                },
-                platform="bilibili",
-            )
-            profile.average_like_count = self._safe_int(summary.get("average_like_count"), 0)
-            key = str(profile.uploader_id or mid or "").strip()
-            if not key:
-                continue
-            existing = metric_index.get(key)
-            metric_index[key] = self._merge_creator_metrics(existing, profile)
-
-        return metric_index
-
-    @staticmethod
-    def _merge_creator_metrics(existing, incoming):
-        if existing is None:
-            return incoming
-        existing.follower_count = max(existing.follower_count, incoming.follower_count)
-        existing.published_video_count = max(
-            existing.published_video_count,
-            incoming.published_video_count,
-        )
-        existing.average_like_count = max(
-            getattr(existing, "average_like_count", 0),
-            getattr(incoming, "average_like_count", 0),
-        )
-        return existing
+    def _check_stop(self, on_cancel=None, *, reraise=True):
+        try:
+            check_stop()
+        except OperationCancelled:
+            if on_cancel:
+                on_cancel()
+            if reraise:
+                raise
+            return False
+        return True
 
     def _resolve_following_sort_value(self, following, field, metric_index):
         profile = CreatorProfile.from_mapping(following if isinstance(following, dict) else {}, platform="bilibili")
@@ -173,7 +133,7 @@ class BilibiliHiatusAnalyzer:
             view_count=video_info["view_count"],
             video_url=video_info.get("video_url")
             or f"https://www.bilibili.com/video/{video_info['bvid']}",
-            data_source="video_api",
+            data_source=DataSource.VIDEO_API.value,
         )
 
     def build_following_result_item(self, following):
@@ -194,7 +154,7 @@ class BilibiliHiatusAnalyzer:
             days_since_last_video=days_since,
             view_count=0,
             video_url="",
-            data_source="followings_mtime",
+            data_source=DataSource.FOLLOWINGS_MTIME.value,
         )
 
     def build_no_video_result_item(self, following):
@@ -212,58 +172,22 @@ class BilibiliHiatusAnalyzer:
             days_since_last_video=0,
             view_count=0,
             video_url="",
-            data_source="no_video",
+            data_source=DataSource.NO_VIDEO.value,
         )
 
     def build_video_duration_summary(self, following, videos):
-        total_videos = len(videos)
-        short_count = sum(1 for video in videos if video["duration_category"] == SHORT_VIDEO_LABEL)
-        medium_count = sum(1 for video in videos if video["duration_category"] == MEDIUM_VIDEO_LABEL)
-        medium_long_count = sum(
-            1 for video in videos if video["duration_category"] == MEDIUM_LONG_VIDEO_LABEL
-        )
-        long_count = sum(1 for video in videos if video["duration_category"] == LONG_VIDEO_LABEL)
-        total_duration_seconds = sum(video["duration_seconds"] for video in videos)
-        average_duration_seconds = int(total_duration_seconds / total_videos) if total_videos else 0
-        average_update_interval_days = calculate_average_update_interval_days(
-            video.get("publish_timestamp") for video in videos
-        )
-        latest_publish_timestamp = max(
-            (normalize_timestamp(video.get("publish_timestamp")) for video in videos),
-            default=0,
-        )
-        fetched_like_videos = [
-            video for video in videos if video.get("bvid") and video.get("like_count_fetched", False)
-        ]
-        total_like_count = sum(int(video.get("like_count") or 0) for video in fetched_like_videos)
-        missing_like_count = sum(
-            1 for video in videos if video.get("bvid") and not video.get("like_count_fetched", False)
-        )
-
-        return VideoDurationSummary(
+        return VideoDurationSummary.from_video_records(
+            following,
+            videos,
             platform="bilibili",
-            uploader_name=str(following.get("uname", "未知UP主")),
-            uploader_id=str(following.get("mid") or ""),
-            follower_count=self._safe_int(following.get("follower_count"), 0),
-            total_videos=total_videos,
-            latest_publish_timestamp=latest_publish_timestamp,
-            total_duration_seconds=total_duration_seconds,
-            average_duration_seconds=average_duration_seconds,
-            average_duration_text=seconds_to_duration_text(average_duration_seconds),
-            average_like_count=int(total_like_count / len(fetched_like_videos))
-            if fetched_like_videos
-            else 0,
-            average_update_interval_days=average_update_interval_days,
-            missing_like_count=missing_like_count,
-            like_data_complete=missing_like_count == 0,
-            short_video_count=short_count,
-            short_video_ratio=format_ratio(short_count, total_videos),
-            medium_video_count=medium_count,
-            medium_video_ratio=format_ratio(medium_count, total_videos),
-            medium_long_video_count=medium_long_count,
-            medium_long_video_ratio=format_ratio(medium_long_count, total_videos),
-            long_video_count=long_count,
-            long_video_ratio=format_ratio(long_count, total_videos),
+            short_label=SHORT_VIDEO_LABEL,
+            medium_label=MEDIUM_VIDEO_LABEL,
+            medium_long_label=MEDIUM_LONG_VIDEO_LABEL,
+            long_label=LONG_VIDEO_LABEL,
+            average_update_interval_fn=calculate_average_update_interval_days,
+            duration_text_fn=seconds_to_duration_text,
+            ratio_fn=format_ratio,
+            timestamp_normalizer=normalize_timestamp,
         ).to_dict()
 
     @staticmethod
@@ -272,31 +196,15 @@ class BilibiliHiatusAnalyzer:
 
     def populate_duration_summary_defaults(self, summary, videos):
         completed_summary = dict(summary or {})
-        completed_summary.setdefault("total_videos", len(videos or []))
-        completed_summary.setdefault(
+        defaults = self.build_video_duration_summary({}, videos or [])
+        for key in (
+            "total_videos",
             "average_update_interval_days",
-            calculate_average_update_interval_days(
-                video.get("publish_timestamp") for video in (videos or [])
-            ),
-        )
-        fetched_like_videos = [
-            video
-            for video in (videos or [])
-            if video.get("bvid") and video.get("like_count_fetched", False)
-        ]
-        completed_summary.setdefault(
             "average_like_count",
-            int(sum(int(video.get("like_count") or 0) for video in fetched_like_videos) / len(fetched_like_videos))
-            if fetched_like_videos
-            else 0,
-        )
-        missing_like_count = sum(
-            1
-            for video in (videos or [])
-            if video.get("bvid") and not video.get("like_count_fetched", False)
-        )
-        completed_summary.setdefault("missing_like_count", missing_like_count)
-        completed_summary.setdefault("like_data_complete", missing_like_count == 0)
+            "missing_like_count",
+            "like_data_complete",
+        ):
+            completed_summary.setdefault(key, defaults.get(key))
         return completed_summary
 
     @staticmethod
@@ -326,12 +234,11 @@ class BilibiliHiatusAnalyzer:
         following_map = {str(following.get("mid")): following for following in followings}
         refreshed_count = 0
         rate_limit_hit = False
-        pending_entries = [
-            (mid, entry)
-            for mid, entry in duration_progress.items()
-            if entry.get("videos", [])
-            and self.count_missing_like_videos(entry.get("videos", [])) > 0
-        ]
+        pending_entries = []
+        for mid, entry in self.cache_repository.iter_duration_progress_entries(duration_progress):
+            videos, _summary = self.cache_repository.duration_progress_payload(entry)
+            if videos and self.count_missing_like_videos(videos) > 0:
+                pending_entries.append((mid, entry))
 
         if pending_entries:
             self.reporter.message(f"👍 准备为 {len(pending_entries)} 位UP主补抓历史点赞数据...")
@@ -343,7 +250,7 @@ class BilibiliHiatusAnalyzer:
                 if remaining_budget <= 0:
                     break
 
-                videos = entry.get("videos", [])
+                videos, _summary = self.cache_repository.duration_progress_payload(entry)
                 following = following_map.get(str(mid), {})
                 uname = entry.get("uploader_name") or following.get("uname", "未知UP主")
                 remaining_budget, rate_limit_hit = self.enrich_video_like_counts_with_budget(
@@ -386,11 +293,9 @@ class BilibiliHiatusAnalyzer:
                 result.following_group_ids = result.following_group_ids or "0"
                 result.following_group_names = result.following_group_names or DEFAULT_GROUP_NAME
 
-            entry = progress.get(str(uploader_id), {})
-            summary = self.populate_duration_summary_defaults(
-                entry.get("summary", {}),
-                entry.get("videos", []),
-            )
+            entry = self.cache_repository.duration_progress_entry(progress, uploader_id)
+            videos, cached_summary = self.cache_repository.duration_progress_payload(entry)
+            summary = self.populate_duration_summary_defaults(cached_summary, videos)
             if summary:
                 result.published_video_count = self._safe_int(
                     summary.get("total_videos", result.published_video_count),
@@ -523,7 +428,8 @@ class BilibiliHiatusAnalyzer:
             following
             for following in followings
             if self.cache_repository.should_refresh_duration_result(
-                following, duration_progress.get(str(following.get("mid")))
+                following,
+                self.cache_repository.duration_progress_entry(duration_progress, following.get("mid")),
             )
         ]
         failed_followings = []
@@ -545,7 +451,7 @@ class BilibiliHiatusAnalyzer:
         with self.reporter.progress() as progress:
             task_id = progress.add_task("全量视频时长分析", total=len(pending_followings))
             for start in range(0, len(pending_followings), self.config.video_analysis_batch_size):
-                check_stop()
+                self._check_stop()
                 batch = pending_followings[start:start + self.config.video_analysis_batch_size]
                 with ThreadPoolExecutor(max_workers=self.config.video_analysis_workers) as executor:
                     futures = {
@@ -578,19 +484,19 @@ class BilibiliHiatusAnalyzer:
                             like_budget_exhausted_notified = True
 
                         summary = self.build_video_duration_summary(following, videos)
-                        duration_progress[str(following.get("mid"))] = {
-                            "uploader_name": uname,
-                            "uploader_id": following.get("mid"),
-                            "cached_at": int(time.time()),
-                            "videos": videos,
-                            "summary": summary,
-                        }
+                        duration_progress[str(following.get("mid"))] = (
+                            self.cache_repository.build_duration_progress_entry(
+                                following,
+                                videos,
+                                summary,
+                            )
+                        )
                         self.cache_repository.save_duration_progress(duration_progress)
 
-                try:
-                    check_stop()
-                except OperationCancelled:
-                    self.cache_repository.save_duration_progress(duration_progress)
+                if not self._check_stop(
+                    lambda: self.cache_repository.save_duration_progress(duration_progress),
+                    reraise=False,
+                ):
                     break
 
                 if start + self.config.video_analysis_batch_size < len(pending_followings):
@@ -604,12 +510,11 @@ class BilibiliHiatusAnalyzer:
         all_video_rows = []
         summary_rows = []
         for following in followings:
-            check_stop()
-            entry = duration_progress.get(str(following.get("mid")))
-            if not isinstance(entry, dict):
+            self._check_stop()
+            entry = self.cache_repository.duration_progress_entry(duration_progress, following.get("mid"))
+            if not entry:
                 continue
-            videos = entry.get("videos", []) if isinstance(entry.get("videos"), list) else []
-            summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
+            videos, summary = self.cache_repository.duration_progress_payload(entry)
             all_video_rows.extend(videos)
             if summary:
                 summary_rows.append(summary)
@@ -679,7 +584,7 @@ class BilibiliHiatusAnalyzer:
             return [], False
 
         for following in followings:
-            check_stop()
+            self._check_stop()
             relation_stat = self.api.get_uploader_relation_stat(
                 following.get("mid"),
                 following.get("uname", "UP主"),
@@ -755,11 +660,7 @@ class BilibiliHiatusAnalyzer:
                         cached_video_results,
                     )
                 )
-                try:
-                    check_stop()
-                except OperationCancelled:
-                    self._save_partial_results(results_by_mid, followings)
-                    raise
+                self._check_stop(lambda: self._save_partial_results(results_by_mid, followings))
                 if start + self.config.batch_size < len(pending_followings):
                     cooldown = self.config.batch_cooldown + random.uniform(0, 5)
                     self.reporter.message(

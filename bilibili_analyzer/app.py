@@ -13,6 +13,7 @@ from common.platform_store import (
     replace_video_rows_for_uploader,
     upsert_creator_rows,
 )
+from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
 from .analyzer import BilibiliHiatusAnalyzer
 from .bilibili_api import BilibiliApi
@@ -67,33 +68,11 @@ def _remember_bilibili_uid_metrics(metric_index, uid, *, follower_count=None, pu
 
 
 def load_bilibili_uid_order_index(cache_store):
-    metric_index = {}
-
-    for uid, result in (cache_store.load_precise_progress() or {}).items():
-        if not isinstance(result, dict):
-            continue
-        _remember_bilibili_uid_metrics(
-            metric_index,
-            result.get("uploader_id") or uid,
-            follower_count=result.get("follower_count"),
-            published_video_count=result.get("published_video_count"),
-            average_like_count=result.get("average_like_count"),
-        )
-
-    for uid, entry in (cache_store.load_video_duration_progress() or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
-        summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
-        _remember_bilibili_uid_metrics(
-            metric_index,
-            (following or {}).get("mid") or summary.get("uploader_id") or uid,
-            follower_count=(following or {}).get("follower_count") or summary.get("follower_count"),
-            published_video_count=summary.get("total_videos") or summary.get("published_video_count"),
-            average_like_count=summary.get("average_like_count"),
-        )
-
-    return metric_index
+    repository = AnalyzerCacheRepository(cache_store, platform="bilibili")
+    return {
+        uid: profile.to_dict()
+        for uid, profile in repository.get_creator_metric_index().items()
+    }
 
 
 def get_bilibili_uid_fetch_order():

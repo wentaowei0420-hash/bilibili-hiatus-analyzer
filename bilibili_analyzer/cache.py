@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime
 
+from common.domain_models import DataSource
 from common.platform_store import upsert_cache_entries
 
 from .logging_utils import smart_print as print
@@ -31,7 +32,10 @@ class CacheStore:
         for mid, result in raw_results.items():
             if not isinstance(result, dict):
                 continue
-            if result.get("data_source") == "video_api" and result.get("upload_date") == UNKNOWN_DATE:
+            if (
+                result.get("data_source") == DataSource.VIDEO_API.value
+                and result.get("upload_date") == UNKNOWN_DATE
+            ):
                 continue
             results[mid] = result
         return results
@@ -99,7 +103,7 @@ class CacheStore:
             return True
 
         data_source = cached_result.get("data_source")
-        if data_source not in ("video_api", "no_video"):
+        if data_source not in (DataSource.VIDEO_API.value, DataSource.NO_VIDEO.value):
             return True
 
         if self.is_cache_expired(cached_result.get("cached_at"), self.config.precise_cache_max_age_hours):
@@ -109,7 +113,7 @@ class CacheStore:
         if not following_mtime:
             return False
 
-        if data_source == "video_api":
+        if data_source == DataSource.VIDEO_API.value:
             cached_upload_timestamp = normalize_timestamp(cached_result.get("upload_timestamp"))
             if not cached_upload_timestamp:
                 return True
@@ -145,14 +149,14 @@ class CacheStore:
             return result
 
         data_source = result.get("data_source")
-        if data_source == "video_api":
+        if data_source == DataSource.VIDEO_API.value:
             upload_timestamp = normalize_timestamp(result.get("upload_timestamp"))
             if upload_timestamp:
                 result["upload_date"] = timestamp_to_date(upload_timestamp)
                 days_since = calculate_days_since(upload_timestamp)
                 result["days_since_update"] = days_since
                 result["days_since_last_video"] = days_since
-        elif data_source == "followings_mtime":
+        elif data_source == DataSource.FOLLOWINGS_MTIME.value:
             activity_timestamp = normalize_timestamp(result.get("activity_timestamp"))
             if activity_timestamp:
                 result["upload_date"] = timestamp_to_date(activity_timestamp)

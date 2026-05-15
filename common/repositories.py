@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .domain_models import AnalysisResult, CreatorProfile, VideoEntry
@@ -39,6 +40,121 @@ class AnalyzerCacheRepository:
             for row in (rows or [])
             if isinstance(row, dict)
         ]
+
+    @staticmethod
+    def _merge_creator_metrics(existing: CreatorProfile | None, incoming: CreatorProfile) -> CreatorProfile:
+        if existing is None:
+            return incoming
+        existing.follower_count = max(existing.follower_count, incoming.follower_count)
+        existing.published_video_count = max(
+            existing.published_video_count,
+            incoming.published_video_count,
+        )
+        existing.average_like_count = max(
+            existing.average_like_count,
+            incoming.average_like_count,
+        )
+        return existing
+
+    def _remember_creator_metric(
+        self,
+        metric_index: dict[str, CreatorProfile],
+        profile: CreatorProfile,
+        fallback_id: Any = "",
+    ) -> None:
+        key = str(profile.uploader_id or fallback_id or "").strip()
+        if not key:
+            return
+        metric_index[key] = self._merge_creator_metrics(metric_index.get(key), profile)
+
+    def get_creator_metric_index(self) -> dict[str, CreatorProfile]:
+        metric_index: dict[str, CreatorProfile] = {}
+
+        for uploader_id, result in (self.load_precise_results() or {}).items():
+            if not isinstance(result, dict):
+                continue
+            self._remember_creator_metric(
+                metric_index,
+                self.creator_from_cache(result),
+                uploader_id,
+            )
+
+        for uploader_id, entry in (self.load_duration_progress() or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            following = entry.get("following", {}) if isinstance(entry.get("following"), dict) else {}
+            summary = entry.get("summary", {}) if isinstance(entry.get("summary"), dict) else {}
+            profile = self.creator_from_cache(
+                {
+                    **summary,
+                    **following,
+                    "uploader_id": (
+                        (following or {}).get("mid")
+                        or summary.get("uploader_id")
+                        or entry.get("uploader_id")
+                        or uploader_id
+                    ),
+                    "uploader_name": (
+                        (following or {}).get("uname")
+                        or summary.get("uploader_name")
+                        or entry.get("uploader_name")
+                        or ""
+                    ),
+                    "published_video_count": (
+                        summary.get("total_videos")
+                        or summary.get("published_video_count")
+                    ),
+                }
+            )
+            self._remember_creator_metric(metric_index, profile, uploader_id)
+
+        return metric_index
+
+    def get_creator_metrics(self, uploader_id: Any) -> CreatorProfile | None:
+        return self.get_creator_metric_index().get(str(uploader_id or "").strip())
+
+    @staticmethod
+    def duration_progress_entry(progress: Any, uploader_id: Any) -> dict[str, Any]:
+        if not isinstance(progress, dict):
+            return {}
+        entry = progress.get(str(uploader_id or ""))
+        return entry if isinstance(entry, dict) else {}
+
+    @staticmethod
+    def duration_progress_payload(entry: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not isinstance(entry, dict):
+            return [], {}
+        videos = entry.get("videos", [])
+        summary = entry.get("summary", {})
+        return (
+            videos if isinstance(videos, list) else [],
+            summary if isinstance(summary, dict) else {},
+        )
+
+    @staticmethod
+    def iter_duration_progress_entries(progress: Any):
+        if not isinstance(progress, dict):
+            return
+        for uploader_id, entry in progress.items():
+            if isinstance(entry, dict):
+                yield str(uploader_id), entry
+
+    @staticmethod
+    def build_duration_progress_entry(
+        following: dict[str, Any],
+        videos,
+        summary: dict[str, Any],
+        *,
+        cached_at: int | None = None,
+    ) -> dict[str, Any]:
+        following = following or {}
+        return {
+            "uploader_name": following.get("uname") or following.get("uploader_name") or "",
+            "uploader_id": following.get("mid") or following.get("uploader_id") or "",
+            "cached_at": int(time.time()) if cached_at is None else cached_at,
+            "videos": videos or [],
+            "summary": summary or {},
+        }
 
     def load_followings(self):
         return self._cache_store.load_followings_cache()

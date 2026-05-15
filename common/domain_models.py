@@ -1,7 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping, Optional
+from enum import Enum
+from typing import Any, Callable, Iterable, Mapping, Optional
+
+
+class DataSource(str, Enum):
+    VIDEO_API = "video_api"
+    FOLLOWINGS_MTIME = "followings_mtime"
+    NO_VIDEO = "no_video"
+
+    @classmethod
+    def normalize(cls, value: Any) -> str:
+        if isinstance(value, cls):
+            return value.value
+        text = str(value or "")
+        return text if text in {item.value for item in cls} else text
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -154,7 +168,7 @@ class AnalysisResult:
             days_since_last_video=data.get("days_since_last_video", data.get("days_since_update", "")),
             view_count=data.get("view_count", 0),
             video_url=str(data.get("video_url") or ""),
-            data_source=str(data.get("data_source") or ""),
+            data_source=DataSource.normalize(data.get("data_source")),
         )
 
     def to_dict(self, *, include_platform: bool = False) -> dict[str, Any]:
@@ -203,6 +217,93 @@ class VideoDurationSummary:
     missing_like_count: int = 0
     like_data_complete: bool = True
     summary_scope: str = ""
+
+    @classmethod
+    def from_video_records(
+        cls,
+        following: Mapping[str, Any],
+        videos: Iterable[Mapping[str, Any]],
+        *,
+        platform: str,
+        short_label: str,
+        medium_label: str,
+        medium_long_label: str,
+        long_label: str,
+        average_update_interval_fn: Callable[[Iterable[Any]], Optional[float]],
+        duration_text_fn: Callable[[int], str],
+        ratio_fn: Callable[[int, int], str],
+        timestamp_normalizer: Callable[[Any], int] = _safe_int,
+        video_id_keys: tuple[str, ...] = ("bvid",),
+        like_fetched_key: str = "like_count_fetched",
+    ) -> "VideoDurationSummary":
+        following = following or {}
+        video_rows = list(videos or [])
+        total_videos = len(video_rows)
+
+        def count_category(label: str) -> int:
+            return sum(1 for video in video_rows if video.get("duration_category") == label)
+
+        def has_video_id(video: Mapping[str, Any]) -> bool:
+            return any(video.get(key) for key in video_id_keys)
+
+        total_duration_seconds = sum(_safe_int(video.get("duration_seconds")) for video in video_rows)
+        average_duration_seconds = int(total_duration_seconds / total_videos) if total_videos else 0
+        fetched_like_videos = [
+            video
+            for video in video_rows
+            if has_video_id(video) and video.get(like_fetched_key, False)
+        ]
+        total_like_count = sum(_safe_int(video.get("like_count")) for video in fetched_like_videos)
+        missing_like_count = sum(
+            1 for video in video_rows if has_video_id(video) and not video.get(like_fetched_key, False)
+        )
+
+        short_count = count_category(short_label)
+        medium_count = count_category(medium_label)
+        medium_long_count = count_category(medium_long_label)
+        long_count = count_category(long_label)
+
+        return cls(
+            platform=platform,
+            uploader_name=str(
+                following.get("uname")
+                or following.get("nickname")
+                or following.get("uploader_name")
+                or "未知UP主"
+            ),
+            uploader_id=str(
+                following.get("mid")
+                or following.get("sec_uid")
+                or following.get("uid")
+                or following.get("uploader_id")
+                or ""
+            ),
+            follower_count=_safe_int(following.get("follower_count"), 0),
+            total_videos=total_videos,
+            latest_publish_timestamp=max(
+                (timestamp_normalizer(video.get("publish_timestamp")) for video in video_rows),
+                default=0,
+            ),
+            total_duration_seconds=total_duration_seconds,
+            average_duration_seconds=average_duration_seconds,
+            average_duration_text=duration_text_fn(average_duration_seconds),
+            average_like_count=int(total_like_count / len(fetched_like_videos))
+            if fetched_like_videos
+            else 0,
+            average_update_interval_days=average_update_interval_fn(
+                video.get("publish_timestamp") for video in video_rows
+            ),
+            missing_like_count=missing_like_count,
+            like_data_complete=missing_like_count == 0,
+            short_video_count=short_count,
+            short_video_ratio=ratio_fn(short_count, total_videos),
+            medium_video_count=medium_count,
+            medium_video_ratio=ratio_fn(medium_count, total_videos),
+            medium_long_video_count=medium_long_count,
+            medium_long_video_ratio=ratio_fn(medium_long_count, total_videos),
+            long_video_count=long_count,
+            long_video_ratio=ratio_fn(long_count, total_videos),
+        )
 
     def to_dict(self, *, include_empty_platform: bool = False) -> dict[str, Any]:
         data = asdict(self)
