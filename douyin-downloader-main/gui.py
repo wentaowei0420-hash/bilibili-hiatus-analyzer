@@ -25,6 +25,8 @@ from utils.validators import sanitize_filename
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_FILENAME_TEMPLATE = "等级_UP主_视频标题_点赞数"
+GUI_SETTINGS_KEY = "high_like_gui"
 
 
 class HighLikeDownloaderGUI:
@@ -49,19 +51,38 @@ class HighLikeDownloaderGUI:
         self.active_like_threshold = 10000
         self.preview_after_id = None
 
-        self.csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_CSV))
-        self.failed_csv_path = tk.StringVar(value=str(PROJECT_ROOT / HIGH_LIKE_FAILED_CSV))
-        self.config_path = tk.StringVar(value=str(PROJECT_ROOT / "config.yml"))
-        self.download_path = tk.StringVar(
-            value=self._load_config_download_path(str(PROJECT_ROOT / "config.yml"))
+        default_config_path = str(PROJECT_ROOT / "config.yml")
+        saved_gui_settings = self._load_gui_settings(default_config_path)
+        self.csv_path = tk.StringVar(
+            value=str(saved_gui_settings.get("csv_path") or PROJECT_ROOT / HIGH_LIKE_CSV)
         )
-        self.batch_count = tk.IntVar(value=20)
-        self.skip_failed_records = tk.BooleanVar(value=False)
-        self.saved_filename_template = self._load_config_filename_template(str(PROJECT_ROOT / "config.yml"))
+        self.failed_csv_path = tk.StringVar(
+            value=str(saved_gui_settings.get("failed_csv_path") or PROJECT_ROOT / HIGH_LIKE_FAILED_CSV)
+        )
+        self.config_path = tk.StringVar(value=default_config_path)
+        self.download_path = tk.StringVar(
+            value=str(
+                self._resolve_download_path(
+                    saved_gui_settings.get("download_path")
+                    or self._load_config_download_path(default_config_path)
+                )
+            )
+        )
+        self.batch_count = tk.IntVar(
+            value=self._coerce_int(saved_gui_settings.get("batch_count"), 20, minimum=1)
+        )
+        self.skip_failed_records = tk.BooleanVar(value=bool(saved_gui_settings.get("skip_failed_records", False)))
+        self.saved_filename_template = self._load_config_filename_template(default_config_path)
         self.filename_template = tk.StringVar(value=self.saved_filename_template)
-        self.download_filter_mode = tk.StringVar(value="全部CSV")
-        self.download_filter_grade = tk.StringVar(value="A")
-        self.download_like_threshold = tk.IntVar(value=10000)
+        self.download_filter_mode = tk.StringVar(
+            value=saved_gui_settings.get("download_filter_mode") or "全部CSV"
+        )
+        self.download_filter_grade = tk.StringVar(
+            value=self._normalize_grade(saved_gui_settings.get("download_filter_grade")) or "A"
+        )
+        self.download_like_threshold = tk.IntVar(
+            value=self._coerce_int(saved_gui_settings.get("download_like_threshold"), 10000, minimum=0)
+        )
 
         self.total_count = tk.StringVar(value="0")
         self.filtered_count = tk.StringVar(value="0")
@@ -130,7 +151,13 @@ class HighLikeDownloaderGUI:
             text="一键重置",
             command=self.reset_download_records,
         )
-        self.reset_button.pack(side=tk.LEFT)
+        self.reset_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.save_settings_button = ttk.Button(
+            controls,
+            text="保存当前设置",
+            command=self.save_current_settings,
+        )
+        self.save_settings_button.pack(side=tk.LEFT)
 
         filter_frame = ttk.LabelFrame(outer, text="下载筛选", padding=10)
         filter_frame.pack(fill=tk.X, pady=(10, 0))
@@ -287,7 +314,25 @@ class HighLikeDownloaderGUI:
                 return template
         except Exception:
             pass
-        return "等级_UP主_视频标题_点赞数"
+        return DEFAULT_FILENAME_TEMPLATE
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int, minimum: int | None = None) -> int:
+        try:
+            result = int(float(value))
+        except (TypeError, ValueError, tk.TclError):
+            result = default
+        if minimum is not None:
+            result = max(result, minimum)
+        return result
+
+    def _load_gui_settings(self, config_path: str) -> dict[str, Any]:
+        try:
+            config = ConfigLoader(config_path)
+            settings = config.get(GUI_SETTINGS_KEY, {})
+        except Exception:
+            return {}
+        return settings if isinstance(settings, dict) else {}
 
     @staticmethod
     def _resolve_download_path(path_value: str) -> Path:
@@ -320,7 +365,17 @@ class HighLikeDownloaderGUI:
         )
         if path:
             self.config_path.set(path)
-            self.download_path.set(self._load_config_download_path(path))
+            settings = self._load_gui_settings(path)
+            self.csv_path.set(str(settings.get("csv_path") or self.csv_path.get()))
+            self.failed_csv_path.set(str(settings.get("failed_csv_path") or self.failed_csv_path.get()))
+            self.download_path.set(str(self._resolve_download_path(settings.get("download_path") or self._load_config_download_path(path))))
+            self.batch_count.set(self._coerce_int(settings.get("batch_count"), self.batch_count.get(), minimum=1))
+            self.skip_failed_records.set(bool(settings.get("skip_failed_records", self.skip_failed_records.get())))
+            self.download_filter_mode.set(settings.get("download_filter_mode") or self.download_filter_mode.get())
+            self.download_filter_grade.set(self._normalize_grade(settings.get("download_filter_grade")) or self.download_filter_grade.get())
+            self.download_like_threshold.set(
+                self._coerce_int(settings.get("download_like_threshold"), self.download_like_threshold.get(), minimum=0)
+            )
             self.saved_filename_template = self._load_config_filename_template(path)
             self.filename_template.set(self.saved_filename_template)
             self._schedule_filename_preview_update()
@@ -348,7 +403,7 @@ class HighLikeDownloaderGUI:
             self.status.set("命名格式已修改，点击“保存命名设置”后生效")
 
     def save_filename_template(self):
-        template = self.filename_template.get().strip() or "等级_UP主_视频标题_点赞数"
+        template = self.filename_template.get().strip() or DEFAULT_FILENAME_TEMPLATE
         config_path = self.config_path.get().strip() or str(PROJECT_ROOT / "config.yml")
         try:
             config = ConfigLoader(config_path)
@@ -362,6 +417,42 @@ class HighLikeDownloaderGUI:
         self.filename_template.set(template)
         self.status.set("命名设置已保存，后续将自动复用")
         self._log(f"命名设置已保存：{template}")
+        self._update_filename_preview()
+
+    def save_current_settings(self):
+        config_path = self.config_path.get().strip() or str(PROJECT_ROOT / "config.yml")
+        template = self.filename_template.get().strip() or DEFAULT_FILENAME_TEMPLATE
+        try:
+            download_path = str(self._resolve_download_path(self.download_path.get()))
+            settings = {
+                "csv_path": self.csv_path.get().strip(),
+                "failed_csv_path": self.failed_csv_path.get().strip(),
+                "download_path": download_path,
+                "batch_count": self._coerce_int(self.batch_count.get(), 20, minimum=1),
+                "skip_failed_records": bool(self.skip_failed_records.get()),
+                "download_filter_mode": self.download_filter_mode.get().strip() or "全部CSV",
+                "download_filter_grade": self._normalize_grade(self.download_filter_grade.get()) or "A",
+                "download_like_threshold": self._coerce_int(
+                    self.download_like_threshold.get(),
+                    10000,
+                    minimum=0,
+                ),
+            }
+            config = ConfigLoader(config_path)
+            config.update(
+                path=download_path,
+                filename_template=template,
+                **{GUI_SETTINGS_KEY: settings},
+            )
+            config.save(config_path)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"当前设置保存失败：{exc}")
+            return
+
+        self.saved_filename_template = template
+        self.filename_template.set(template)
+        self.status.set("当前下载设置已保存，后续打开会自动复用")
+        self._log(f"当前下载设置已保存：{config_path}")
         self._update_filename_preview()
 
     def _update_filename_preview(self):
@@ -399,7 +490,7 @@ class HighLikeDownloaderGUI:
         except Exception:
             row = self._filename_context_for_row(row)
         aweme_id = str(row.get("aweme_id") or "").strip()
-        template = self.saved_filename_template or "等级_UP主_视频标题_点赞数"
+        template = self.saved_filename_template or DEFAULT_FILENAME_TEMPLATE
         values = {
             "date": row.get("date") or row.get("发布时间") or "",
             "title": row.get("video_title") or "",
@@ -592,6 +683,7 @@ class HighLikeDownloaderGUI:
         self.skip_failed_button.configure(state=state)
         self.reset_button.configure(state=state)
         self.save_filename_button.configure(state=state)
+        self.save_settings_button.configure(state=state)
         self.filter_mode_combo.configure(state=tk.DISABLED if busy else "readonly")
         self.grade_combo.configure(state=tk.DISABLED if busy else "readonly")
         self.like_threshold_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)

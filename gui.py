@@ -59,7 +59,7 @@ EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
 )
 EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
 EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
-AUTO_FULL_INTERVAL_MS = 3 * 60 * 60 * 1000
+DEFAULT_AUTO_FULL_INTERVAL_MINUTES = 180
 
 BILIBILI_RUNTIME_FIELDS = [
     ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
@@ -3555,8 +3555,8 @@ class MainWindow(QMainWindow):
         self.fetch_order_settings = _load_default_fetch_order_settings()
         self.auto_full_enabled = False
         self.auto_full_next_run_at = None
+        self._loading_gui_config = False
         self.auto_full_timer = QTimer(self)
-        self.auto_full_timer.setInterval(AUTO_FULL_INTERVAL_MS)
         self.auto_full_timer.timeout.connect(self._on_auto_full_timer)
         self._progress_current = 0
         self._progress_total = 0
@@ -3717,9 +3717,23 @@ class MainWindow(QMainWindow):
         self.high_like_spin.setMaximumWidth(180)
         self.high_like_spin.setToolTip("导出抖音高赞视频时使用，其它模式不会使用该参数。")
         self.auto_full_button = QPushButton("自动 full：关闭")
-        self.auto_full_button.setToolTip("开启后每 3 小时按当前界面参数自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
+        self.auto_full_button.setToolTip("开启后按左侧间隔自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
         self.auto_full_button.clicked.connect(self._toggle_auto_full_mode)
-        add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", self.auto_full_button)
+        self.auto_full_interval_spin = QSpinBox()
+        self.auto_full_interval_spin.setRange(1, 10080)
+        self.auto_full_interval_spin.setValue(DEFAULT_AUTO_FULL_INTERVAL_MINUTES)
+        self.auto_full_interval_spin.setSuffix(" 分钟")
+        self.auto_full_interval_spin.setMaximumWidth(140)
+        self.auto_full_interval_spin.setToolTip("自动 full 的触发间隔。修改后会立即保存，并在已开启时重新计算下一次触发时间。")
+        self.auto_full_interval_spin.valueChanged.connect(self._on_auto_full_interval_changed)
+        auto_full_row = QHBoxLayout()
+        auto_full_row.setContentsMargins(0, 0, 0, 0)
+        auto_full_row.addWidget(QLabel("间隔"))
+        auto_full_row.addWidget(self.auto_full_interval_spin)
+        auto_full_row.addWidget(self.auto_full_button, stretch=1)
+        auto_full_widget = QWidget()
+        auto_full_widget.setLayout(auto_full_row)
+        add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", auto_full_widget)
         layout.addWidget(settings_group)
 
         self.log_dialog = LogCenterDialog(self)
@@ -3847,6 +3861,7 @@ class MainWindow(QMainWindow):
         self.uid_fetch_partial_radio.setEnabled(editable)
         self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
         self.high_like_spin.setEnabled(editable)
+        self.auto_full_interval_spin.setEnabled(editable)
         self.high_like_export_button.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
@@ -3906,6 +3921,7 @@ class MainWindow(QMainWindow):
             "douyin_runtime_settings": self.douyin_runtime_settings,
             "fetch_order_settings": self.fetch_order_settings,
             "auto_full_enabled": self.auto_full_enabled,
+            "auto_full_interval_minutes": self.auto_full_interval_spin.value(),
         }
 
     def _save_gui_config(self):
@@ -3914,60 +3930,68 @@ class MainWindow(QMainWindow):
     def _load_gui_config(self):
         if not GUI_CONFIG_PATH.exists():
             return
+        self._loading_gui_config = True
         try:
             with GUI_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
                 data = json.load(config_file)
         except Exception:
+            self._loading_gui_config = False
             return
 
-        for combo, key in (
-            (self.platform_combo, "platform"),
-            (self.action_combo, "action"),
-            (self.bilibili_mode_combo, "bilibili_mode"),
-            (self.douyin_mode_combo, "douyin_fetch_mode"),
-            (self.backend_combo, "douyin_backend"),
-        ):
-            index = self._combo_index_by_data(combo, data.get(key))
-            if index >= 0:
-                combo.setCurrentIndex(index)
+        try:
+            for combo, key in (
+                (self.platform_combo, "platform"),
+                (self.action_combo, "action"),
+                (self.bilibili_mode_combo, "bilibili_mode"),
+                (self.douyin_mode_combo, "douyin_fetch_mode"),
+                (self.backend_combo, "douyin_backend"),
+            ):
+                index = self._combo_index_by_data(combo, data.get(key))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
 
-        if bool(data.get("uid_limit_enabled", False)):
-            self.uid_fetch_partial_radio.setChecked(True)
-        else:
-            self.uid_fetch_all_radio.setChecked(True)
-        self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
-        self.monitor_video_limit_spin.setValue(
-            int(data.get("monitor_video_limit", self.monitor_video_limit_spin.value()) or self.monitor_video_limit_spin.value())
-        )
-        self.high_like_spin.setValue(
-            int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
-        )
-        self.unfollow_list_path = data.get("unfollow_list_path") or str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
-        self.bilibili_uid_list_path = data.get("bilibili_uid_list_path") or str(DEFAULT_BILIBILI_UID_LIST)
-        self.douyin_uid_list_path = data.get("douyin_uid_list_path") or str(DEFAULT_DOUYIN_UID_LIST)
+            if bool(data.get("uid_limit_enabled", False)):
+                self.uid_fetch_partial_radio.setChecked(True)
+            else:
+                self.uid_fetch_all_radio.setChecked(True)
+            self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
+            self.monitor_video_limit_spin.setValue(
+                int(data.get("monitor_video_limit", self.monitor_video_limit_spin.value()) or self.monitor_video_limit_spin.value())
+            )
+            self.high_like_spin.setValue(
+                int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
+            )
+            self.auto_full_interval_spin.setValue(
+                int(data.get("auto_full_interval_minutes", self.auto_full_interval_spin.value()) or self.auto_full_interval_spin.value())
+            )
+            self.unfollow_list_path = data.get("unfollow_list_path") or str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
+            self.bilibili_uid_list_path = data.get("bilibili_uid_list_path") or str(DEFAULT_BILIBILI_UID_LIST)
+            self.douyin_uid_list_path = data.get("douyin_uid_list_path") or str(DEFAULT_DOUYIN_UID_LIST)
 
-        saved_bilibili = data.get("bilibili_runtime_settings", {}) or {}
-        for name, _env_name, _label, field_type, _minimum, _maximum, _step in BILIBILI_RUNTIME_FIELDS:
-            self.bilibili_runtime_settings[name] = _coerce_setting_value(
-                saved_bilibili.get(name),
-                field_type,
-                self.bilibili_runtime_settings.get(name),
+            saved_bilibili = data.get("bilibili_runtime_settings", {}) or {}
+            for name, _env_name, _label, field_type, _minimum, _maximum, _step in BILIBILI_RUNTIME_FIELDS:
+                self.bilibili_runtime_settings[name] = _coerce_setting_value(
+                    saved_bilibili.get(name),
+                    field_type,
+                    self.bilibili_runtime_settings.get(name),
+                )
+
+            saved_douyin = data.get("douyin_runtime_settings", {}) or {}
+            for name, _env_name, _label, field_type, _minimum, _maximum, _step in DOUYIN_RUNTIME_FIELDS:
+                self.douyin_runtime_settings[name] = _coerce_setting_value(
+                    saved_douyin.get(name),
+                    field_type,
+                    self.douyin_runtime_settings.get(name),
+                )
+
+            self.fetch_order_settings = _normalize_fetch_order_settings(
+                data.get("fetch_order_settings", self.fetch_order_settings)
             )
 
-        saved_douyin = data.get("douyin_runtime_settings", {}) or {}
-        for name, _env_name, _label, field_type, _minimum, _maximum, _step in DOUYIN_RUNTIME_FIELDS:
-            self.douyin_runtime_settings[name] = _coerce_setting_value(
-                saved_douyin.get(name),
-                field_type,
-                self.douyin_runtime_settings.get(name),
-            )
-
-        self.fetch_order_settings = _normalize_fetch_order_settings(
-            data.get("fetch_order_settings", self.fetch_order_settings)
-        )
-
-        self.config_locked = bool(data.get("locked", False))
-        self.auto_full_enabled = bool(data.get("auto_full_enabled", False))
+            self.config_locked = bool(data.get("locked", False))
+            self.auto_full_enabled = bool(data.get("auto_full_enabled", False))
+        finally:
+            self._loading_gui_config = False
 
     def _open_advanced_settings(self):
         dialog = AdvancedSettingsDialog(
@@ -4003,13 +4027,50 @@ class MainWindow(QMainWindow):
             self._append_log(f"配置已锁定，后续将按当前参数运行。配置文件: {GUI_CONFIG_PATH}")
         self._sync_visible_options()
 
+    def _auto_full_interval_minutes(self):
+        if not hasattr(self, "auto_full_interval_spin"):
+            return DEFAULT_AUTO_FULL_INTERVAL_MINUTES
+        return max(1, int(self.auto_full_interval_spin.value() or DEFAULT_AUTO_FULL_INTERVAL_MINUTES))
+
+    def _auto_full_interval_ms(self):
+        return self._auto_full_interval_minutes() * 60 * 1000
+
+    def _auto_full_interval_text(self):
+        minutes = self._auto_full_interval_minutes()
+        if minutes % 60 == 0:
+            hours = minutes // 60
+            return f"{hours} 小时"
+        if minutes > 60:
+            hours = minutes // 60
+            rest = minutes % 60
+            return f"{hours} 小时 {rest} 分钟"
+        return f"{minutes} 分钟"
+
+    def _schedule_next_auto_full_run(self):
+        self.auto_full_timer.setInterval(self._auto_full_interval_ms())
+        self.auto_full_next_run_at = datetime.now().timestamp() + self._auto_full_interval_minutes() * 60
+        if self.auto_full_timer.isActive():
+            self.auto_full_timer.stop()
+        if self.auto_full_enabled:
+            self.auto_full_timer.start()
+
+    def _on_auto_full_interval_changed(self, _value):
+        if self._loading_gui_config:
+            return
+        if self.auto_full_enabled:
+            self._schedule_next_auto_full_run()
+            self._append_log(f"自动 full 间隔已改为 {self._auto_full_interval_text()}，下一次触发时间已重新计算。")
+        self._save_gui_config()
+        self._sync_auto_full_timer()
+
     def _toggle_auto_full_mode(self):
         self.auto_full_enabled = not self.auto_full_enabled
         if self.auto_full_enabled:
-            self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
-            self._append_log("自动 full 模式已开启：每 3 小时按当前界面参数运行一次。")
+            self._schedule_next_auto_full_run()
+            self._append_log(f"自动 full 模式已开启：每 {self._auto_full_interval_text()} 按当前界面参数运行一次。")
         else:
             self.auto_full_next_run_at = None
+            self.auto_full_timer.stop()
             self._append_log("自动 full 模式已关闭。")
         self._save_gui_config()
         self._sync_auto_full_timer()
@@ -4018,12 +4079,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "auto_full_button"):
             return
         if self.auto_full_enabled:
+            self.auto_full_timer.setInterval(self._auto_full_interval_ms())
             if not self.auto_full_timer.isActive():
                 self.auto_full_timer.start()
             if self.auto_full_next_run_at is None:
-                self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
+                self.auto_full_next_run_at = datetime.now().timestamp() + self._auto_full_interval_minutes() * 60
             next_time = datetime.fromtimestamp(self.auto_full_next_run_at).strftime("%H:%M")
-            self.auto_full_button.setText(f"自动 full：开启（{next_time}）")
+            self.auto_full_button.setText(f"自动 full：开启（{next_time} / {self._auto_full_interval_minutes()}分）")
             self.auto_full_button.setStyleSheet("font-weight: 700; color: #1565c0;")
         else:
             self.auto_full_timer.stop()
@@ -4033,7 +4095,7 @@ class MainWindow(QMainWindow):
     def _on_auto_full_timer(self):
         if not self.auto_full_enabled:
             return
-        self.auto_full_next_run_at = datetime.now().timestamp() + AUTO_FULL_INTERVAL_MS / 1000
+        self.auto_full_next_run_at = datetime.now().timestamp() + self._auto_full_interval_minutes() * 60
         self._sync_auto_full_timer()
         self._start_auto_full_run()
 
