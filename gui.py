@@ -2182,7 +2182,7 @@ class DouyinRatingOverviewDialog(QDialog):
             warning_text = f"\n范围：{'；'.join(warning_parts)}" if warning_parts else ""
             self.summary_label.setText(
                 f"评分数据已加载：{self.db_path}\n"
-                f"S级仅来自手动等级；自动评分最高为A级。数据来自本地 SQLite。{warning_text}"
+                f"UP主S级只来自手动等级；喜欢页S级视频可让已关注UP主进入详情数据，自动评分最高为A级。数据来自本地 SQLite。{warning_text}"
             )
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"

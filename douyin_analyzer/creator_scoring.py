@@ -1,3 +1,4 @@
+import json
 import math
 import sqlite3
 from datetime import datetime
@@ -147,7 +148,7 @@ def run_douyin_creator_scoring(config):
             f"评分UP主数: {len(rows)}",
             f"等级分布: {grade_summary}",
             f"输出文件: {output_path}",
-            "说明: S级只来自手动等级；自动评分最高为A级。",
+            "说明: UP主S级只来自手动等级；喜欢页S级视频可让已关注UP主进入详情数据，自动评分最高为A级。",
         ],
     )
     return output_path
@@ -162,6 +163,7 @@ class DouyinCreatorScorer:
     def score(self):
         self._ensure_manual_rating_tables()
         creator_manual = self._load_manual_grades()
+        followed_liked_s_uids = self._load_followed_liked_s_uids()
         creator_rows = self._load_creator_rows()
         video_stats = self._load_video_stats()
         full_mode_uids = self._load_full_mode_uids()
@@ -169,11 +171,13 @@ class DouyinCreatorScorer:
             creator_rows = [
                 row for row in creator_rows
                 if str(row.get("uploader_id") or "").strip() in full_mode_uids
+                or str(row.get("uploader_id") or "").strip() in followed_liked_s_uids
             ]
         else:
             creator_rows = [
                 row for row in creator_rows
                 if video_stats.get(str(row.get("uploader_id") or "").strip(), {}).get("scores")
+                or str(row.get("uploader_id") or "").strip() in followed_liked_s_uids
             ]
 
         follower_p95 = _p95([row["follower_count"] for row in creator_rows])
@@ -229,6 +233,87 @@ class DouyinCreatorScorer:
             normalized = _normalize_grade(grade)
             if uploader_id and normalized:
                 result[str(uploader_id).strip()] = normalized
+        return result
+
+    def _load_video_manual_grades(self):
+        if not self._table_exists("douyin_video_manual_rating"):
+            return {}
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                'SELECT video_id, manual_grade FROM "douyin_video_manual_rating"'
+            ).fetchall()
+        result = {}
+        for video_id, grade in rows:
+            normalized = _normalize_grade(grade)
+            if video_id and normalized:
+                result[str(video_id).strip()] = normalized
+        return result
+
+    def _load_followings_cache(self):
+        try:
+            from .cache import CacheStore
+
+            return CacheStore(self.config).load_followings_cache()
+        except Exception:
+            return []
+
+    def _load_active_following_uids(self):
+        return {
+            str((user or {}).get("sec_uid") or "").strip()
+            for user in self._load_followings_cache()
+            if isinstance(user, dict) and str((user or {}).get("sec_uid") or "").strip()
+        }
+
+    def _load_followed_liked_s_uids(self):
+        active_uids = self._load_active_following_uids()
+        if not active_uids or not self._table_exists("douyin_video_state"):
+            return set()
+
+        video_manual = self._load_video_manual_grades()
+        with sqlite3.connect(self.db_path) as conn:
+            columns = {
+                row[1]
+                for row in conn.execute('PRAGMA table_info("douyin_video_state")').fetchall()
+            }
+            metadata_expr = "metadata_json" if "metadata_json" in columns else "NULL AS metadata_json"
+            rows = conn.execute(
+                f"""
+                SELECT video_id, uploader_id, source_mode, payload_json, {metadata_expr}
+                FROM douyin_video_state
+                WHERE uploader_id IS NOT NULL AND TRIM(uploader_id) != ''
+                  AND video_id IS NOT NULL AND TRIM(video_id) != ''
+                """
+            ).fetchall()
+
+        result = set()
+        for video_id, uploader_id, source_mode, payload_json, metadata_json in rows:
+            uid = str(uploader_id or "").strip()
+            if uid not in active_uids:
+                continue
+            payload = _loads_json(payload_json)
+            payload = payload if isinstance(payload, dict) else {}
+            payload_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            state_metadata = _loads_json(metadata_json)
+            state_metadata = state_metadata if isinstance(state_metadata, dict) else {}
+
+            liked_cache = (
+                str(source_mode or "").strip().lower() == "liked"
+                or str(payload.get("source_mode") or "").strip().lower() == "liked"
+                or payload_metadata.get("liked_cache") is True
+                or state_metadata.get("liked_cache") is True
+            )
+            if not liked_cache:
+                continue
+
+            grade = (
+                video_manual.get(str(video_id or "").strip())
+                or _normalize_grade(payload.get("video_manual_grade"))
+                or _normalize_grade(payload.get("manual_grade"))
+                or _normalize_grade(payload_metadata.get("manual_grade"))
+                or _normalize_grade(state_metadata.get("manual_grade"))
+            )
+            if grade == "S":
+                result.add(uid)
         return result
 
     def _load_creator_rows(self):
@@ -325,6 +410,54 @@ class DouyinCreatorScorer:
                 published_count,
                 cached_video_count,
             )
+
+        for user in self._load_followings_cache():
+            if not isinstance(user, dict):
+                continue
+            uid = str(user.get("sec_uid") or "").strip()
+            if not uid:
+                continue
+            total_like_count = _safe_int(user.get("total_favorited"), 0)
+            video_count = _safe_int(
+                user.get("aweme_count") or user.get("published_video_count") or user.get("total_videos"),
+                0,
+            )
+            latest_publish_ts = _safe_int(user.get("latest_publish_timestamp"), 0)
+            item = creators.setdefault(
+                uid,
+                {
+                    "uploader_id": uid,
+                    "uploader_name": str(user.get("nickname") or user.get("remark_name") or "").strip(),
+                    "homepage_url": str(user.get("homepage") or "").strip(),
+                    "latest_publish_date": _format_unix_timestamp(latest_publish_ts),
+                    "inactive_days": (
+                        max((self.now_ts - latest_publish_ts) / 86400, 0)
+                        if latest_publish_ts > 0
+                        else None
+                    ),
+                    "avg_update_days": None,
+                    "follower_count": 0,
+                    "total_like_count": 0,
+                    "video_count": 0,
+                    "avg_like_count": 0,
+                },
+            )
+            if not item.get("uploader_name"):
+                item["uploader_name"] = str(user.get("nickname") or user.get("remark_name") or "").strip()
+            if not item.get("homepage_url"):
+                item["homepage_url"] = str(user.get("homepage") or "").strip()
+            if not item.get("latest_publish_date") and latest_publish_ts > 0:
+                item["latest_publish_date"] = _format_unix_timestamp(latest_publish_ts)
+            if item.get("inactive_days") is None and latest_publish_ts > 0:
+                item["inactive_days"] = max((self.now_ts - latest_publish_ts) / 86400, 0)
+            item["follower_count"] = max(
+                _safe_int(item.get("follower_count"), 0),
+                _safe_int(user.get("follower_count"), 0),
+            )
+            item["total_like_count"] = max(_safe_int(item.get("total_like_count"), 0), total_like_count)
+            item["video_count"] = max(_safe_int(item.get("video_count"), 0), video_count)
+            if _safe_float(item.get("avg_like_count"), 0) <= 0 and total_like_count > 0 and video_count > 0:
+                item["avg_like_count"] = total_like_count / video_count
 
         return list(creators.values())
 
@@ -845,3 +978,12 @@ def _round_or_empty(value, digits=2):
     if value is None:
         return ""
     return round(_safe_float(value, 0), digits)
+
+
+def _loads_json(text):
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
