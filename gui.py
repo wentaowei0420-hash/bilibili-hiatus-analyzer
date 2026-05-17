@@ -64,64 +64,90 @@ EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
 EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
 DEFAULT_AUTO_FULL_INTERVAL_MINUTES = 180
 
-BILIBILI_RUNTIME_FIELDS = [
-    ("video_stat_batch_cooldown", "VIDEO_STAT_BATCH_COOLDOWN", "\u89c6\u9891\u7edf\u8ba1\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
-    ("request_delay", "REQUEST_DELAY", "\u8bf7\u6c42\u57fa\u7840\u95f4\u9694", "int", 0, 3600, 1),
-    ("max_request_delay", "MAX_REQUEST_DELAY", "\u8bf7\u6c42\u6700\u5927\u95f4\u9694", "int", 0, 3600, 1),
-    ("video_analysis_start_delay", "VIDEO_ANALYSIS_START_DELAY", "\u89c6\u9891\u5206\u6790\u542f\u52a8\u7b49\u5f85", "int", 0, 3600, 1),
-    ("batch_cooldown", "BATCH_COOLDOWN", "\u4e3b\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
-    ("long_rate_limit_cooldown", "LONG_RATE_LIMIT_COOLDOWN", "\u9650\u6d41\u957f\u51b7\u5374", "int", 0, 7200, 1),
-    ("rate_limit_retry_before_long_cooldown", "RATE_LIMIT_RETRY_BEFORE_LONG_COOLDOWN", "\u957f\u51b7\u5374\u524d\u91cd\u8bd5\u6b21\u6570", "int", 1, 100, 1),
-    ("max_rate_limit_retries", "MAX_RATE_LIMIT_RETRIES", "\u9650\u6d41\u6700\u5927\u91cd\u8bd5\u6b21\u6570", "int", 1, 100, 1),
-    ("failed_retry_cooldown", "FAILED_RETRY_COOLDOWN", "\u5931\u8d25\u91cd\u8bd5\u51b7\u5374", "int", 0, 7200, 1),
-    ("video_analysis_batch_cooldown", "VIDEO_ANALYSIS_BATCH_COOLDOWN", "\u89c6\u9891\u5206\u6790\u6279\u6b21\u51b7\u5374", "int", 0, 3600, 1),
-]
-
-DOUYIN_RUNTIME_FIELDS = [
-    ("page_load_delay", "DOUYIN_PAGE_LOAD_DELAY", "\u9875\u9762\u52a0\u8f7d\u7b49\u5f85", "float", 0.0, 1200.0, 0.1),
-    ("user_request_interval", "DOUYIN_USER_REQUEST_INTERVAL", "\u7528\u6237\u8bf7\u6c42\u95f4\u9694", "float", 0.0, 1200.0, 0.1),
-    ("request_rate_limit_per_second", "DOUYIN_REQUEST_RATE_LIMIT_PER_SECOND", "\u6bcf\u79d2\u8bf7\u6c42\u4e0a\u9650", "float", 0.1, 100.0, 0.1),
-    ("retry_backoff_base_seconds", "DOUYIN_RETRY_BACKOFF_BASE_SECONDS", "\u91cd\u8bd5\u9000\u907f\u8d77\u59cb\u79d2\u6570", "float", 0.0, 7200.0, 0.5),
-    ("retry_backoff_max_seconds", "DOUYIN_RETRY_BACKOFF_MAX_SECONDS", "\u91cd\u8bd5\u9000\u907f\u6700\u5927\u79d2\u6570", "float", 0.0, 7200.0, 0.5),
-    ("conservative_mode_duration_seconds", "DOUYIN_CONSERVATIVE_MODE_DURATION_SECONDS", "\u4fdd\u5b88\u6a21\u5f0f\u6301\u7eed\u79d2\u6570", "float", 0.0, 7200.0, 1.0),
-    ("refresh_batch_cooldown", "DOUYIN_REFRESH_BATCH_COOLDOWN", "\u5237\u65b0\u6279\u6b21\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("browser_restart_interval_users", "DOUYIN_BROWSER_RESTART_INTERVAL_USERS", "\u6d4f\u89c8\u5668\u91cd\u542f\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
-    ("video_page_load_delay", "DOUYIN_VIDEO_PAGE_LOAD_DELAY", "\u89c6\u9891\u9875\u52a0\u8f7d\u7b49\u5f85", "float", 0.0, 1200.0, 0.1),
-    ("service_error_retry_wait", "DOUYIN_SERVICE_ERROR_RETRY_WAIT", "\u670d\u52a1\u5f02\u5e38\u91cd\u8bd5\u7b49\u5f85", "float", 0.0, 7200.0, 0.5),
-    ("service_error_long_cooldown", "DOUYIN_SERVICE_ERROR_LONG_COOLDOWN", "\u670d\u52a1\u5f02\u5e38\u957f\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("service_error_global_cooldown", "DOUYIN_SERVICE_ERROR_GLOBAL_COOLDOWN", "\u670d\u52a1\u5f02\u5e38\u5168\u5c40\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("rate_limit_retry_wait", "DOUYIN_RATE_LIMIT_RETRY_WAIT", "\u9650\u6d41\u91cd\u8bd5\u7b49\u5f85", "float", 0.0, 7200.0, 0.5),
-    ("rate_limit_long_cooldown", "DOUYIN_RATE_LIMIT_LONG_COOLDOWN", "\u9650\u6d41\u957f\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("rate_limit_global_cooldown", "DOUYIN_RATE_LIMIT_GLOBAL_COOLDOWN", "\u9650\u6d41\u5168\u5c40\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("progress_save_interval_users", "DOUYIN_PROGRESS_SAVE_INTERVAL_USERS", "\u8fdb\u5ea6\u4fdd\u5b58\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
-    ("intermediate_upload_interval_users", "DOUYIN_INTERMEDIATE_UPLOAD_INTERVAL_USERS", "\u4e2d\u95f4\u4e0a\u4f20\u95f4\u9694\u7528\u6237\u6570", "int", 1, 10000, 1),
-    ("unfollow_interval_seconds", "DOUYIN_UNFOLLOW_INTERVAL_SECONDS", "\u53d6\u6d88\u5173\u6ce8\u95f4\u9694\u79d2\u6570", "float", 0.0, 1200.0, 0.1),
-    ("unfollow_batch_cooldown", "DOUYIN_UNFOLLOW_BATCH_COOLDOWN", "\u53d6\u6d88\u5173\u6ce8\u6279\u6b21\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-    ("unfollow_restart_interval", "DOUYIN_UNFOLLOW_RESTART_INTERVAL", "\u53d6\u6d88\u5173\u6ce8\u91cd\u542f\u95f4\u9694", "int", 1, 10000, 1),
-    ("unfollow_failure_cooldown", "DOUYIN_UNFOLLOW_FAILURE_COOLDOWN", "\u53d6\u6d88\u5173\u6ce8\u5931\u8d25\u51b7\u5374", "float", 0.0, 7200.0, 0.5),
-]
-
-BILIBILI_FETCH_ORDER_OPTIONS = [
-    ("\u7c89\u4e1d\u6570", "follower_count"),
-    ("\u89c6\u9891\u603b\u6570", "published_video_count"),
-    ("\u5e73\u5747\u70b9\u8d5e\u6570", "average_like_count"),
-]
-
-DOUYIN_FETCH_ORDER_OPTIONS = [
-    ("\u7c89\u4e1d\u6570", "follower_count"),
-    ("\u89c6\u9891\u603b\u6570", "published_video_count"),
-    ("\u83b7\u8d5e\u603b\u6570", "total_favorited"),
-    ("\u5e73\u5747\u70b9\u8d5e\u6570", "average_like_count"),
-]
-
-FETCH_ORDER_DIRECTION_OPTIONS = [
-    ("\u964d\u5e8f", "desc"),
-    ("\u5347\u5e8f", "asc"),
-]
+BILIBILI_RUNTIME_FIELDS = []
+DOUYIN_RUNTIME_FIELDS = []
+BILIBILI_FETCH_ORDER_OPTIONS = []
+DOUYIN_FETCH_ORDER_OPTIONS = []
+FETCH_ORDER_DIRECTION_OPTIONS = []
 
 
 def _fetch_order_option_map(options):
     return {value: label for label, value in options}
+
+
+def _option_pairs(items):
+    return [(item.get("label", ""), item.get("value", "")) for item in (items or [])]
+
+
+def _column_pairs(items):
+    return [(item.get("label", ""), item.get("key", "")) for item in (items or [])]
+
+
+def _runtime_field_tuples(items):
+    return [
+        (
+            item.get("name", ""),
+            item.get("env_name", ""),
+            item.get("label", ""),
+            item.get("type", "int"),
+            item.get("minimum", 0),
+            item.get("maximum", 0),
+            item.get("step", 1),
+        )
+        for item in (items or [])
+    ]
+
+
+def _bucket_tuples(items):
+    return [
+        (item.get("label", ""), item.get("lower", 0), item.get("upper"))
+        for item in (items or [])
+    ]
+
+
+def _load_backend_gui_metadata():
+    return BackendApiClient().gui_metadata()
+
+
+def _apply_gui_metadata(metadata):
+    global BILIBILI_RUNTIME_FIELDS
+    global DOUYIN_RUNTIME_FIELDS
+    global BILIBILI_FETCH_ORDER_OPTIONS
+    global DOUYIN_FETCH_ORDER_OPTIONS
+    global FETCH_ORDER_DIRECTION_OPTIONS
+
+    runtime_fields = metadata.get("runtime_fields") or {}
+    fetch_options = metadata.get("fetch_order_options") or {}
+    main_window = metadata.get("main_window") or {}
+    stats = metadata.get("stats") or {}
+    rating = metadata.get("rating") or {}
+    tables = metadata.get("tables") or {}
+
+    BILIBILI_RUNTIME_FIELDS = _runtime_field_tuples(runtime_fields.get("bilibili"))
+    DOUYIN_RUNTIME_FIELDS = _runtime_field_tuples(runtime_fields.get("douyin"))
+    BILIBILI_FETCH_ORDER_OPTIONS = _option_pairs(fetch_options.get("bilibili"))
+    DOUYIN_FETCH_ORDER_OPTIONS = _option_pairs(fetch_options.get("douyin"))
+    FETCH_ORDER_DIRECTION_OPTIONS = _option_pairs(fetch_options.get("directions"))
+
+    MainWindow.BILIBILI_MODE_OPTIONS = _option_pairs(main_window.get("bilibili_modes"))
+    MainWindow.DOUYIN_MODE_OPTIONS = _option_pairs(main_window.get("douyin_modes"))
+    MainWindow.BROWSER_BACKEND_OPTIONS = _option_pairs(main_window.get("browser_backends"))
+    MainWindow.PLATFORM_OPTIONS = _option_pairs(main_window.get("platforms"))
+    MainWindow.ACTION_OPTIONS = _option_pairs(main_window.get("actions"))
+    DouyinStatsDialog.MODE_ROWS = [(value, label) for label, value in _option_pairs(stats.get("modes"))]
+    DouyinStatsDialogV2.MODE_ROWS = [(value, label) for label, value in _option_pairs(stats.get("modes"))]
+    DouyinStatsDialogV2.CREATOR_VIDEO_BUCKETS = _bucket_tuples(stats.get("creator_video_buckets"))
+    DouyinStatsDialogV2.VIDEO_DURATION_BUCKETS = _bucket_tuples(stats.get("video_duration_buckets"))
+    DouyinRatingOverviewDialog.GRADE_ORDER = tuple(rating.get("grades") or ())
+    DouyinRatingOverviewDialog.CREATOR_TOP_COLUMNS = _column_pairs(tables.get("rating_creator_top"))
+    DouyinRatingOverviewDialog.CREATOR_LOW_COLUMNS = _column_pairs(tables.get("rating_creator_low"))
+    DouyinRatingOverviewDialog.VIDEO_TOP_COLUMNS = _column_pairs(tables.get("rating_video_top"))
+    DouyinRatingOverviewDialog.VIDEO_WATCH_COLUMNS = _column_pairs(tables.get("rating_video_watch"))
+    DouyinRatingOverviewDialog.ARCHIVED_CREATOR_COLUMNS = _column_pairs(tables.get("rating_archived_creator"))
+    CreatorDetailDialog.FACTOR_COLUMNS = _column_pairs(rating.get("factor_columns"))
+    DouyinStatusResetDialog.COLUMNS = _column_pairs(tables.get("status_reset"))
+    DouyinArchiveDialog.CANDIDATE_COLUMNS = _column_pairs(tables.get("archive_candidates"))
+    DouyinArchiveDialog.ARCHIVED_COLUMNS = _column_pairs(tables.get("archived"))
 
 
 def _coerce_setting_value(value, field_type, fallback):
@@ -162,10 +188,11 @@ def _normalize_fetch_order_settings(settings):
         allowed_fields = set(_fetch_order_option_map(options))
         current = (settings or {}).get(platform, {}) if isinstance(settings, dict) else {}
         field = current.get("field")
-        if field not in allowed_fields:
+        if allowed_fields and field not in allowed_fields:
             field = defaults[platform]["field"]
         direction = str(current.get("direction") or defaults[platform]["direction"]).strip().lower()
-        if direction not in {"asc", "desc"}:
+        allowed_directions = set(_fetch_order_option_map(FETCH_ORDER_DIRECTION_OPTIONS))
+        if allowed_directions and direction not in allowed_directions:
             direction = defaults[platform]["direction"]
         normalized[platform] = {"field": field, "direction": direction}
     return normalized
@@ -393,8 +420,12 @@ class AdvancedSettingsDialog(QDialog):
         bilibili_labels = _fetch_order_option_map(BILIBILI_FETCH_ORDER_OPTIONS)
         douyin_labels = _fetch_order_option_map(DOUYIN_FETCH_ORDER_OPTIONS)
         direction_labels = _fetch_order_option_map(FETCH_ORDER_DIRECTION_OPTIONS)
-        bilibili_text = f"B\u7ad9\uff1a\u6309 {bilibili_labels[self._fetch_order_settings['bilibili']['field']]} {direction_labels[self._fetch_order_settings['bilibili']['direction']]}"
-        douyin_text = f"\u6296\u97f3\uff1a\u6309 {douyin_labels[self._fetch_order_settings['douyin']['field']]} {direction_labels[self._fetch_order_settings['douyin']['direction']]}"
+        bilibili_field = self._fetch_order_settings["bilibili"]["field"]
+        douyin_field = self._fetch_order_settings["douyin"]["field"]
+        bilibili_direction = self._fetch_order_settings["bilibili"]["direction"]
+        douyin_direction = self._fetch_order_settings["douyin"]["direction"]
+        bilibili_text = f"B\u7ad9\uff1a\u6309 {bilibili_labels.get(bilibili_field, bilibili_field)} {direction_labels.get(bilibili_direction, bilibili_direction)}"
+        douyin_text = f"\u6296\u97f3\uff1a\u6309 {douyin_labels.get(douyin_field, douyin_field)} {direction_labels.get(douyin_direction, douyin_direction)}"
         self.fetch_order_summary.setText(bilibili_text + "\n" + douyin_text)
 
     def paths(self):
@@ -415,11 +446,7 @@ class AdvancedSettingsDialog(QDialog):
 
 
 class DouyinStatsDialog(QDialog):
-    MODE_ROWS = [
-        ("verify", "主页校验模式"),
-        ("monitor", "监控模式"),
-        ("full", "完整模式"),
-    ]
+    MODE_ROWS = []
 
     def __init__(self, parent=None, high_like_threshold=10000):
         super().__init__(parent)
@@ -543,23 +570,9 @@ class DouyinStatsDialog(QDialog):
 
 
 class DouyinStatsDialogV2(QDialog):
-    MODE_ROWS = [
-        ("verify", "主页校验模式"),
-        ("monitor", "监控模式"),
-        ("full", "完整模式"),
-    ]
-    CREATOR_VIDEO_BUCKETS = [
-        ("0~50", 0, 50),
-        ("51~300", 51, 300),
-        ("301~500", 301, 500),
-        ("501~1000", 501, 1000),
-        ("1001以上", 1001, None),
-    ]
-    VIDEO_DURATION_BUCKETS = [
-        ("0~20s", 0, 20),
-        ("21~60s", 21, 60),
-        ("61s以上", 61, None),
-    ]
+    MODE_ROWS = []
+    CREATOR_VIDEO_BUCKETS = []
+    VIDEO_DURATION_BUCKETS = []
 
     def __init__(self, parent=None, high_like_threshold=10000):
         super().__init__(parent)
@@ -809,7 +822,12 @@ class DouyinRatingOverviewDialog(QDialog):
     CREATOR_TABLE = "creator_score_current"
     VIDEO_TABLE = "video_score_current"
     ELIGIBLE_UID_TABLE = "_rating_eligible_uids"
-    GRADE_ORDER = ("S", "A", "B", "C", "D")
+    GRADE_ORDER = ()
+    CREATOR_TOP_COLUMNS = []
+    CREATOR_LOW_COLUMNS = []
+    VIDEO_TOP_COLUMNS = []
+    VIDEO_WATCH_COLUMNS = []
+    ARCHIVED_CREATOR_COLUMNS = []
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -885,7 +903,7 @@ class DouyinRatingOverviewDialog(QDialog):
         summary_grid.setContentsMargins(14, 14, 14, 14)
         summary_grid.setHorizontalSpacing(28)
         summary_grid.setVerticalSpacing(12)
-        headers = ["对象", "总数", "S", "A", "B", "C", "D", "低/中置信度"]
+        headers = ["对象", "总数", *self.GRADE_ORDER, "低/中置信度"]
         for column, header in enumerate(headers):
             label = QLabel(header)
             label.setStyleSheet("font-weight: 700; font-size: 15px; color: #111827;")
@@ -936,21 +954,11 @@ class DouyinRatingOverviewDialog(QDialog):
             }
             """
         )
-        self.creator_top_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "粉丝数", "作品数(缓存)", "详情"]
-        )
-        self.creator_low_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "未更新天数", "低等级比例", "详情"]
-        )
-        self.video_top_table = self._make_table(
-            ["视频标题", "UP主", "等级", "分数", "置信度", "点赞数", "下载状态", "视频链接"]
-        )
-        self.video_watch_table = self._make_table(
-            ["视频标题", "UP主", "等级", "分数", "置信度", "缺失指标", "视频链接"]
-        )
-        self.archived_creator_table = self._make_table(
-            ["UP主", "等级", "分数", "置信度", "未更新天数", "粉丝数", "作品数", "归档时间", "归档原因", "详情"]
-        )
+        self.creator_top_table = self._make_table([label for label, _ in self.CREATOR_TOP_COLUMNS])
+        self.creator_low_table = self._make_table([label for label, _ in self.CREATOR_LOW_COLUMNS])
+        self.video_top_table = self._make_table([label for label, _ in self.VIDEO_TOP_COLUMNS])
+        self.video_watch_table = self._make_table([label for label, _ in self.VIDEO_WATCH_COLUMNS])
+        self.archived_creator_table = self._make_table([label for label, _ in self.ARCHIVED_CREATOR_COLUMNS])
         self.tabs.addTab(self.creator_top_table, "抖音排行表")
         self.tabs.addTab(self.creator_low_table, "低分/风险UP")
         self.tabs.addTab(self.video_top_table, "高分视频")
@@ -1390,19 +1398,7 @@ class LikePreviewDialog(QDialog):
 
 
 class CreatorDetailDialog(QDialog):
-    FACTOR_COLUMNS = [
-        ("粉丝数量分", "粉丝数量分"),
-        ("获赞总数分", "获赞总数分"),
-        ("最近更新时间分", "最近更新时间分"),
-        ("平均几天一更分", "平均几天一更分"),
-        ("视频数量分", "视频数量分"),
-        ("最早视频时间分", "最早视频时间分"),
-        ("平均点赞数分", "平均点赞数分"),
-        ("视频等级分布分", "视频等级分布分"),
-        ("低等级比例分", "低等级比例分"),
-        ("最近10条趋势分", "最近10条趋势分"),
-        ("风险扣分", "风险扣分"),
-    ]
+    FACTOR_COLUMNS = []
 
     def __init__(self, detail, parent=None):
         super().__init__(parent)
@@ -1693,16 +1689,7 @@ class CreatorDetailDialog(QDialog):
 
 
 class DouyinStatusResetDialog(QDialog):
-    COLUMNS = [
-        ("UP主", "uploader_name"),
-        ("发布视频数", "published_video_count"),
-        ("缓存视频数", "cached_video_count"),
-        ("差值", "diff_count"),
-        ("最近抓取模式", "last_fetch_mode"),
-        ("已缓存模式", "cache_modes"),
-        ("缓存时间", "progress_cached_at"),
-        ("UP主主页链接", "homepage_url"),
-    ]
+    COLUMNS = []
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1892,27 +1879,8 @@ class DouyinStatusResetDialog(QDialog):
         self.refresh_data()
 
 class DouyinArchiveDialog(QDialog):
-    CANDIDATE_COLUMNS = [
-        ("UP主", "uploader_name"),
-        ("未更新天数", "inactive_days"),
-        ("最后发布时间", "latest_publish_time"),
-        ("等级", "final_grade"),
-        ("粉丝数", "follower_count"),
-        ("作品数", "published_video_count"),
-        ("缓存视频数", "cached_video_count"),
-        ("最近抓取模式", "last_fetch_mode"),
-        ("UP主主页链接", "homepage_url"),
-    ]
-    ARCHIVED_COLUMNS = [
-        ("UP主", "uploader_name"),
-        ("状态", "archive_status"),
-        ("未更新天数", "inactive_days"),
-        ("最后发布时间", "latest_publish_time"),
-        ("等级", "final_grade"),
-        ("归档时间", "archived_at"),
-        ("归档原因", "archive_reason"),
-        ("UP主主页链接", "homepage_url"),
-    ]
+    CANDIDATE_COLUMNS = []
+    ARCHIVED_COLUMNS = []
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2241,29 +2209,11 @@ class LogCenterDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    BILIBILI_MODE_OPTIONS = [
-        ("精确模式（主榜 + 视频分析）", "precise_full"),
-        ("精确模式（仅主榜）", "precise_main_only"),
-        ("回退模式（主榜 + 视频分析）", "fallback_full"),
-        ("回退模式（仅主榜）", "fallback_main_only"),
-    ]
-    PLATFORM_OPTIONS = [
-        ("B站 + 抖音", "both"),
-        ("仅 B站", "bilibili"),
-        ("仅 抖音", "douyin"),
-        ("抖音取消关注", "douyin_unfollow"),
-        ("B站 UID 全量视频", "bilibili_uid"),
-        ("抖音 UID 全量视频", "douyin_uid"),
-        ("导出抖音高赞视频", "douyin_high_like"),
-        ("抖音视频评分", "douyin_video_score"),
-        ("抖音UP主评分", "douyin_creator_score"),
-        ("导出抖音精简表", "douyin_compact_export"),
-    ]
-    ACTION_OPTIONS = [
-        ("仅抓取", "fetch"),
-        ("抓取并上传飞书", "fetch_upload"),
-        ("仅上传飞书", "upload"),
-    ]
+    BILIBILI_MODE_OPTIONS = []
+    DOUYIN_MODE_OPTIONS = []
+    BROWSER_BACKEND_OPTIONS = []
+    PLATFORM_OPTIONS = []
+    ACTION_OPTIONS = []
 
     def __init__(self):
         super().__init__()
@@ -2276,6 +2226,11 @@ class MainWindow(QMainWindow):
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
         self.douyin_uid_list_path = str(DEFAULT_DOUYIN_UID_LIST)
+        try:
+            _apply_gui_metadata(_load_backend_gui_metadata())
+            self._gui_metadata_error = ""
+        except Exception as exc:
+            self._gui_metadata_error = str(exc)
         try:
             config_defaults = _load_backend_config_defaults()
             self.bilibili_runtime_settings = config_defaults["bilibili_runtime_settings"]
@@ -2303,6 +2258,12 @@ class MainWindow(QMainWindow):
         self._load_gui_config()
         self._sync_visible_options()
         self._sync_auto_full_timer()
+        if self._gui_metadata_error:
+            self._append_log(f"读取后端 GUI 元数据失败：{self._gui_metadata_error}")
+            self._show_warning_dialog(
+                "GUI 元数据读取失败",
+                "无法从 /api/gui/metadata 读取界面元数据。请先启动后端：python -m backend",
+            )
         if self._config_defaults_error:
             self._append_log(f"读取后端默认配置失败：{self._config_defaults_error}")
             self._show_warning_dialog(
@@ -2399,15 +2360,10 @@ class MainWindow(QMainWindow):
         self.bilibili_mode_combo.setCurrentIndex(0)
 
         self.douyin_mode_combo = QComboBox()
-        for label, mode in (
-            ("基础统计模式（粉丝数/获赞总数/视频数）", "counts"),
-            ("主页校验模式（按基础缓存进主页核对）", "verify"),
-            ("监控模式（推荐日常使用）", "monitor"),
-            ("增量模式（只补变化数据）", "delta"),
-            ("完整模式（抓取视频明细）", "full"),
-        ):
+        for label, mode in self.DOUYIN_MODE_OPTIONS:
             self.douyin_mode_combo.addItem(label, mode)
-        self.douyin_mode_combo.setCurrentIndex(2)
+        default_douyin_index = self.douyin_mode_combo.findData("monitor")
+        self.douyin_mode_combo.setCurrentIndex(default_douyin_index if default_douyin_index >= 0 else 0)
         self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
         add_setting(1, "B站抓取模式", self.bilibili_mode_combo, "抖音抓取模式", self.douyin_mode_combo)
 
@@ -2418,8 +2374,8 @@ class MainWindow(QMainWindow):
         self.monitor_video_limit_spin.setToolTip("监控/增量模式下，每位博主最多抓取最近 N 条视频。基础统计和完整模式会忽略该参数。")
 
         self.backend_combo = QComboBox()
-        self.backend_combo.addItem("DrissionPage", "drission")
-        self.backend_combo.addItem("Playwright", "playwright")
+        for label, value in self.BROWSER_BACKEND_OPTIONS:
+            self.backend_combo.addItem(label, value)
         add_setting(2, "监控视频数", self.monitor_video_limit_spin, "抖音浏览器后端", self.backend_combo)
 
         self.uid_fetch_all_radio = QRadioButton("全抓取模式")
@@ -3170,6 +3126,18 @@ class MainWindow(QMainWindow):
             self._show_warning_dialog("B站 Cookie 状态", message)
 
     def _validate_config(self, config):
+        if self._gui_metadata_error:
+            self._show_warning_dialog(
+                "GUI 元数据未就绪",
+                "界面字段、选项和表格列定义必须从后端 /api/gui/metadata 获取。请先启动后端：python -m backend",
+            )
+            return False
+        if not self.PLATFORM_OPTIONS or not self.ACTION_OPTIONS or not self.DOUYIN_MODE_OPTIONS:
+            self._show_warning_dialog(
+                "GUI 元数据缺失",
+                "后端未返回完整的界面元数据，无法安全启动任务。",
+            )
+            return False
         required_paths = []
         if config.platform == "douyin_unfollow":
             required_paths.append(config.unfollow_list_path)

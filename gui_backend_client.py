@@ -56,6 +56,9 @@ class BackendApiClient:
     def config_defaults(self) -> dict[str, Any]:
         return self.request("GET", "/api/config/defaults")
 
+    def gui_metadata(self) -> dict[str, Any]:
+        return self.request("GET", "/api/gui/metadata")
+
     def douyin_stats(self, high_like_threshold: int) -> dict[str, Any]:
         return self.request(
             "GET",

@@ -30,6 +30,7 @@ python -m backend
 GET  /api/health
 GET  /api/capabilities
 GET  /api/config/defaults
+GET  /api/gui/metadata
 POST /api/jobs
 GET  /api/jobs
 GET  /api/jobs/{job_id}
@@ -76,9 +77,14 @@ runtime stop flag are not safe to run concurrently.
   overview, creator details, full-status reset, and archive management.
 - `backend.config_defaults` owns analyzer default configuration reads for GUI
   initialization.
+- `backend.gui_schema` owns GUI display metadata, including field definitions,
+  options, buckets, grade order, and table columns exposed through
+  `/api/gui/metadata`.
 - Long-running GUI actions should be added to `backend.job_models.JobKind` and
   dispatched by `backend.task_runner`, not implemented directly inside `gui.py`.
 - GUI data views should expose backend API endpoints rather than reading SQLite
   or analyzer cache files directly from `gui.py`.
 - GUI default values should come from `/api/config/defaults`, not analyzer
   config imports inside `gui.py`.
+- GUI display protocol should come from `/api/gui/metadata`; `gui.py` should
+  only render widgets and wire events.

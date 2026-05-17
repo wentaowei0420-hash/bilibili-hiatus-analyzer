@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config_defaults import get_config_defaults
 from . import gui_data
+from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
 from .job_manager import JobManager
 from .job_models import JobCreateRequest, JobEventResponse, JobSummary
@@ -73,6 +74,11 @@ def capabilities() -> dict[str, object]:
 @app.get("/api/config/defaults")
 def config_defaults() -> dict[str, object]:
     return get_config_defaults()
+
+
+@app.get("/api/gui/metadata")
+def gui_metadata() -> dict[str, object]:
+    return get_gui_metadata()
 
 
 @app.get("/api/bilibili/cookie-status")
