@@ -2,18 +2,13 @@ import os
 import json
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
-import traceback
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import requests
-from PyQt5.QtCore import QThread, Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
@@ -45,7 +40,15 @@ from PyQt5.QtWidgets import (
 )
 
 from common.file_io import atomic_write_json
-from common.runtime_control import OperationCancelled, clear_stop, request_stop
+from gui_backend_client import (
+    BackendApiClient,
+    BilibiliCookieCheckThread,
+    DouyinDataSyncThread,
+    DouyinLikedVideoCacheThread,
+    RatingRefreshThread,
+    RunnerThread,
+)
+from gui_models import RunConfig
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -121,25 +124,6 @@ def _fetch_order_option_map(options):
     return {value: label for label, value in options}
 
 
-def _settings_to_dict(config, fields):
-    values = {}
-    for name, *_rest in fields:
-        values[name] = getattr(config, name)
-    return values
-
-
-def _load_default_bilibili_runtime_settings():
-    from bilibili_analyzer.config import load_analyzer_config
-
-    return _settings_to_dict(load_analyzer_config(), BILIBILI_RUNTIME_FIELDS)
-
-
-def _load_default_douyin_runtime_settings():
-    from douyin_analyzer.config import load_analyzer_config
-
-    return _settings_to_dict(load_analyzer_config(), DOUYIN_RUNTIME_FIELDS)
-
-
 def _coerce_setting_value(value, field_type, fallback):
     if value is None:
         return fallback
@@ -153,6 +137,17 @@ def _load_default_fetch_order_settings():
     return {
         "bilibili": {"field": "follower_count", "direction": "desc"},
         "douyin": {"field": "follower_count", "direction": "desc"},
+    }
+
+
+def _load_backend_config_defaults():
+    data = BackendApiClient().config_defaults()
+    return {
+        "bilibili_runtime_settings": dict(data.get("bilibili_runtime_settings") or {}),
+        "douyin_runtime_settings": dict(data.get("douyin_runtime_settings") or {}),
+        "fetch_order_settings": _normalize_fetch_order_settings(
+            data.get("fetch_order_settings") or _load_default_fetch_order_settings()
+        ),
     }
 
 
@@ -174,302 +169,6 @@ def _normalize_fetch_order_settings(settings):
             direction = defaults[platform]["direction"]
         normalized[platform] = {"field": field, "direction": direction}
     return normalized
-
-
-@dataclass
-class RunConfig:
-    platform: str
-    action: str
-    bilibili_mode: str
-    douyin_fetch_mode: str
-    douyin_backend: str
-    monitor_video_limit: int
-    uid_limit_enabled: bool
-    uid_limit: int
-    high_like_threshold: int
-    unfollow_list_path: Path
-    bilibili_uid_list_path: Path
-    douyin_uid_list_path: Path
-    bilibili_runtime_settings: dict
-    douyin_runtime_settings: dict
-    fetch_order_settings: dict
-
-
-class SignalWriter:
-    def __init__(self, signal):
-        self.signal = signal
-        self._buffer = ""
-        self.encoding = "utf-8"
-
-    def write(self, text):
-        if not text:
-            return
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            self.signal.emit(line)
-
-    def flush(self):
-        if self._buffer:
-            self.signal.emit(self._buffer)
-            self._buffer = ""
-
-    def isatty(self):
-        return False
-
-
-class RunnerThread(QThread):
-    log_line = pyqtSignal(str)
-    done = pyqtSignal(bool, str)
-
-    def __init__(self, config: RunConfig):
-        super().__init__()
-        self.config = config
-
-    def run(self):
-        writer = SignalWriter(self.log_line)
-        try:
-            clear_stop()
-            with redirect_stdout(writer), redirect_stderr(writer):
-                self._run_task()
-            writer.flush()
-            self.done.emit(True, "任务执行完成")
-        except OperationCancelled:
-            writer.flush()
-            self.done.emit(True, "已终止运行，已保存当前可用数据")
-        except Exception as exc:
-            writer.flush()
-            self.log_line.emit("任务执行失败:")
-            self.log_line.emit(traceback.format_exc())
-            self.done.emit(False, str(exc))
-
-    def _run_task(self):
-        os.environ["DOUYIN_BROWSER_BACKEND"] = self.config.douyin_backend
-        self._apply_runtime_environment(BILIBILI_RUNTIME_FIELDS, self.config.bilibili_runtime_settings)
-        self._apply_runtime_environment(DOUYIN_RUNTIME_FIELDS, self.config.douyin_runtime_settings)
-        self._apply_fetch_order_environment(self.config.fetch_order_settings)
-        bilibili_analysis_mode, bilibili_enable_video_analysis = self._resolve_bilibili_runtime_mode()
-        os.environ["ANALYSIS_MODE"] = bilibili_analysis_mode
-        os.environ["ENABLE_VIDEO_DURATION_ANALYSIS"] = (
-            "true" if bilibili_enable_video_analysis else "false"
-        )
-        uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
-
-        self.log_line.emit(f"平台: {self.config.platform}")
-        self.log_line.emit(f"动作: {self.config.action}")
-        self.log_line.emit(f"抖音模式: {self.config.douyin_fetch_mode}")
-        self.log_line.emit(f"抖音后端: {self.config.douyin_backend}")
-        self.log_line.emit(f"监控视频数: {self.config.monitor_video_limit}")
-        self.log_line.emit(f"B站模式: {self.config.bilibili_mode}")
-        self.log_line.emit("-" * 60)
-
-        if self.config.platform == "bilibili":
-            self._run_bilibili_main()
-        elif self.config.platform == "douyin":
-            self._run_douyin_main()
-        elif self.config.platform == "both":
-            self._run_bilibili_main()
-            self._run_douyin_main()
-        elif self.config.platform == "douyin_unfollow":
-            from douyin_analyzer.app import run_unfollow
-
-            run_unfollow(self.config.unfollow_list_path)
-        elif self.config.platform == "douyin_non_followed_cleanup":
-            from douyin_analyzer.app import run_prune_non_followed_cache
-
-            run_prune_non_followed_cache()
-        elif self.config.platform == "bilibili_uid":
-            from bilibili_analyzer.app import run_fetch_uid_videos
-
-            run_fetch_uid_videos(self.config.bilibili_uid_list_path, max_targets=uid_limit)
-        elif self.config.platform == "douyin_uid":
-            from douyin_analyzer.app import run_fetch_uid_videos
-
-            run_fetch_uid_videos(self.config.douyin_uid_list_path, max_targets=uid_limit)
-        elif self.config.platform == "douyin_high_like":
-            from douyin_analyzer.app import run_export_high_like_videos_from_cache
-
-            run_export_high_like_videos_from_cache(threshold=self.config.high_like_threshold)
-        elif self.config.platform == "douyin_video_score":
-            from douyin_analyzer.app import run_score_videos_from_cache
-
-            run_score_videos_from_cache()
-        elif self.config.platform == "douyin_creator_score":
-            from douyin_analyzer.app import run_score_creators_from_cache
-
-            run_score_creators_from_cache()
-        elif self.config.platform == "douyin_compact_export":
-            from douyin_analyzer.app import run_export_compact_tables_from_cache
-
-            run_export_compact_tables_from_cache(high_like_threshold=self.config.high_like_threshold)
-        else:
-            raise ValueError(f"未知平台模式: {self.config.platform}")
-
-    def _resolve_bilibili_runtime_mode(self):
-        mode = (self.config.bilibili_mode or "precise_full").strip().lower()
-        mapping = {
-            "precise_full": ("precise", True),
-            "precise_main_only": ("precise", False),
-            "fallback_full": ("fallback", True),
-            "fallback_main_only": ("fallback", False),
-        }
-        return mapping.get(mode, ("precise", True))
-
-    def _apply_runtime_environment(self, fields, values):
-        for name, env_name, _label, field_type, _minimum, _maximum, _step in fields:
-            value = _coerce_setting_value(values.get(name), field_type, None)
-            if value is None:
-                continue
-            os.environ[env_name] = str(int(value) if field_type == "int" else float(value))
-
-    def _apply_fetch_order_environment(self, settings):
-        normalized = _normalize_fetch_order_settings(settings)
-        os.environ["BILIBILI_FETCH_ORDER_BY"] = normalized["bilibili"]["field"]
-        os.environ["BILIBILI_FETCH_ORDER_DESC"] = "true" if normalized["bilibili"]["direction"] == "desc" else "false"
-        os.environ["DOUYIN_FETCH_ORDER_BY"] = normalized["douyin"]["field"]
-        os.environ["DOUYIN_FETCH_ORDER_DESC"] = "true" if normalized["douyin"]["direction"] == "desc" else "false"
-
-    def _run_bilibili_main(self):
-        from bilibili_analyzer.app import run_analysis, run_feishu_upload
-
-        uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
-        if self.config.action == "fetch":
-            result = run_analysis(trigger_upload=False, max_followings=uid_limit)
-            if result is None:
-                raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
-        elif self.config.action == "fetch_upload":
-            result = run_analysis(trigger_upload=True, max_followings=uid_limit)
-            if result is None:
-                raise RuntimeError("B站分析未成功完成，请检查 BILIBILI_COOKIE 是否已失效。")
-        elif self.config.action == "upload":
-            run_feishu_upload()
-        else:
-            raise ValueError(f"未知动作: {self.config.action}")
-
-    def _run_douyin_main(self):
-        from douyin_analyzer.app import run_analysis, run_feishu_upload
-
-        uid_limit = self.config.uid_limit if self.config.uid_limit_enabled else None
-        if self.config.action == "fetch":
-            result = run_analysis(
-                trigger_upload=False,
-                fetch_mode_override=self.config.douyin_fetch_mode,
-                max_followings=uid_limit,
-                recent_video_limit_override=self.config.monitor_video_limit,
-            )
-            if result is None:
-                raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
-        elif self.config.action == "fetch_upload":
-            result = run_analysis(
-                trigger_upload=True,
-                fetch_mode_override=self.config.douyin_fetch_mode,
-                max_followings=uid_limit,
-                recent_video_limit_override=self.config.monitor_video_limit,
-            )
-            if result is None:
-                raise RuntimeError("抖音分析未成功完成，请检查登录状态或抓取配置。")
-        elif self.config.action == "upload":
-            run_feishu_upload()
-        else:
-            raise ValueError(f"未知动作: {self.config.action}")
-
-
-class BilibiliCookieCheckThread(QThread):
-    checked = pyqtSignal(bool, str)
-
-    def run(self):
-        try:
-            from bilibili_analyzer.config import load_analyzer_config
-
-            config = load_analyzer_config()
-            if not (config.cookie or "").strip():
-                self.checked.emit(False, "未配置 BILIBILI_COOKIE")
-                return
-
-            response = requests.get(config.nav_api, headers=config.headers, timeout=20)
-            response.raise_for_status()
-            payload = response.json() if response.content else {}
-            if payload.get("code") == 0:
-                user = payload.get("data", {}) or {}
-                uname = user.get("uname") or "未知用户"
-                mid = user.get("mid") or ""
-                self.checked.emit(True, f"已登录：{uname} (mid={mid})")
-                return
-
-            message = payload.get("message") or payload.get("msg") or "账号未登录"
-            self.checked.emit(False, f"未登录：{message}")
-        except Exception as exc:
-            self.checked.emit(False, f"检测失败：{exc}")
-
-
-class RatingRefreshThread(QThread):
-    done = pyqtSignal(bool, str)
-
-    def run(self):
-        try:
-            from douyin_analyzer.app import run_score_creators_from_cache, run_score_videos_from_cache
-
-            run_score_videos_from_cache()
-            output_path = run_score_creators_from_cache(refresh_inventory=False)
-            self.done.emit(True, f"评分数据已更新：{output_path}")
-        except Exception as exc:
-            self.done.emit(False, f"评分数据刷新失败：{exc}")
-
-
-class DouyinDataSyncThread(QThread):
-    done = pyqtSignal(bool, str)
-
-    def run(self):
-        try:
-            from douyin_analyzer.config import load_analyzer_config
-            from douyin_analyzer.data_sync import sync_progress_videos_to_state
-
-            config = load_analyzer_config()
-            result = sync_progress_videos_to_state(config, rerun_scores=True)
-            before = result.get("before_diagnostics", {})
-            after = result.get("after_diagnostics", {})
-            message = (
-                "抖音数据同步完成："
-                f"同步UP {result['processed_creators']} 位，"
-                f"progress视频 {result['processed_videos']} 条，"
-                f"raw视频 {result.get('raw_videos_processed', 0)} 条；"
-                f"解除full重置 {result.get('resolved_full_status_resets', 0)} 位；"
-                f"清单缓存数更新 {result.get('inventory_rows_updated', 0)} 行；"
-                f"douyin_video_state {result['video_state_before']} -> {result['video_state_after']}；"
-                f"video_score_current {result['video_score_before']} -> {result['video_score_after']}；"
-                f"creator_score_current {result['creator_score_before']} -> {result['creator_score_after']}；"
-                f"当前缓存视频 {after.get('current_progress_videos', 0)} 条；"
-                f"当前缓存未评分 {before.get('current_progress_not_scored', 0)} -> "
-                f"{after.get('current_progress_not_scored', 0)}；"
-                f"评分不在当前缓存 {before.get('score_not_current_progress', 0)} -> "
-                f"{after.get('score_not_current_progress', 0)}；"
-                f"下载标记孤儿 {before.get('score_download_mark_without_aweme', 0)} -> "
-                f"{after.get('score_download_mark_without_aweme', 0)}；"
-                f"需人工状态重置 {after.get('full_cache_count_mismatch_gt_30', 0)} 位"
-            )
-            self.done.emit(True, message)
-        except Exception as exc:
-            self.done.emit(False, f"抖音数据同步失败：{exc}")
-
-
-class DouyinLikedVideoCacheThread(QThread):
-    done = pyqtSignal(bool, str)
-
-    def run(self):
-        try:
-            from douyin_analyzer.app import run_cache_liked_videos_as_s
-
-            result = run_cache_liked_videos_as_s()
-            self.done.emit(
-                True,
-                (
-                    "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u5b8c\u6210\uff1a"
-                    f"{result.get('video_count', 0)} \u6761\u89c6\u9891\u5df2\u5199\u5165\u672c\u5730\u7f13\u5b58\uff0c"
-                    "\u5e76\u7edf\u4e00\u8bbe\u7f6e\u4e3a S \u7ea7\u3002"
-                ),
-            )
-        except Exception as exc:
-            self.done.emit(False, f"\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u5931\u8d25\uff1a{exc}")
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -798,78 +497,26 @@ class DouyinStatsDialog(QDialog):
     def refresh_stats(self):
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
-            from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
-            from douyin_analyzer.cache import CacheStore
-            from douyin_analyzer.config import load_analyzer_config
-
-            config = load_analyzer_config()
-            cache_store = CacheStore(config)
-            analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
-
-            followings_payload = cache_store.load_followings_cache_payload()
-            progress = cache_store.load_progress()
-            cache_rows = analyzer.build_cache_inventory_rows(followings_payload, progress)
-            active_rows = [
-                row for row in cache_rows
-                if str((row or {}).get("has_followings_cache", "")).strip() == "是"
-            ]
-            total_followings = len(active_rows)
-            followings_cached_at = analyzer._format_cached_at(
-                (followings_payload or {}).get("cached_at") if isinstance(followings_payload, dict) else ""
-            )
-
+            data = BackendApiClient().douyin_stats(self.high_like_threshold)
+            total_followings = int(data.get("total_followings") or 0)
             for mode, _ in self.MODE_ROWS:
-                flag_key = f"has_{mode}_cache"
-                captured_count = sum(
-                    1 for row in active_rows
-                    if str((row or {}).get(flag_key, "")).strip() == "是"
-                )
-                percent = (captured_count / total_followings * 100) if total_followings else 0
+                mode_data = (data.get("modes") or {}).get(mode, {})
+                captured_count = int(mode_data.get("count") or 0)
                 self.mode_count_labels[mode].setText(str(captured_count))
-                self.mode_percent_labels[mode].setText(f"{percent:.2f}%")
+                self.mode_percent_labels[mode].setText(f"{float(mode_data.get('percent') or 0):.2f}%")
 
-            active_uids = {
-                str((row or {}).get("uploader_id") or "").strip()
-                for row in active_rows
-                if str((row or {}).get("uploader_id") or "").strip()
-            }
-            cached_video_count = 0
-            high_like_video_count = 0
-            seen_video_ids = set()
-            for uid, entry in (progress or {}).items():
-                if str(uid).strip() not in active_uids or not isinstance(entry, dict):
-                    continue
-                for video in entry.get("videos", []) or []:
-                    if not isinstance(video, dict):
-                        continue
-                    video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
-                    dedupe_key = video_id or f"{uid}:{len(seen_video_ids)}"
-                    if dedupe_key in seen_video_ids:
-                        continue
-                    seen_video_ids.add(dedupe_key)
-                    cached_video_count += 1
-                    try:
-                        like_count = int(float(video.get("like_count") or 0))
-                    except (TypeError, ValueError):
-                        like_count = 0
-                    if like_count > self.high_like_threshold:
-                        high_like_video_count += 1
-
-            high_like_ratio = (
-                high_like_video_count / cached_video_count * 100
-                if cached_video_count
-                else 0
-            )
+            cached_video_count = int(data.get("cached_video_count") or 0)
+            high_like_video_count = int(data.get("high_like_video_count") or 0)
             self.cached_video_count_label.setText(str(cached_video_count))
             self.cached_video_ratio_label.setText("100.00%" if cached_video_count else "0.00%")
             self.high_like_video_count_label.setText(str(high_like_video_count))
-            self.high_like_video_ratio_label.setText(f"{high_like_ratio:.2f}%")
+            self.high_like_video_ratio_label.setText(f"{float(data.get('high_like_ratio') or 0):.2f}%")
 
             if total_followings:
                 self.summary_label.setText(
                     f"当前关注博主总数：{total_followings} 位\n"
-                    f"关注列表缓存时间：{followings_cached_at or '暂无'}\n"
-                    f"进度缓存条目：{len(progress or {})} 条"
+                    f"关注列表缓存时间：{data.get('followings_cached_at') or '暂无'}\n"
+                    f"进度缓存条目：{data.get('progress_count') or 0} 条"
                 )
             else:
                 self.summary_label.setText(
@@ -1047,85 +694,23 @@ class DouyinStatsDialogV2(QDialog):
     def refresh_stats(self):
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
-            from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
-            from douyin_analyzer.cache import CacheStore
-            from douyin_analyzer.config import load_analyzer_config
-
-            config = load_analyzer_config()
-            cache_store = CacheStore(config)
-            analyzer = DouyinHiatusAnalyzer(config, browser_client=None, cache_store=cache_store)
-
-            followings_payload = cache_store.load_followings_cache_payload()
-            progress = cache_store.load_progress()
-            cache_rows = analyzer.build_cache_inventory_rows(followings_payload, progress)
-            active_rows = [
-                row for row in cache_rows
-                if str((row or {}).get("has_followings_cache", "")).strip() == "是"
-            ]
-            total_followings = len(active_rows)
-            followings_cached_at = analyzer._format_cached_at(
-                (followings_payload or {}).get("cached_at") if isinstance(followings_payload, dict) else ""
-            )
-
+            data = BackendApiClient().douyin_stats(self.high_like_threshold)
+            total_followings = int(data.get("total_followings") or 0)
             for mode, _ in self.MODE_ROWS:
-                flag_key = f"has_{mode}_cache"
-                captured_count = sum(
-                    1 for row in active_rows
-                    if str((row or {}).get(flag_key, "")).strip() == "是"
-                )
-                percent = (captured_count / total_followings * 100) if total_followings else 0
+                mode_data = (data.get("modes") or {}).get(mode, {})
+                captured_count = int(mode_data.get("count") or 0)
+                percent = float(mode_data.get("percent") or 0)
                 self.mode_count_labels[mode].setText(str(captured_count))
                 self.mode_percent_labels[mode].setText(f"{percent:.2f}%")
 
-            creator_bucket_counts = {label: 0 for label, _, _ in self.CREATOR_VIDEO_BUCKETS}
-            for row in active_rows:
-                published_video_count = self._safe_int((row or {}).get("published_video_count"), 0)
-                for label, lower, upper in self.CREATOR_VIDEO_BUCKETS:
-                    if self._bucket_match(published_video_count, lower, upper):
-                        creator_bucket_counts[label] += 1
-                        break
-
-            active_uids = {
-                str((row or {}).get("uploader_id") or "").strip()
-                for row in active_rows
-                if str((row or {}).get("uploader_id") or "").strip()
-            }
-            cached_video_count = 0
-            high_like_video_count = 0
-            duration_bucket_counts = {label: 0 for label, _, _ in self.VIDEO_DURATION_BUCKETS}
-            seen_video_ids = set()
-            for uid, entry in (progress or {}).items():
-                if str(uid).strip() not in active_uids or not isinstance(entry, dict):
-                    continue
-                for video in entry.get("videos", []) or []:
-                    if not isinstance(video, dict):
-                        continue
-                    video_id = str(video.get("aweme_id") or video.get("video_id") or "").strip()
-                    dedupe_key = video_id or f"{uid}:{len(seen_video_ids)}"
-                    if dedupe_key in seen_video_ids:
-                        continue
-                    seen_video_ids.add(dedupe_key)
-                    cached_video_count += 1
-
-                    like_count = self._safe_int(video.get("like_count"), 0)
-                    if like_count > self.high_like_threshold:
-                        high_like_video_count += 1
-
-                    duration_seconds = self._safe_int(video.get("duration_seconds"), 0)
-                    for label, lower, upper in self.VIDEO_DURATION_BUCKETS:
-                        if self._bucket_match(duration_seconds, lower, upper):
-                            duration_bucket_counts[label] += 1
-                            break
-
-            high_like_ratio = (
-                high_like_video_count / cached_video_count * 100
-                if cached_video_count
-                else 0
-            )
+            creator_bucket_counts = data.get("creator_buckets") or {}
+            duration_bucket_counts = data.get("duration_buckets") or {}
+            cached_video_count = int(data.get("cached_video_count") or 0)
+            high_like_video_count = int(data.get("high_like_video_count") or 0)
             self.cached_video_count_label.setText(str(cached_video_count))
             self.cached_video_ratio_label.setText("100.00%" if cached_video_count else "0.00%")
             self.high_like_video_count_label.setText(str(high_like_video_count))
-            self.high_like_video_ratio_label.setText(f"{high_like_ratio:.2f}%")
+            self.high_like_video_ratio_label.setText(f"{float(data.get('high_like_ratio') or 0):.2f}%")
 
             for label, _, _ in self.CREATOR_VIDEO_BUCKETS:
                 bucket_count = creator_bucket_counts.get(label, 0)
@@ -1142,8 +727,8 @@ class DouyinStatsDialogV2(QDialog):
             if total_followings:
                 self.summary_label.setText(
                     f"当前关注博主总数：{total_followings} 位\n"
-                    f"关注列表缓存时间：{followings_cached_at or '暂无'}\n"
-                    f"进度缓存条目：{len(progress or {})} 条"
+                    f"关注列表缓存时间：{data.get('followings_cached_at') or '暂无'}\n"
+                    f"进度缓存条目：{data.get('progress_count') or 0} 条"
                 )
             else:
                 self.summary_label.setText(
@@ -1280,12 +865,6 @@ class DouyinRatingOverviewDialog(QDialog):
             """
         )
 
-        from douyin_analyzer.config import load_analyzer_config
-        from douyin_analyzer.rating.store import rating_store_db_path, source_store_db_path
-
-        self.config = load_analyzer_config()
-        self.db_path = rating_store_db_path(self.config)
-        self.source_db_path = source_store_db_path(self.config)
         self.refresh_worker = None
 
         layout = QVBoxLayout(self)
@@ -1424,37 +1003,6 @@ class DouyinRatingOverviewDialog(QDialog):
         return table
 
     @staticmethod
-    def _table_exists(conn, table_name):
-        row = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name=?
-            UNION ALL
-            SELECT 1 FROM sqlite_temp_master WHERE type IN ('table', 'view') AND name=?
-            LIMIT 1
-            """,
-            (table_name, table_name),
-        ).fetchone()
-        return row is not None
-
-    def _attach_source_views(self, conn):
-        source_path = Path(getattr(self, "source_db_path", "") or "")
-        if not source_path.exists() or source_path == Path(getattr(self, "db_path", "")):
-            return
-        conn.execute("ATTACH DATABASE ? AS source_store", (str(source_path),))
-        for table_name in ("cache_inventory_current", "douyin_archived_creators", "douyin_video_state", "aweme"):
-            if self._table_exists(conn, table_name):
-                continue
-            source_row = conn.execute(
-                "SELECT 1 FROM source_store.sqlite_master WHERE type='table' AND name=?",
-                (table_name,),
-            ).fetchone()
-            if source_row:
-                conn.execute(
-                    f'CREATE TEMP VIEW IF NOT EXISTS "{table_name}" AS '
-                    f'SELECT * FROM source_store."{table_name}"'
-                )
-
-    @staticmethod
     def _fmt(value):
         if value is None:
             return ""
@@ -1484,126 +1032,6 @@ class DouyinRatingOverviewDialog(QDialog):
                 return -1
         return text.lower()
 
-    def _grade_counts(self, conn, table, column, eligible_only=False):
-        counts = {grade: 0 for grade in self.GRADE_ORDER}
-        total = 0
-        source = f'"{table}" AS s'
-        join = (
-            f' JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid'
-            if eligible_only
-            else ""
-        )
-        for grade, count in conn.execute(
-            f'SELECT s."{column}", COUNT(*) FROM {source}{join} GROUP BY s."{column}"'
-        ):
-            grade_text = str(grade or "").strip().upper()
-            if grade_text in counts:
-                counts[grade_text] += int(count or 0)
-            total += int(count or 0)
-        return total, counts
-
-    def _confidence_count(self, conn, table, column, values, eligible_only=False):
-        placeholders = ",".join("?" for _ in values)
-        source = f'"{table}" AS s'
-        join = (
-            f' JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid'
-            if eligible_only
-            else ""
-        )
-        row = conn.execute(
-            f'SELECT COUNT(*) FROM {source}{join} WHERE s."{column}" IN ({placeholders})',
-            tuple(values),
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _prepare_eligible_uid_filter(self, conn):
-        conn.execute(f'DROP TABLE IF EXISTS "{self.ELIGIBLE_UID_TABLE}"')
-        conn.execute(f'CREATE TEMP TABLE "{self.ELIGIBLE_UID_TABLE}" (uid TEXT PRIMARY KEY)')
-        if not self._table_exists(conn, "cache_inventory_current"):
-            return False, 0, 0
-
-        columns = {
-            row[1] for row in conn.execute('PRAGMA table_info("cache_inventory_current")')
-        }
-        if "UP主UID" not in columns:
-            return False, 0, 0
-
-        active_archived_uids = set()
-        if self._table_exists(conn, "douyin_archived_creators"):
-            active_archived_uids = {
-                str(row[0] or "").strip()
-                for row in conn.execute(
-                    '''
-                    SELECT uploader_id
-                    FROM douyin_archived_creators
-                    WHERE archive_status = 'active'
-                    '''
-                ).fetchall()
-                if str(row[0] or "").strip()
-            }
-
-        rows = conn.execute(
-            '''
-            SELECT "UP主UID"
-            FROM cache_inventory_current
-            WHERE TRIM(COALESCE("UP主UID", "")) != ""
-              AND (
-                  LOWER(TRIM(COALESCE("有full缓存", ""))) IN ('是', 'yes', 'true', '1', 'y')
-                  OR LOWER(COALESCE("已缓存模式", "")) LIKE '%full%'
-                  OR LOWER(TRIM(COALESCE("最近抓取模式", ""))) = 'full'
-                  OR LOWER(TRIM(COALESCE("统计范围", ""))) = 'full'
-              )
-            '''
-        ).fetchall()
-        uids = [
-            (uid,)
-            for uid in (str(row[0] or "").strip() for row in rows)
-            if uid and uid not in active_archived_uids
-        ]
-        if uids:
-            conn.executemany(
-                f'INSERT OR IGNORE INTO "{self.ELIGIBLE_UID_TABLE}" (uid) VALUES (?)',
-                uids,
-            )
-        return True, len(uids), len(active_archived_uids)
-
-    def _stale_uid_count(self, conn, table):
-        if not self._table_exists(conn, table):
-            return 0
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
-        if "UP主UID" not in columns:
-            return 0
-        row = conn.execute(
-            f'''
-            SELECT COUNT(*)
-            FROM "{table}" AS s
-            LEFT JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON s."UP主UID" = e.uid
-            WHERE e.uid IS NULL
-            '''
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _missing_eligible_score_count(self, conn, table):
-        if not self._table_exists(conn, table):
-            return 0
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
-        if "UP涓籙ID" not in columns:
-            return 0
-        row = conn.execute(
-            f'''
-            SELECT COUNT(*)
-            FROM "{self.ELIGIBLE_UID_TABLE}" AS e
-            LEFT JOIN "{table}" AS s ON s."UP涓籙ID" = e.uid
-            WHERE s."UP涓籙ID" IS NULL
-            '''
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _query_rows(self, conn, sql, limit=30, params=()):
-        if limit is None:
-            return conn.execute(sql, tuple(params)).fetchall()
-        return conn.execute(sql, (*tuple(params), limit)).fetchall()
-
     def _current_search_uid(self):
         return str(self.creator_search_input.text() or "").strip()
 
@@ -1619,26 +1047,6 @@ class DouyinRatingOverviewDialog(QDialog):
         if self._current_search_uid():
             self.creator_search_input.clear()
             self.refresh_data()
-
-    def _load_archived_creator_rows(self, conn, limit=500, uploader_id=""):
-        if not self._table_exists(conn, "douyin_archived_creators"):
-            return []
-        uid_filter = "AND uploader_id = ?" if uploader_id else ""
-        params = (uploader_id, limit) if uploader_id else (limit,)
-        return conn.execute(
-            f"""
-            SELECT uploader_name, final_grade, final_score, confidence,
-                   inactive_days, follower_count, published_video_count,
-                   archived_at, archive_reason, uploader_id
-            FROM douyin_archived_creators
-            WHERE archive_status = 'active'
-              {uid_filter}
-            ORDER BY CAST(COALESCE(inactive_days, 0) AS REAL) DESC,
-                     CAST(COALESCE(final_score, 0) AS REAL) ASC
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
 
     def _populate_table(self, table, rows):
         table.setSortingEnabled(False)
@@ -1690,7 +1098,7 @@ class DouyinRatingOverviewDialog(QDialog):
 
     def _show_creator_detail(self, uploader_id):
         try:
-            detail = self._load_creator_detail(str(uploader_id or "").strip())
+            detail = BackendApiClient().creator_detail(str(uploader_id or "").strip())
         except Exception as exc:
             QMessageBox.warning(self, "读取详情失败", str(exc))
             return
@@ -1698,301 +1106,6 @@ class DouyinRatingOverviewDialog(QDialog):
             QMessageBox.information(self, "没有详情", "未在当前评分快照中找到该 UP 主。")
             return
         CreatorDetailDialog(detail, self).exec_()
-
-    def _load_creator_detail(self, uploader_id):
-        if not uploader_id or not self.db_path.exists():
-            return {}
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            self._attach_source_views(conn)
-            creator = conn.execute(
-                f'SELECT * FROM "{self.CREATOR_TABLE}" WHERE "UP主UID" = ? LIMIT 1',
-                (uploader_id,),
-            ).fetchone()
-            if not creator:
-                creator = self._load_archived_creator_detail(conn, uploader_id)
-            if not creator:
-                return {}
-
-            cached_video_count = self._load_cached_video_count(conn, uploader_id)
-            scored_video_count = self._count_videos_for_creator(conn, uploader_id)
-            downloaded_snapshot = self._count_downloaded_snapshot_for_creator(conn, uploader_id)
-            downloaded_records = self._count_aweme_download_records_for_creator(conn, uploader_id)
-            duration_rows = self._group_video_values(conn, uploader_id, "时长分类")
-            grade_rows = self._group_video_values(conn, uploader_id, "视频最终等级", grade_order=True)
-            like_rows = self._group_like_values(conn, uploader_id)
-            year_rows = self._group_year_values(conn, uploader_id)
-            like_series = self._load_like_series(conn, uploader_id)
-
-        return {
-            "creator": dict(creator),
-            "cached_video_count": cached_video_count,
-            "scored_video_count": scored_video_count,
-            "downloaded_count": max(downloaded_snapshot, downloaded_records),
-            "duration_rows": duration_rows,
-            "grade_rows": grade_rows,
-            "like_rows": like_rows,
-            "year_rows": year_rows,
-            "like_series": like_series,
-        }
-
-    def _load_archived_creator_detail(self, conn, uploader_id):
-        if not self._table_exists(conn, "douyin_archived_creators"):
-            return None
-        row = conn.execute(
-            """
-            SELECT *
-            FROM douyin_archived_creators
-            WHERE uploader_id = ? AND archive_status = 'active'
-            LIMIT 1
-            """,
-            (uploader_id,),
-        ).fetchone()
-        if not row:
-            return None
-        data = dict(row)
-        return {
-            "UP主姓名": data.get("uploader_name", ""),
-            "UP主UID": data.get("uploader_id", ""),
-            "UP主主页链接": data.get("homepage_url", ""),
-            "UP手动等级": data.get("manual_grade", ""),
-            "UP最终等级": data.get("final_grade", ""),
-            "UP最终分": data.get("final_score", ""),
-            "评级置信度": data.get("confidence", ""),
-            "评分来源": "archived_snapshot",
-            "粉丝数": data.get("follower_count", ""),
-            "获赞总数": data.get("total_like_count", ""),
-            "最近更新时间": data.get("latest_publish_time", ""),
-            "未更新天数": data.get("inactive_days", ""),
-            "平均几天一更": data.get("avg_update_days", ""),
-            "视频数量": data.get("published_video_count", ""),
-            "评分原因": data.get("archive_reason", ""),
-            "缺失指标": "",
-        }
-
-    def _load_cached_video_count(self, conn, uploader_id):
-        counts = []
-        if self._table_exists(conn, "cache_inventory_current"):
-            row = conn.execute(
-                'SELECT "缓存视频数" FROM "cache_inventory_current" WHERE "UP主UID" = ? LIMIT 1',
-                (uploader_id,),
-            ).fetchone()
-            if row:
-                try:
-                    counts.append(int(float(row[0] or 0)))
-                except (TypeError, ValueError):
-                    pass
-        if self._table_exists(conn, "douyin_video_state"):
-            row = conn.execute(
-                'SELECT COUNT(*) FROM "douyin_video_state" WHERE "uploader_id" = ?',
-                (uploader_id,),
-            ).fetchone()
-            if row:
-                counts.append(int(row[0] or 0))
-        return max(counts) if counts else 0
-
-    def _count_videos_for_creator(self, conn, uploader_id):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return 0
-        row = conn.execute(
-            f'SELECT COUNT(*) FROM "{self.VIDEO_TABLE}" WHERE "UP主UID" = ?',
-            (uploader_id,),
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _count_downloaded_snapshot_for_creator(self, conn, uploader_id):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return 0
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
-        if "下载状态" not in columns and "下载路径" not in columns:
-            return 0
-        status_expr = 'TRIM(COALESCE("下载状态", "")) != ""' if "下载状态" in columns else "0"
-        path_expr = 'TRIM(COALESCE("下载路径", "")) != ""' if "下载路径" in columns else "0"
-        row = conn.execute(
-            f'''
-            SELECT COUNT(*)
-            FROM "{self.VIDEO_TABLE}"
-            WHERE "UP主UID" = ?
-              AND ({status_expr} OR {path_expr})
-            ''',
-            (uploader_id,),
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _count_aweme_download_records_for_creator(self, conn, uploader_id):
-        if not self._table_exists(conn, "aweme"):
-            return 0
-        columns = {row[1] for row in conn.execute('PRAGMA table_info("aweme")')}
-        if "author_id" not in columns:
-            return 0
-        file_filter = 'AND TRIM(COALESCE(file_path, "")) != ""' if "file_path" in columns else ""
-        row = conn.execute(
-            f'''
-            SELECT COUNT(*)
-            FROM aweme
-            WHERE TRIM(COALESCE(author_id, "")) = ?
-            {file_filter}
-            ''',
-            (uploader_id,),
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-
-    def _group_video_values(self, conn, uploader_id, column, grade_order=False):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return []
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
-        if column not in columns:
-            return []
-        rows = conn.execute(
-            f'''
-            SELECT COALESCE(NULLIF(TRIM("{column}"), ''), '未分类') AS name, COUNT(*) AS count
-            FROM "{self.VIDEO_TABLE}"
-            WHERE "UP主UID" = ?
-            GROUP BY COALESCE(NULLIF(TRIM("{column}"), ''), '未分类')
-            ''',
-            (uploader_id,),
-        ).fetchall()
-        values = [(str(row["name"] or "未分类"), int(row["count"] or 0)) for row in rows]
-        if grade_order:
-            order = {grade: index for index, grade in enumerate(self.GRADE_ORDER)}
-            values.sort(key=lambda item: order.get(item[0], len(order)))
-        else:
-            values.sort(key=lambda item: item[1], reverse=True)
-        return values
-
-    def _group_like_values(self, conn, uploader_id):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return []
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
-        if "点赞数" not in columns:
-            return []
-        rows = conn.execute(
-            f'SELECT "点赞数" FROM "{self.VIDEO_TABLE}" WHERE "UP主UID" = ?',
-            (uploader_id,),
-        ).fetchall()
-        buckets = [
-            ("0-999", 0, 999),
-            ("1千-9999", 1000, 9999),
-            ("1万-9.9万", 10000, 99999),
-            ("10万+", 100000, None),
-        ]
-        counts = {label: 0 for label, _, _ in buckets}
-        missing = 0
-        for (value,) in rows:
-            try:
-                like_count = int(float(str(value or "").replace(",", "")))
-            except (TypeError, ValueError):
-                missing += 1
-                continue
-            matched = False
-            for label, lower, upper in buckets:
-                if like_count >= lower and (upper is None or like_count <= upper):
-                    counts[label] += 1
-                    matched = True
-                    break
-            if not matched:
-                missing += 1
-        values = [(label, count) for label, count in counts.items() if count > 0]
-        if missing:
-            values.append(("无点赞数据", missing))
-        return values
-
-    def _group_year_values(self, conn, uploader_id):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return []
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
-        if "发布时间戳" not in columns and "发布日期" not in columns:
-            return []
-        publish_expr = '"发布时间戳"' if "发布时间戳" in columns else "''"
-        date_expr = '"发布日期"' if "发布日期" in columns else "''"
-        like_expr = '"点赞数"' if "点赞数" in columns else "0"
-        rows = conn.execute(
-            f'''
-            SELECT {publish_expr} AS publish_ts, {date_expr} AS publish_date, {like_expr} AS like_count
-            FROM "{self.VIDEO_TABLE}"
-            WHERE "UP主UID" = ?
-            ''',
-            (uploader_id,),
-        ).fetchall()
-        grouped = {}
-        for publish_ts, publish_date, like_count in rows:
-            year = self._extract_year(publish_ts, publish_date)
-            item = grouped.setdefault(year, {"count": 0, "likes": 0})
-            item["count"] += 1
-            item["likes"] += self._safe_number(like_count)
-        sortable = sorted(
-            grouped.items(),
-            key=lambda item: (item[0] == "未知年份", item[0]),
-        )
-        known_years = [item for item in sortable if item[0] != "未知年份"]
-        unknown_years = [item for item in sortable if item[0] == "未知年份"]
-        sortable = list(reversed(known_years)) + unknown_years
-        return [(year, data["count"], data["likes"]) for year, data in sortable]
-
-    def _load_like_series(self, conn, uploader_id):
-        if not self._table_exists(conn, self.VIDEO_TABLE):
-            return []
-        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{self.VIDEO_TABLE}")')}
-        if "点赞数" not in columns:
-            return []
-        title_expr = '"视频标题"' if "视频标题" in columns else "''"
-        publish_expr = '"发布时间戳"' if "发布时间戳" in columns else "0"
-        date_expr = '"发布日期"' if "发布日期" in columns else "''"
-        grade_expr = '"视频最终等级"' if "视频最终等级" in columns else "''"
-        rows = conn.execute(
-            f'''
-            SELECT {title_expr} AS title,
-                   {publish_expr} AS publish_ts,
-                   {date_expr} AS publish_date,
-                   "点赞数" AS like_count,
-                   {grade_expr} AS grade
-            FROM "{self.VIDEO_TABLE}"
-            WHERE "UP主UID" = ?
-            ''',
-            (uploader_id,),
-        ).fetchall()
-        values = []
-        for row in rows:
-            publish_ts = self._safe_number(row["publish_ts"])
-            publish_date = str(row["publish_date"] or "").strip()
-            values.append(
-                {
-                    "title": str(row["title"] or "").strip(),
-                    "publish_ts": publish_ts,
-                    "publish_date": publish_date,
-                    "like_count": self._safe_number(row["like_count"]),
-                    "grade": str(row["grade"] or "").strip(),
-                }
-            )
-        values.sort(
-            key=lambda item: (
-                item.get("publish_ts") or 0,
-                item.get("publish_date") or "",
-                item.get("title") or "",
-            )
-        )
-        return values
-
-    @staticmethod
-    def _safe_number(value):
-        try:
-            text = str(value or "").replace(",", "").strip()
-            return int(float(text)) if text else 0
-        except (TypeError, ValueError):
-            return 0
-
-    @staticmethod
-    def _extract_year(publish_ts, publish_date):
-        timestamp = DouyinRatingOverviewDialog._safe_number(publish_ts)
-        if timestamp > 0:
-            try:
-                return datetime.fromtimestamp(timestamp).strftime("%Y")
-            except (OSError, OverflowError, ValueError):
-                pass
-        text = str(publish_date or "").strip()
-        match = re.search(r"(19|20)\d{2}", text)
-        return match.group(0) if match else "未知年份"
 
     def _clear_tables(self):
         for table in (
@@ -2024,193 +1137,34 @@ class DouyinRatingOverviewDialog(QDialog):
         )
 
     def refresh_data(self):
-        if not self.db_path.exists():
-            self.summary_label.setText(f"未找到评分数据库：{self.db_path}")
-            self._clear_tables()
-            return
-
         search_uid = self._current_search_uid()
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
-                self._attach_source_views(conn)
-                has_creator = self._table_exists(conn, self.CREATOR_TABLE)
-                has_video = self._table_exists(conn, self.VIDEO_TABLE)
-                has_eligible_filter, eligible_count, archived_count = self._prepare_eligible_uid_filter(conn)
-                stale_creator_count = (
-                    self._stale_uid_count(conn, self.CREATOR_TABLE)
-                    if has_eligible_filter and has_creator
-                    else 0
-                )
-                missing_creator_score_count = (
-                    self._missing_eligible_score_count(conn, self.CREATOR_TABLE)
-                    if has_eligible_filter and has_creator
-                    else 0
-                )
-                stale_video_count = 0
+            data = BackendApiClient().rating_overview(search_uid)
+            if not data.get("exists", True):
+                self.summary_label.setText(data.get("message") or "未找到评分数据库")
+                self._clear_tables()
+                return
+            if not data.get("tables"):
+                self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音视频评分或 UP 主评分。")
+                self._clear_tables()
+                return
 
-                if not has_creator and not has_video:
-                    self.summary_label.setText(
-                        "未找到评分表，请先运行抖音视频评分或 UP 主评分。"
-                    )
-                    self._clear_tables()
-                    return
+            summary = data.get("summary") or {}
+            for key in ("creator", "video"):
+                item = summary.get(key) or {}
+                self._set_summary(key, item.get("total", 0), item.get("counts", {}), item.get("low_confidence", 0))
 
-                if has_creator:
-                    total, counts = self._grade_counts(
-                        conn,
-                        self.CREATOR_TABLE,
-                        "UP最终等级",
-                        eligible_only=has_eligible_filter,
-                    )
-                    low_confidence = self._confidence_count(
-                        conn,
-                        self.CREATOR_TABLE,
-                        "评级置信度",
-                        ["低", "中"],
-                        eligible_only=has_eligible_filter,
-                    )
-                    self._set_summary("creator", total, counts, low_confidence)
-                    creator_join = (
-                        f'JOIN "{self.ELIGIBLE_UID_TABLE}" AS e ON c."UP主UID" = e.uid'
-                        if has_eligible_filter and not search_uid
-                        else ""
-                    )
-                    creator_where = 'WHERE c."UP主UID" = ?' if search_uid else ""
-                    creator_params = (search_uid,) if search_uid else ()
-                    self._populate_table(
-                        self.creator_top_table,
-                        self._query_rows(
-                            conn,
-                            f"""
-                            SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                                   c."粉丝数", c."视频数量", c."UP主UID"
-                            FROM creator_score_current AS c
-                            {creator_join}
-                            {creator_where}
-                            ORDER BY CAST(c."UP最终分" AS REAL) DESC
-                            """,
-                            limit=None,
-                            params=creator_params,
-                        ),
-                    )
-                    low_conditions = [
-                        '(c."UP最终等级" IN (\'C\', \'D\') OR c."评级置信度" IN (\'低\', \'中\'))'
-                    ]
-                    low_params = []
-                    if search_uid:
-                        low_conditions.insert(0, 'c."UP主UID" = ?')
-                        low_params.append(search_uid)
-                    self._populate_table(
-                        self.creator_low_table,
-                        self._query_rows(
-                            conn,
-                            f"""
-                            SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                                   c."未更新天数", c."低等级视频比例", c."UP主UID"
-                            FROM creator_score_current AS c
-                            {creator_join}
-                            WHERE {' AND '.join(low_conditions)}
-                            ORDER BY CAST(c."UP最终分" AS REAL) ASC
-                            LIMIT ?
-                            """,
-                            params=low_params,
-                        ),
-                    )
-                else:
-                    self._set_summary("creator", 0, {}, 0)
-                    self.creator_top_table.setRowCount(0)
-                    self.creator_low_table.setRowCount(0)
+            tables = data.get("tables") or {}
+            self._populate_table(self.creator_top_table, tables.get("creator_top") or [])
+            self._populate_table(self.creator_low_table, tables.get("creator_low") or [])
+            self._populate_table(self.video_top_table, tables.get("video_top") or [])
+            self._populate_table(self.video_watch_table, tables.get("video_watch") or [])
+            self._populate_table(self.archived_creator_table, tables.get("archived_creator") or [])
 
-                self._populate_table(
-                    self.archived_creator_table,
-                    self._load_archived_creator_rows(conn, uploader_id=search_uid),
-                )
-
-                if has_video:
-                    total, counts = self._grade_counts(
-                        conn,
-                        self.VIDEO_TABLE,
-                        "视频最终等级",
-                        eligible_only=False,
-                    )
-                    low_confidence = self._confidence_count(
-                        conn,
-                        self.VIDEO_TABLE,
-                        "评分置信度",
-                        ["很低", "低", "中"],
-                        eligible_only=False,
-                    )
-                    self._set_summary("video", total, counts, low_confidence)
-                    video_join = ""
-                    video_where = 'WHERE v."UP主UID" = ?' if search_uid else ""
-                    video_params = (search_uid,) if search_uid else ()
-                    self._populate_table(
-                        self.video_top_table,
-                        self._query_rows(
-                            conn,
-                            f"""
-                            SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
-                                   v."评分置信度", v."点赞数", v."下载状态", v."视频链接"
-                            FROM video_score_current AS v
-                            {video_join}
-                            LEFT JOIN creator_score_current AS c
-                              ON v."UP主UID" = c."UP主UID"
-                            {video_where}
-                            ORDER BY CAST(v."视频最终分" AS REAL) DESC
-                            LIMIT ?
-                            """,
-                            params=video_params,
-                        ),
-                    )
-                    watch_conditions = [
-                        '(v."评分置信度" IN (\'很低\', \'低\', \'中\') OR v."缺失指标" != \'\')'
-                    ]
-                    watch_params = []
-                    if search_uid:
-                        watch_conditions.insert(0, 'v."UP主UID" = ?')
-                        watch_params.append(search_uid)
-                    self._populate_table(
-                        self.video_watch_table,
-                        self._query_rows(
-                            conn,
-                            f"""
-                            SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
-                                   v."评分置信度", v."缺失指标", v."视频链接"
-                            FROM video_score_current AS v
-                            {video_join}
-                            LEFT JOIN creator_score_current AS c
-                              ON v."UP主UID" = c."UP主UID"
-                            WHERE {' AND '.join(watch_conditions)}
-                            ORDER BY CAST(v."视频最终分" AS REAL) DESC
-                            LIMIT ?
-                            """,
-                            params=watch_params,
-                        ),
-                    )
-                else:
-                    self._set_summary("video", 0, {}, 0)
-                    self.video_top_table.setRowCount(0)
-                    self.video_watch_table.setRowCount(0)
-
-            warning_parts = []
-            if search_uid:
-                warning_parts.append(f"筛选UP {search_uid}")
-            if has_eligible_filter:
-                warning_parts.append(f"UP榜仅展示 full 缓存且未归档UP {eligible_count} 位")
-            if archived_count:
-                warning_parts.append(f"已排除 active 归档UP {archived_count} 位")
-            if stale_creator_count:
-                warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
-            if missing_creator_score_count:
-                warning_parts.append(f"full UP缺少评分 {missing_creator_score_count} 位，请重新运行抖音数据同步/UP主评分")
-            if has_video:
-                warning_parts.append("视频榜展示当前缓存视频全集")
+            warning_parts = data.get("warning_parts") or []
             warning_text = f"\n范围：{'；'.join(warning_parts)}" if warning_parts else ""
-            self.summary_label.setText(
-                f"评分数据已加载：{self.db_path}\n"
-                f"UP主S级只来自手动等级；喜欢页S级视频可让已关注UP主进入详情数据，自动评分最高为A级。数据来自本地 SQLite。{warning_text}"
-            )
+            self.summary_label.setText(f"{data.get('message') or '评分数据已加载'}{warning_text}")
             self.refresh_info_label.setText(
                 f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
@@ -2730,40 +1684,7 @@ class CreatorDetailDialog(QDialog):
         self.accept()
 
     def _save_manual_grade(self, uploader_id, grade, note):
-        parent = self.parent()
-        db_path = getattr(parent, "db_path", None)
-        if not db_path:
-            raise RuntimeError("未找到评分数据库路径")
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS douyin_creator_manual_rating (
-                    uploader_id TEXT PRIMARY KEY,
-                    manual_grade TEXT NOT NULL,
-                    note TEXT,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            if grade:
-                conn.execute(
-                    """
-                    INSERT INTO douyin_creator_manual_rating
-                        (uploader_id, manual_grade, note, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(uploader_id) DO UPDATE SET
-                        manual_grade=excluded.manual_grade,
-                        note=excluded.note,
-                        updated_at=excluded.updated_at
-                    """,
-                    (uploader_id, grade, note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                )
-            else:
-                conn.execute(
-                    'DELETE FROM douyin_creator_manual_rating WHERE uploader_id = ?',
-                    (uploader_id,),
-                )
-            conn.commit()
+        BackendApiClient().save_creator_manual_grade(uploader_id, grade, note)
 
     def _open_homepage(self):
         url = str(self.creator.get("UP主主页链接") or "").strip()
@@ -2822,12 +1743,6 @@ class DouyinStatusResetDialog(QDialog):
             """
         )
 
-        from douyin_analyzer.config import load_analyzer_config
-        from douyin_analyzer.rating.store import rating_store_db_path
-
-        self.config = load_analyzer_config()
-        self.db_path = Path(self.config.export_store_db)
-        self.rating_db_path = rating_store_db_path(self.config)
         self.reset_uids = set()
         self.rows = []
 
@@ -2905,96 +1820,18 @@ class DouyinStatusResetDialog(QDialog):
             return f"{value:.0f}" if value.is_integer() else f"{value:.2f}"
         return str(value)
 
-    def _is_full_row(self, row):
-        cached_modes = str(row.get("已缓存模式") or "").lower()
-        last_fetch_mode = str(row.get("最近抓取模式") or "").strip().lower()
-        has_full = str(row.get("有full缓存") or "").strip().lower()
-        return (
-            "full" in {part.strip() for part in cached_modes.split(",")}
-            or last_fetch_mode == "full"
-            or has_full in {"是", "yes", "true", "1", "y"}
-        )
-
-    def _load_candidates(self):
-        if not self.db_path.exists():
-            return []
-        threshold = self.threshold_spin.value()
-        self.reset_uids = self._load_reset_uids()
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            if not DouyinRatingOverviewDialog._table_exists(conn, "cache_inventory_current"):
-                return []
-            rows = conn.execute('SELECT * FROM "cache_inventory_current"').fetchall()
-        candidates = []
-        for row in rows:
-            row_dict = dict(row)
-            uid = str(row_dict.get("UP主UID") or "").strip()
-            if uid and uid in self.reset_uids:
-                continue
-            if not self._is_full_row(row_dict):
-                continue
-            published = self._safe_int(row_dict.get("发布视频数量"))
-            cached = self._safe_int(row_dict.get("缓存视频数"))
-            diff = published - cached
-            if published <= 0 or diff <= threshold:
-                continue
-            candidates.append(
-                {
-                    "uploader_id": uid,
-                    "uploader_name": row_dict.get("UP主姓名") or "",
-                    "published_video_count": published,
-                    "cached_video_count": cached,
-                    "diff_count": diff,
-                    "last_fetch_mode": row_dict.get("最近抓取模式") or "",
-                    "cache_modes": row_dict.get("已缓存模式") or "",
-                    "progress_cached_at": row_dict.get("进度缓存时间") or "",
-                    "homepage_url": row_dict.get("UP主主页链接") or "",
-                }
-            )
-        candidates.sort(key=lambda item: item["diff_count"], reverse=True)
-        return candidates
-
-    def _load_reset_uids(self):
-        reset_uids = self._load_db_reset_uids()
-        try:
-            from douyin_analyzer.cache import CacheStore
-
-            progress = CacheStore(self.config).load_progress()
-        except Exception:
-            return reset_uids
-        for uid, entry in (progress or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            summary = entry.get("summary") if isinstance(entry.get("summary"), dict) else {}
-            if entry.get("full_status_reset") or str(summary.get("summary_scope") or "").strip().lower() == "status_reset":
-                reset_uids.add(str(uid or "").strip())
-        return {uid for uid in reset_uids if uid}
-
-    def _load_db_reset_uids(self):
-        if not self.db_path.exists():
-            return set()
-        with sqlite3.connect(str(self.db_path)) as conn:
-            if not DouyinRatingOverviewDialog._table_exists(conn, "douyin_full_status_reset"):
-                return set()
-            rows = conn.execute(
-                """
-                SELECT uploader_id
-                FROM douyin_full_status_reset
-                WHERE reset_status = 'active'
-                """
-            ).fetchall()
-        return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
-
     def refresh_data(self):
         try:
-            self.rows = self._load_candidates()
+            data = BackendApiClient().status_reset_candidates(self.threshold_spin.value())
+            self.rows = data.get("rows") or []
+            db_path = data.get("db_path") or ""
         except Exception as exc:
             self.summary_label.setText(f"读取异常 full 状态列表失败：{exc}")
             self.table.setRowCount(0)
             return
         self._populate_table(self.rows)
         self.summary_label.setText(
-            f"数据库：{self.db_path}\n"
+            f"数据库：{db_path}\n"
             f"候选：{len(self.rows)} 位；重置只会撤销 full 状态并置为过期，不删除视频缓存和评分数据。"
         )
 
@@ -3047,147 +1884,12 @@ class DouyinStatusResetDialog(QDialog):
         ) == QMessageBox.Yes:
             return
         try:
-            count = self._reset_full_status(uids)
+            count = int((BackendApiClient().reset_full_status(uids) or {}).get("count") or 0)
         except Exception as exc:
             QMessageBox.warning(self, "重置失败", str(exc))
             return
         QMessageBox.information(self, "重置完成", f"已重置 {count} 位 UP 的 full 状态。")
         self.refresh_data()
-
-    def _reset_full_status(self, uids):
-        from douyin_analyzer.cache import CacheStore
-
-        cache_store = CacheStore(self.config)
-        progress = cache_store.load_progress()
-        if not isinstance(progress, dict):
-            return 0
-        candidate_by_uid = {row["uploader_id"]: row for row in self.rows}
-        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        changed = 0
-        for uid in uids:
-            entry = progress.get(uid)
-            row = candidate_by_uid.get(uid, {})
-            if isinstance(entry, dict):
-                raw_modes = entry.get("cache_modes") or []
-                if isinstance(raw_modes, str):
-                    raw_modes = raw_modes.split(",")
-                modes = [
-                    str(mode).strip().lower()
-                    for mode in raw_modes
-                    if str(mode).strip() and str(mode).strip().lower() != "full"
-                ]
-                entry["cache_modes"] = sorted(set(modes))
-                entry["last_fetch_mode"] = "status_reset"
-                entry["cached_at"] = 0
-                entry["full_status_reset"] = {
-                    "reset_at": now_text,
-                    "reason": "full_cached_video_count_mismatch",
-                    "published_video_count": row.get("published_video_count", ""),
-                    "cached_video_count": row.get("cached_video_count", ""),
-                    "diff_count": row.get("diff_count", ""),
-                }
-                summary = entry.get("summary")
-                if isinstance(summary, dict):
-                    summary["summary_scope"] = "status_reset"
-                    summary["status_reset_at"] = now_text
-                    summary["status_reset_reason"] = "full_cached_video_count_mismatch"
-            changed += 1
-        if changed:
-            cache_store.save_progress(progress)
-            self._record_reset_rows(uids, candidate_by_uid, now_text)
-            self._update_inventory_rows(uids)
-        return changed
-
-    def _ensure_reset_table(self, conn):
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS douyin_full_status_reset (
-                uploader_id TEXT PRIMARY KEY,
-                uploader_name TEXT,
-                reset_status TEXT NOT NULL DEFAULT 'active',
-                reset_at TEXT NOT NULL,
-                reset_reason TEXT,
-                published_video_count INTEGER,
-                cached_video_count INTEGER,
-                diff_count INTEGER
-            )
-            """
-        )
-
-    def _record_reset_rows(self, uids, candidate_by_uid, reset_at):
-        if not self.db_path.exists():
-            return
-        with sqlite3.connect(str(self.db_path)) as conn:
-            self._ensure_reset_table(conn)
-            for uid in uids:
-                row = candidate_by_uid.get(uid, {})
-                conn.execute(
-                    """
-                    INSERT INTO douyin_full_status_reset (
-                        uploader_id,
-                        uploader_name,
-                        reset_status,
-                        reset_at,
-                        reset_reason,
-                        published_video_count,
-                        cached_video_count,
-                        diff_count
-                    )
-                    VALUES (?, ?, 'active', ?, 'full_cached_video_count_mismatch', ?, ?, ?)
-                    ON CONFLICT(uploader_id) DO UPDATE SET
-                        uploader_name=excluded.uploader_name,
-                        reset_status='active',
-                        reset_at=excluded.reset_at,
-                        reset_reason=excluded.reset_reason,
-                        published_video_count=excluded.published_video_count,
-                        cached_video_count=excluded.cached_video_count,
-                        diff_count=excluded.diff_count
-                    """,
-                    (
-                        uid,
-                        row.get("uploader_name", ""),
-                        reset_at,
-                        self._safe_int(row.get("published_video_count")),
-                        self._safe_int(row.get("cached_video_count")),
-                        self._safe_int(row.get("diff_count")),
-                    ),
-                )
-            conn.commit()
-
-    def _update_inventory_rows(self, uids):
-        if not self.db_path.exists():
-            return
-        with sqlite3.connect(str(self.db_path)) as conn:
-            if not DouyinRatingOverviewDialog._table_exists(conn, "cache_inventory_current"):
-                return
-            for uid in uids:
-                row = conn.execute(
-                    'SELECT "已缓存模式" FROM "cache_inventory_current" WHERE "UP主UID" = ?',
-                    (uid,),
-                ).fetchone()
-                modes = []
-                if row:
-                    modes = [
-                        part.strip()
-                        for part in str(row[0] or "").split(",")
-                        if part.strip() and part.strip().lower() != "full"
-                    ]
-                conn.execute(
-                    '''
-                UPDATE "cache_inventory_current"
-                SET "已缓存模式" = ?,
-                    "最近抓取模式" = 'status_reset',
-                    "有full缓存" = '',
-                    "进度缓存时间" = '',
-                    "下次可抓取时间" = '',
-                    "是否已到期" = '是',
-                    "统计范围" = 'status_reset'
-                WHERE "UP主UID" = ?
-                    ''',
-                    (",".join(sorted(set(modes))), uid),
-                )
-            conn.commit()
-
 
 class DouyinArchiveDialog(QDialog):
     CANDIDATE_COLUMNS = [
@@ -3257,10 +1959,6 @@ class DouyinArchiveDialog(QDialog):
             """
         )
 
-        from douyin_analyzer.config import load_analyzer_config
-
-        self.config = load_analyzer_config()
-        self.db_path = Path(self.config.export_store_db)
         self.candidates = []
         self.archived_rows = []
 
@@ -3404,21 +2102,17 @@ class DouyinArchiveDialog(QDialog):
         return sorted(set(uids))
 
     def refresh_data(self):
-        from douyin_analyzer.archive import load_archive_candidates, load_archived_creators
-
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
-            self.candidates = load_archive_candidates(
-                self.db_path,
-                inactive_days_threshold=self.threshold_spin.value(),
-                rating_db_path=self.rating_db_path,
-            )
-            self.archived_rows = load_archived_creators(self.db_path, active_only=False)
+            data = BackendApiClient().archive_state(self.threshold_spin.value())
+            db_path = data.get("db_path") or ""
+            self.candidates = data.get("candidates") or []
+            self.archived_rows = data.get("archived_rows") or []
             self._populate_table(self.candidate_table, self.CANDIDATE_COLUMNS, self.candidates)
             self._populate_table(self.archived_table, self.ARCHIVED_COLUMNS, self.archived_rows)
             active_count = sum(1 for row in self.archived_rows if str(row.get("archive_status") or "") == "active")
             self.summary_label.setText(
-                f"数据库：{self.db_path}\n"
+                f"数据库：{db_path}\n"
                 f"候选归档：{len(self.candidates)} 位；active 已归档：{active_count} 位；"
                 "归档不会删除任何历史数据，后续主流程会跳过 active 归档对象。"
             )
@@ -3447,8 +2141,6 @@ class DouyinArchiveDialog(QDialog):
         self._archive_rows(list(self.candidates))
 
     def _archive_rows(self, rows):
-        from douyin_analyzer.archive import archive_creators
-
         if not rows:
             return
         reply = QMessageBox.question(
@@ -3461,13 +2153,17 @@ class DouyinArchiveDialog(QDialog):
         )
         if reply != QMessageBox.Yes:
             return
-        count = archive_creators(self.db_path, rows)
+        uids = [str(row.get("uploader_id") or "").strip() for row in rows]
+        count = int(
+            (BackendApiClient().archive_douyin_creators(
+                uids=uids,
+                threshold=self.threshold_spin.value(),
+            ) or {}).get("count") or 0
+        )
         QMessageBox.information(self, "归档完成", f"已归档 {count} 位 UP。")
         self.refresh_data()
 
     def restore_selected(self):
-        from douyin_analyzer.archive import restore_creators
-
         uids = self._selected_uids(self.archived_table)
         if not uids:
             QMessageBox.information(self, "请选择归档对象", "请先在已归档列表中选择要恢复的 UP。")
@@ -3481,7 +2177,7 @@ class DouyinArchiveDialog(QDialog):
         )
         if reply != QMessageBox.Yes:
             return
-        count = restore_creators(self.db_path, uids)
+        count = int((BackendApiClient().restore_archived_creators(uids) or {}).get("count") or 0)
         QMessageBox.information(self, "恢复完成", f"已恢复 {count} 位 active 归档 UP。")
         self.refresh_data()
 
@@ -3580,9 +2276,17 @@ class MainWindow(QMainWindow):
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
         self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
         self.douyin_uid_list_path = str(DEFAULT_DOUYIN_UID_LIST)
-        self.bilibili_runtime_settings = _load_default_bilibili_runtime_settings()
-        self.douyin_runtime_settings = _load_default_douyin_runtime_settings()
-        self.fetch_order_settings = _load_default_fetch_order_settings()
+        try:
+            config_defaults = _load_backend_config_defaults()
+            self.bilibili_runtime_settings = config_defaults["bilibili_runtime_settings"]
+            self.douyin_runtime_settings = config_defaults["douyin_runtime_settings"]
+            self.fetch_order_settings = config_defaults["fetch_order_settings"]
+            self._config_defaults_error = ""
+        except Exception as exc:
+            self.bilibili_runtime_settings = {}
+            self.douyin_runtime_settings = {}
+            self.fetch_order_settings = _load_default_fetch_order_settings()
+            self._config_defaults_error = str(exc)
         self.auto_full_enabled = False
         self.auto_full_next_run_at = None
         self._loading_gui_config = False
@@ -3599,6 +2303,12 @@ class MainWindow(QMainWindow):
         self._load_gui_config()
         self._sync_visible_options()
         self._sync_auto_full_timer()
+        if self._config_defaults_error:
+            self._append_log(f"读取后端默认配置失败：{self._config_defaults_error}")
+            self._show_warning_dialog(
+                "默认配置读取失败",
+                "无法从 /api/config/defaults 读取默认配置。请先启动后端：python -m backend",
+            )
 
     def _apply_readable_style(self):
         self.setStyleSheet(
@@ -4204,6 +2914,7 @@ class MainWindow(QMainWindow):
         self._start_task_progress("抖音数据同步中，正在补齐本地表数据...")
         _set_button_busy(self.douyin_data_sync_button, "同步中...")
         self.data_sync_worker = DouyinDataSyncThread()
+        self.data_sync_worker.log_line.connect(self._append_log)
         self.data_sync_worker.done.connect(self._on_douyin_data_sync_done)
         self.data_sync_worker.start()
 
@@ -4240,6 +2951,7 @@ class MainWindow(QMainWindow):
         self._start_task_progress("\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u4e2d\uff0c\u6b63\u5728\u6253\u5f00\u6296\u97f3\u4e3b\u9875...")
         _set_button_busy(self.liked_video_cache_button, "\u7f13\u5b58\u4e2d...")
         self.liked_video_cache_worker = DouyinLikedVideoCacheThread()
+        self.liked_video_cache_worker.log_line.connect(self._append_log)
         self.liked_video_cache_worker.done.connect(self._on_liked_video_cache_done)
         self.liked_video_cache_worker.start()
 
@@ -4427,7 +3139,7 @@ class MainWindow(QMainWindow):
     def _request_stop(self):
         if not self.worker or not self.worker.isRunning():
             return
-        request_stop()
+        self.worker.request_cancel()
         self.stop_button.setText("正在保存...")
         self.stop_button.setStyleSheet("background-color: #c62828; color: white; font-weight: 700;")
         self._append_log("已请求终止运行，正在等待安全检查点并保存当前数据...")

@@ -29,11 +29,22 @@ python -m backend
 ```text
 GET  /api/health
 GET  /api/capabilities
+GET  /api/config/defaults
 POST /api/jobs
 GET  /api/jobs
 GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/events?offset=0
 POST /api/jobs/{job_id}/cancel
+GET  /api/bilibili/cookie-status
+GET  /api/douyin/stats
+GET  /api/douyin/rating-overview
+GET  /api/douyin/creator-detail/{uploader_id}
+POST /api/douyin/creator-manual-grade
+GET  /api/douyin/status-reset
+POST /api/douyin/status-reset
+GET  /api/douyin/archive
+POST /api/douyin/archive
+POST /api/douyin/archive/restore
 ```
 
 Long analyzer runs are represented as jobs. The frontend starts a job,
@@ -54,3 +65,20 @@ runtime stop flag are not safe to run concurrently.
 - `common.repositories.AnalyzerCacheRepository` wraps platform cache stores so
   cache access can move behind a repository boundary without changing existing
   JSON/CSV cache files.
+
+## Desktop GUI Boundary
+
+- `gui.py` owns PyQt widgets, layout, dialogs, and event wiring.
+- `gui_models.py` owns GUI-facing data models such as `RunConfig`.
+- `gui_backend_client.py` owns HTTP API calls, job creation, cancellation, and
+  log polling for the desktop GUI.
+- `backend.gui_data` owns GUI data reads/writes for Douyin stats, rating
+  overview, creator details, full-status reset, and archive management.
+- `backend.config_defaults` owns analyzer default configuration reads for GUI
+  initialization.
+- Long-running GUI actions should be added to `backend.job_models.JobKind` and
+  dispatched by `backend.task_runner`, not implemented directly inside `gui.py`.
+- GUI data views should expose backend API endpoints rather than reading SQLite
+  or analyzer cache files directly from `gui.py`.
+- GUI default values should come from `/api/config/defaults`, not analyzer
+  config imports inside `gui.py`.

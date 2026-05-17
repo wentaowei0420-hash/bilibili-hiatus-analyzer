@@ -20,8 +20,10 @@ class JobKind(str, Enum):
     DOUYIN_HIGH_LIKE_EXPORT = "douyin_high_like_export"
     DOUYIN_VIDEO_SCORE = "douyin_video_score"
     DOUYIN_CREATOR_SCORE = "douyin_creator_score"
+    DOUYIN_RATING_REFRESH = "douyin_rating_refresh"
     DOUYIN_COMPACT_EXPORT = "douyin_compact_export"
     DOUYIN_DATA_SYNC = "douyin_data_sync"
+    DOUYIN_LIKED_VIDEO_CACHE = "douyin_liked_video_cache"
 
 
 class JobStatus(str, Enum):
