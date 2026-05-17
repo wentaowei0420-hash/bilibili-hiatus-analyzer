@@ -58,6 +58,7 @@ class DouyinAnalyzerConfig:
     cache_inventory_csv: Path
     full_fetch_mismatch_csv: Path
     export_store_db: Path
+    rating_store_db: Path
     export_main_table: str
     export_analysis_table: str
     export_uid_analysis_table: str
@@ -252,6 +253,10 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         cache_inventory_csv=output_dir / "douyin_cache_inventory.csv",
         full_fetch_mismatch_csv=output_dir / "douyin_full_fetch_mismatch.csv",
         export_store_db=state_dir / "douyin_export_store.db",
+        rating_store_db=_resolve_path_env(
+            "DOUYIN_RATING_STORE_DB",
+            state_dir / "douyin_rating_store.db",
+        ),
         export_main_table="main_sheet_current",
         export_analysis_table="analysis_sheet_current",
         export_uid_analysis_table="uid_analysis_sheet_current",

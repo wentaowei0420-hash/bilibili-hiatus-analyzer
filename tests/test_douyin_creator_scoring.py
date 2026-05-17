@@ -2,12 +2,13 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
-from douyin_analyzer.creator_scoring import DouyinCreatorScorer
-from douyin_analyzer.video_scoring import run_douyin_video_scoring
+from douyin_analyzer.rating.creator_scoring import DouyinCreatorScorer
+from douyin_analyzer.rating.video_scoring import run_douyin_video_scoring
 
 
 def test_followed_creator_with_liked_s_video_is_included_without_creator_s_override(tmp_path):
     db_path = tmp_path / "export_store.sqlite"
+    rating_db_path = tmp_path / "rating_store.sqlite"
     followings_cache_json = tmp_path / "douyin_followings_cache.json"
     progress_json = tmp_path / "douyin_progress.json"
 
@@ -50,16 +51,6 @@ def test_followed_creator_with_liked_s_video_is_included_without_creator_s_overr
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE douyin_video_manual_rating (
-                video_id TEXT PRIMARY KEY,
-                manual_grade TEXT NOT NULL,
-                note TEXT,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
         for video_id, uid in (("liked-followed", followed_uid), ("liked-unfollowed", unfollowed_uid)):
             payload = {
                 "aweme_id": video_id,
@@ -90,17 +81,31 @@ def test_followed_creator_with_liked_s_video_is_included_without_creator_s_overr
                     json.dumps({"liked_cache": True, "manual_grade": "S"}, ensure_ascii=False),
                 ),
             )
-            conn.execute(
-                """
-                INSERT INTO douyin_video_manual_rating (video_id, manual_grade, note, updated_at)
-                VALUES (?, 'S', 'test', '2026-01-01 00:00:00')
-                """,
-                (video_id,),
+        conn.commit()
+
+    with sqlite3.connect(rating_db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE douyin_video_manual_rating (
+                video_id TEXT PRIMARY KEY,
+                manual_grade TEXT NOT NULL,
+                note TEXT,
+                updated_at TEXT NOT NULL
             )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO douyin_video_manual_rating (video_id, manual_grade, note, updated_at)
+            VALUES (?, 'S', 'test', '2026-01-01 00:00:00')
+            """,
+            [("liked-followed",), ("liked-unfollowed",)],
+        )
         conn.commit()
 
     config = SimpleNamespace(
         export_store_db=db_path,
+        rating_store_db=rating_db_path,
         followings_cache_json=followings_cache_json,
         followings_cache_dir=tmp_path / "followings",
         progress_json=progress_json,
@@ -117,3 +122,17 @@ def test_followed_creator_with_liked_s_video_is_included_without_creator_s_overr
     assert rows[0]["final_grade"] != "S"
     assert rows[0]["manual_grade"] == ""
     assert rows[0]["score_source"] == "auto"
+
+    with sqlite3.connect(db_path) as conn:
+        source_tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    with sqlite3.connect(rating_db_path) as conn:
+        rating_tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    assert "video_score_current" not in source_tables
+    assert "creator_score_current" not in source_tables
+    assert "video_score_current" in rating_tables

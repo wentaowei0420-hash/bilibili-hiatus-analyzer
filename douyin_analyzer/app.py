@@ -34,6 +34,7 @@ from .cache import CacheStore
 from .config import load_analyzer_config, load_feishu_config
 from .exporters import save_cache_inventory_to_csv, save_video_duration_analysis_to_csv
 from .playwright_browser_client import PlaywrightDouyinBrowserClient
+from .rating.store import rating_store_db_path, source_store_db_path
 from .utils import parse_view_count
 
 
@@ -811,7 +812,7 @@ def run_export_high_like_videos_from_cache(threshold=10000):
     }
 
     unique_videos = {}
-    video_grades = _load_video_score_grades(config.export_store_db)
+    video_grades = _load_video_score_grades(rating_store_db_path(config))
 
     def add_video_candidate(video, uploader_name=""):
         if not isinstance(video, dict):
@@ -960,7 +961,7 @@ def run_cache_liked_videos_as_s(limit=None):
 
     atomic_write_csv(output_path, fieldnames, rows)
     upsert_video_state_rows(
-        config.export_store_db,
+        source_store_db_path(config),
         "douyin",
         rows,
         video_id_column="aweme_id",
@@ -978,17 +979,17 @@ def run_cache_liked_videos_as_s(limit=None):
         cached_at_getter=lambda _payload: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     _upsert_manual_video_grades(
-        config.export_store_db,
+        rating_store_db_path(config),
         [row.get("aweme_id") for row in rows],
         grade="S",
         note="homepage liked video cache",
     )
 
-    from .video_scoring import run_douyin_video_scoring
+    from .rating.video_scoring import run_douyin_video_scoring
 
     video_score_path = run_douyin_video_scoring(config)
     try:
-        from .creator_scoring import run_douyin_creator_scoring
+        from .rating.creator_scoring import run_douyin_creator_scoring
 
         run_douyin_creator_scoring(config)
     except Exception as exc:
@@ -1055,7 +1056,7 @@ def run_score_videos_from_cache(*, refresh_inventory=True):
     setup_logging(config.log_dir, "douyin_video_scoring")
     if refresh_inventory:
         refresh_cache_inventory_current(config)
-    from .video_scoring import run_douyin_video_scoring
+    from .rating.video_scoring import run_douyin_video_scoring
 
     return run_douyin_video_scoring(config)
 
@@ -1065,11 +1066,11 @@ def run_score_creators_from_cache(*, refresh_inventory=True):
     setup_logging(config.log_dir, "douyin_creator_scoring")
     if refresh_inventory:
         refresh_cache_inventory_current(config)
-    if _sqlite_table_count(config.export_store_db, "video_score_current") <= 0:
-        from .video_scoring import run_douyin_video_scoring
+    if _sqlite_table_count(rating_store_db_path(config), "video_score_current") <= 0:
+        from .rating.video_scoring import run_douyin_video_scoring
 
         run_douyin_video_scoring(config)
-    from .creator_scoring import run_douyin_creator_scoring
+    from .rating.creator_scoring import run_douyin_creator_scoring
 
     return run_douyin_creator_scoring(config)
 
@@ -1089,12 +1090,12 @@ def refresh_cache_inventory_current(config=None):
 def run_export_compact_tables_from_cache(high_like_threshold=10000):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "douyin_compact_export")
-    if _sqlite_table_count(config.export_store_db, "video_score_current") <= 0:
-        from .video_scoring import run_douyin_video_scoring
+    if _sqlite_table_count(rating_store_db_path(config), "video_score_current") <= 0:
+        from .rating.video_scoring import run_douyin_video_scoring
 
         run_douyin_video_scoring(config)
-    if _sqlite_table_count(config.export_store_db, "creator_score_current") <= 0:
-        from .creator_scoring import run_douyin_creator_scoring
+    if _sqlite_table_count(rating_store_db_path(config), "creator_score_current") <= 0:
+        from .rating.creator_scoring import run_douyin_creator_scoring
 
         run_douyin_creator_scoring(config)
     from .compact_exports import run_douyin_compact_exports

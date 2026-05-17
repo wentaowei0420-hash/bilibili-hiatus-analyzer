@@ -1281,9 +1281,11 @@ class DouyinRatingOverviewDialog(QDialog):
         )
 
         from douyin_analyzer.config import load_analyzer_config
+        from douyin_analyzer.rating.store import rating_store_db_path, source_store_db_path
 
         self.config = load_analyzer_config()
-        self.db_path = Path(self.config.export_store_db)
+        self.db_path = rating_store_db_path(self.config)
+        self.source_db_path = source_store_db_path(self.config)
         self.refresh_worker = None
 
         layout = QVBoxLayout(self)
@@ -1424,10 +1426,33 @@ class DouyinRatingOverviewDialog(QDialog):
     @staticmethod
     def _table_exists(conn, table_name):
         row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,),
+            """
+            SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name=?
+            UNION ALL
+            SELECT 1 FROM sqlite_temp_master WHERE type IN ('table', 'view') AND name=?
+            LIMIT 1
+            """,
+            (table_name, table_name),
         ).fetchone()
         return row is not None
+
+    def _attach_source_views(self, conn):
+        source_path = Path(getattr(self, "source_db_path", "") or "")
+        if not source_path.exists() or source_path == Path(getattr(self, "db_path", "")):
+            return
+        conn.execute("ATTACH DATABASE ? AS source_store", (str(source_path),))
+        for table_name in ("cache_inventory_current", "douyin_archived_creators", "douyin_video_state", "aweme"):
+            if self._table_exists(conn, table_name):
+                continue
+            source_row = conn.execute(
+                "SELECT 1 FROM source_store.sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if source_row:
+                conn.execute(
+                    f'CREATE TEMP VIEW IF NOT EXISTS "{table_name}" AS '
+                    f'SELECT * FROM source_store."{table_name}"'
+                )
 
     @staticmethod
     def _fmt(value):
@@ -1680,6 +1705,7 @@ class DouyinRatingOverviewDialog(QDialog):
 
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
+            self._attach_source_views(conn)
             creator = conn.execute(
                 f'SELECT * FROM "{self.CREATOR_TABLE}" WHERE "UP主UID" = ? LIMIT 1',
                 (uploader_id,),
@@ -2007,6 +2033,7 @@ class DouyinRatingOverviewDialog(QDialog):
 
         try:
             with sqlite3.connect(str(self.db_path)) as conn:
+                self._attach_source_views(conn)
                 has_creator = self._table_exists(conn, self.CREATOR_TABLE)
                 has_video = self._table_exists(conn, self.VIDEO_TABLE)
                 has_eligible_filter, eligible_count, archived_count = self._prepare_eligible_uid_filter(conn)

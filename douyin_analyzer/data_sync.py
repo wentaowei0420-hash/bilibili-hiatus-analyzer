@@ -6,9 +6,10 @@ from common.platform_store import ensure_platform_schema
 
 from .analyzer import DouyinHiatusAnalyzer
 from .cache import CacheStore
-from .creator_scoring import run_douyin_creator_scoring
 from .exporters import save_cache_inventory_to_csv
-from .video_scoring import DouyinVideoScorer, run_douyin_video_scoring
+from .rating.creator_scoring import run_douyin_creator_scoring
+from .rating.store import rating_store_db_path
+from .rating.video_scoring import DouyinVideoScorer, run_douyin_video_scoring
 
 
 VIDEO_ID_COLUMN = "\u89c6\u9891ID"
@@ -37,9 +38,32 @@ def _table_count(db_path, table_name):
 
 def _table_exists(conn, table_name):
     return conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
+        """
+        SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name=?
+        UNION ALL
+        SELECT name FROM sqlite_temp_master WHERE type IN ('table', 'view') AND name=?
+        LIMIT 1
+        """,
+        (table_name, table_name),
     ).fetchone() is not None
+
+
+def _attach_rating_views(conn, rating_db_path):
+    if not rating_db_path.exists():
+        return
+    conn.execute("ATTACH DATABASE ? AS rating_store", (str(rating_db_path),))
+    for table_name in ("video_score_current", "creator_score_current"):
+        if _table_exists(conn, table_name):
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM rating_store.sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if exists:
+            conn.execute(
+                f'CREATE TEMP VIEW IF NOT EXISTS "{table_name}" AS '
+                f'SELECT * FROM rating_store."{table_name}"'
+            )
 
 
 def _first_value(row, *keys):
@@ -379,12 +403,13 @@ def _refresh_cache_inventory_current(config):
 
 def diagnose_data_links(config):
     db_path = config.export_store_db
+    score_db_path = rating_store_db_path(config)
     current_progress_video_ids = _load_current_progress_video_ids(config)
     report = {
         "cache_inventory_current": _table_count(db_path, "cache_inventory_current"),
         "douyin_video_state": _table_count(db_path, "douyin_video_state"),
-        "video_score_current": _table_count(db_path, "video_score_current"),
-        "creator_score_current": _table_count(db_path, "creator_score_current"),
+        "video_score_current": _table_count(score_db_path, "video_score_current"),
+        "creator_score_current": _table_count(score_db_path, "creator_score_current"),
         "aweme": _table_count(db_path, "aweme"),
         "douyin_video_raw": _table_count(db_path, "douyin_video_raw"),
         "current_progress_videos": len(current_progress_video_ids),
@@ -410,6 +435,7 @@ def diagnose_data_links(config):
         reset_params = sorted(reset_uids)
 
     with sqlite3.connect(db_path) as conn:
+        _attach_rating_views(conn, score_db_path)
         if current_progress_video_ids:
             scored_ids = set()
             if _table_exists(conn, "video_score_current"):
@@ -526,8 +552,9 @@ def sync_progress_videos_to_state(config, *, rerun_scores=True):
         progress = {}
 
     before_state_count = _table_count(config.export_store_db, "douyin_video_state")
-    before_video_score_count = _table_count(config.export_store_db, "video_score_current")
-    before_creator_score_count = _table_count(config.export_store_db, "creator_score_current")
+    score_db_path = rating_store_db_path(config)
+    before_video_score_count = _table_count(score_db_path, "video_score_current")
+    before_creator_score_count = _table_count(score_db_path, "creator_score_current")
 
     raw_videos_processed = _sync_raw_videos_to_state(config)
     processed_creators, processed_videos, skipped_creators = _sync_progress_videos_to_state(config, progress)
@@ -541,8 +568,8 @@ def sync_progress_videos_to_state(config, *, rerun_scores=True):
         creator_score_path = run_douyin_creator_scoring(config)
 
     after_state_count = _table_count(config.export_store_db, "douyin_video_state")
-    after_video_score_count = _table_count(config.export_store_db, "video_score_current")
-    after_creator_score_count = _table_count(config.export_store_db, "creator_score_current")
+    after_video_score_count = _table_count(score_db_path, "video_score_current")
+    after_creator_score_count = _table_count(score_db_path, "creator_score_current")
     after_diagnostics = diagnose_data_links(config)
 
     return {
