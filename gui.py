@@ -2823,9 +2823,11 @@ class DouyinStatusResetDialog(QDialog):
         )
 
         from douyin_analyzer.config import load_analyzer_config
+        from douyin_analyzer.rating.store import rating_store_db_path
 
         self.config = load_analyzer_config()
         self.db_path = Path(self.config.export_store_db)
+        self.rating_db_path = rating_store_db_path(self.config)
         self.reset_uids = set()
         self.rows = []
 
@@ -3409,6 +3411,7 @@ class DouyinArchiveDialog(QDialog):
             self.candidates = load_archive_candidates(
                 self.db_path,
                 inactive_days_threshold=self.threshold_spin.value(),
+                rating_db_path=self.rating_db_path,
             )
             self.archived_rows = load_archived_creators(self.db_path, active_only=False)
             self._populate_table(self.candidate_table, self.CANDIDATE_COLUMNS, self.candidates)

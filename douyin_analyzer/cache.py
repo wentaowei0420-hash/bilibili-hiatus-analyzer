@@ -16,6 +16,7 @@ from common.platform_store import (
     upsert_video_state_rows,
 )
 
+from .rating.store import rating_store_db_path
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date
 
 
@@ -582,14 +583,18 @@ class CacheStore:
             self.config.export_main_table,
             self.config.export_analysis_table,
             self.config.export_uid_analysis_table,
-            "video_score_current",
-            "creator_score_current",
             "cache_inventory_current",
-            "douyin_creator_manual_rating",
             "douyin_full_status_reset",
             "douyin_archived_creators",
         ]:
             delete_rows_by_values(self.config.export_store_db, table_name, uploader_ids)
+        rating_db_path = rating_store_db_path(self.config)
+        for table_name in [
+            "video_score_current",
+            "creator_score_current",
+            "douyin_creator_manual_rating",
+        ]:
+            delete_rows_by_values(rating_db_path, table_name, uploader_ids)
 
     def upsert_video_state_from_progress_entries(self, progress, source_mode=None):
         video_rows = []
@@ -673,8 +678,6 @@ class CacheStore:
             (self.config.export_main_table, None),
             (self.config.export_analysis_table, None),
             (self.config.export_uid_analysis_table, None),
-            ("video_score_current", None),
-            ("creator_score_current", None),
             ("cache_inventory_current", None),
         ]
         return load_uploader_ids_from_tables(self.config.export_store_db, table_targets)

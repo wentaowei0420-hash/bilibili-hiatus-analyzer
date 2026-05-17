@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from common.file_io import atomic_write_csv
+from .rating.store import rating_store_db_path, source_store_db_path
 
 
 CREATOR_FIELDS = [
@@ -150,7 +151,8 @@ def run_douyin_compact_exports(config, high_like_threshold=10000):
 class DouyinCompactExporter:
     def __init__(self, config, high_like_threshold=10000):
         self.config = config
-        self.db_path = Path(config.export_store_db)
+        self.source_db_path = source_store_db_path(config)
+        self.rating_db_path = rating_store_db_path(config)
         self.high_like_threshold = int(high_like_threshold or 10000)
         output_dir = Path(config.output_csv).parent
         self.creator_path = Path(getattr(config, "compact_creator_csv", output_dir / "douyin_creators_summary.csv"))
@@ -176,10 +178,10 @@ class DouyinCompactExporter:
         }
 
     def _build_creator_rows(self):
-        main = _index_by(_read_table(self.db_path, "main_sheet_current"), "UP主UID")
-        duration = _index_by(_read_table(self.db_path, "analysis_sheet_current"), "UP主UID")
-        scores = _index_by(_read_table(self.db_path, "creator_score_current"), "UP主UID")
-        inventory_rows = _read_table(self.db_path, "cache_inventory_current")
+        main = _index_by(_read_table(self.source_db_path, "main_sheet_current"), "UP主UID")
+        duration = _index_by(_read_table(self.source_db_path, "analysis_sheet_current"), "UP主UID")
+        scores = _index_by(_read_table(self.rating_db_path, "creator_score_current"), "UP主UID")
+        inventory_rows = _read_table(self.source_db_path, "cache_inventory_current")
         if not inventory_rows:
             inventory_rows = _read_csv(getattr(self.config, "cache_inventory_csv", ""))
         inventory = _index_by(inventory_rows, "UP主UID")
@@ -224,7 +226,7 @@ class DouyinCompactExporter:
         return rows
 
     def _build_video_rows(self):
-        rows = _read_table(self.db_path, "video_score_current")
+        rows = _read_table(self.rating_db_path, "video_score_current")
         result = []
         for row in rows:
             like_count = _safe_int(row.get("点赞数"), 0)

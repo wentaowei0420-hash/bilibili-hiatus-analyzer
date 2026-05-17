@@ -31,10 +31,34 @@ def _connect(db_path):
 
 def _table_exists(conn, table_name):
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
+        """
+        SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name=?
+        UNION ALL
+        SELECT 1 FROM sqlite_temp_master WHERE type IN ('table', 'view') AND name=?
+        LIMIT 1
+        """,
+        (table_name, table_name),
     ).fetchone()
     return row is not None
+
+
+def _attach_rating_views(conn, rating_db_path):
+    rating_db_path = Path(rating_db_path) if rating_db_path else None
+    if not rating_db_path or not rating_db_path.exists():
+        return
+    conn.execute("ATTACH DATABASE ? AS rating_store", (str(rating_db_path),))
+    for table_name in ("video_score_current", "creator_score_current", "douyin_creator_manual_rating"):
+        if _table_exists(conn, table_name):
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM rating_store.sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if exists:
+            conn.execute(
+                f'CREATE TEMP VIEW IF NOT EXISTS "{table_name}" AS '
+                f'SELECT * FROM rating_store."{table_name}"'
+            )
 
 
 def _read_table(conn, table_name):
@@ -311,10 +335,11 @@ def _merge_creator_snapshot(uid, inventory, main, analysis, score, latest_cached
     return row
 
 
-def load_archive_candidates(db_path, inactive_days_threshold=100):
+def load_archive_candidates(db_path, inactive_days_threshold=100, rating_db_path=None):
     ensure_archive_table(db_path)
     threshold = _safe_float(inactive_days_threshold, 100.0)
     with _connect(db_path) as conn:
+        _attach_rating_views(conn, rating_db_path)
         inventory_rows = _read_table(conn, "cache_inventory_current")
         main_by_uid = {
             _text(_pick(row, "UP主UID", "UP涓籙ID", "uploader_id")): row
