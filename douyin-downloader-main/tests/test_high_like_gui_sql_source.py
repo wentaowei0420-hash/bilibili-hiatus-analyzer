@@ -7,13 +7,11 @@ from gui import HighLikeDownloaderGUI
 
 def _make_gui_probe(**overrides):
     probe = object.__new__(HighLikeDownloaderGUI)
-    probe.active_candidate_source = overrides.get("source", "SQL库")
     probe.active_filter_mode = overrides.get("mode", "指定等级")
     probe.active_filter_grade = overrides.get("grade", "A")
     probe.active_like_threshold = overrides.get("threshold", 10000)
     probe.active_min_duration = overrides.get("min_duration", 0)
     probe.active_max_duration = overrides.get("max_duration", 0)
-    probe.active_csv_path = ""
     return probe
 
 

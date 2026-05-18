@@ -125,7 +125,6 @@ def get_gui_metadata() -> dict[str, object]:
                     ("抖音取消关注", "douyin_unfollow"),
                     ("B站 UID 全量视频", "bilibili_uid"),
                     ("抖音 UID 全量视频", "douyin_uid"),
-                    ("导出抖音高赞视频", "douyin_high_like"),
                     ("抖音视频评分", "douyin_video_score"),
                     ("抖音UP主评分", "douyin_creator_score"),
                     ("导出抖音精简表", "douyin_compact_export"),

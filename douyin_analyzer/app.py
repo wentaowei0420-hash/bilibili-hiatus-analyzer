@@ -1,4 +1,3 @@
-import csv
 import json
 import os
 import sqlite3
@@ -18,7 +17,6 @@ from common.platform_store import (
     upsert_creator_rows,
     upsert_video_state_rows,
 )
-from common.retry_control import SyncRetryHandler
 from common.runtime_control import OperationCancelled, check_stop
 from bilibili_analyzer.feishu_uploader import FeishuUploader
 from bilibili_analyzer.logging_utils import (
@@ -778,151 +776,6 @@ def run_fetch_uid_videos(list_path, max_targets=None):
     return summary_rows
 
 
-def run_export_high_like_videos_from_cache(threshold=10000):
-    config = load_analyzer_config()
-    setup_logging(config.log_dir, "douyin_high_like_export")
-    cache_store = CacheStore(config)
-    progress = cache_store.load_progress()
-
-    output_path = config.output_csv.parent / "douyin_cached_high_like_videos.csv"
-    mirror_output_path = getattr(config, "high_like_export_mirror_csv", None)
-    fieldnames = [
-        "uploader_name",
-        "video_grade",
-        "video_id",
-        "aweme_id",
-        "video_title",
-        "video_url",
-        "like_count",
-        "download_status",
-        "download_time",
-        "download_path",
-    ]
-    headers = {
-        "uploader_name": "UP主",
-        "video_grade": "视频等级",
-        "video_id": "视频ID",
-        "aweme_id": "aweme_id",
-        "video_title": "视频标题",
-        "video_url": "视频链接",
-        "like_count": "点赞数",
-        "download_status": "download_status",
-        "download_time": "download_time",
-        "download_path": "download_path",
-    }
-
-    unique_videos = {}
-    video_grades = _load_video_score_grades(rating_store_db_path(config))
-
-    def add_video_candidate(video, uploader_name=""):
-        if not isinstance(video, dict):
-            return
-        try:
-            like_count = int(float(video.get("like_count") or 0))
-        except (TypeError, ValueError):
-            like_count = 0
-
-        video_id = str(video.get("aweme_id") or video.get("video_id") or video.get("bvid") or "").strip()
-        video_url = str(video.get("video_url") or "").strip()
-        unique_key = video_id or video_url
-        if not unique_key:
-            return
-        video_grade = video_grades.get(video_id, "") or str(video.get("video_manual_grade") or "").strip().upper()
-        if like_count <= threshold and video_grade != "S":
-            return
-
-        existing = unique_videos.get(unique_key)
-        row = {
-            "uploader_name": video.get("uploader_name") or uploader_name,
-            "video_grade": video_grade,
-            "video_id": video_id,
-            "aweme_id": video_id,
-            "video_title": video.get("video_title") or "",
-            "video_url": video_url,
-            "like_count": like_count,
-            "download_status": "",
-            "download_time": "",
-            "download_path": "",
-        }
-        if existing is None or like_count > int(existing.get("like_count") or 0):
-            unique_videos[unique_key] = row
-
-    for uid, entry in (progress or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        user = entry.get("user", {}) if isinstance(entry.get("user"), dict) else {}
-        uploader_name = user.get("nickname") or user.get("uploader_name") or str(uid)
-        for video in entry.get("videos", []) or []:
-            add_video_candidate(video, uploader_name)
-
-    for video in _load_liked_video_state_rows(config.export_store_db):
-        add_video_candidate(video, video.get("uploader_name") or "")
-
-    rows = sorted(
-        unique_videos.values(),
-        key=lambda item: (-int(item.get("like_count") or 0), str(item.get("uploader_name") or "")),
-    )
-    downloader_status = _load_downloader_aweme_status(
-        getattr(config, "downloader_db_path", None),
-        [row.get("aweme_id") or row.get("video_id") for row in rows],
-    )
-    failed_keys = _load_high_like_failed_keys(getattr(config, "high_like_failed_csv", None))
-    for row in rows:
-        aweme_id = str(row.get("aweme_id") or row.get("video_id") or "").strip()
-        video_url = str(row.get("video_url") or "").strip()
-        status = downloader_status.get(aweme_id)
-        if status:
-            row.update(status)
-        elif (aweme_id and f"id:{aweme_id}" in failed_keys) or (video_url and f"url:{video_url}" in failed_keys):
-            row["download_status"] = "failed_before"
-
-    def _write_high_like_csv(target_path):
-        if not target_path:
-            return None
-        target_path = Path(target_path)
-        atomic_write_csv(target_path, fieldnames, rows, header_row=headers)
-        return target_path
-
-    primary_path = _write_high_like_csv(output_path)
-    mirror_write_error = None
-    mirror_path = None
-    if mirror_output_path:
-        try:
-            mirror_path = _write_high_like_csv(mirror_output_path)
-        except Exception as exc:
-            mirror_write_error = exc
-
-    downloaded_count = sum(1 for row in rows if row.get("download_status") == "downloaded")
-    missing_path_count = sum(1 for row in rows if row.get("download_status") == "db_record_missing_path")
-    failed_before_count = sum(1 for row in rows if row.get("download_status") == "failed_before")
-    pending_count = max(len(rows) - downloaded_count - failed_before_count, 0)
-    actionable_count = max(len(rows) - downloaded_count - failed_before_count - missing_path_count, 0)
-
-    summary_lines = [
-        f"筛选条件: 点赞数 > {threshold}",
-        f"高赞总数: {len(rows)}",
-        f"已完成下载: {downloaded_count}",
-        f"DB有记录但本地路径缺失: {missing_path_count}",
-        f"失败跳过候选: {failed_before_count}",
-        f"待处理: {pending_count}",
-        f"可继续下载: {actionable_count}",
-        f"主输出文件: {primary_path or output_path}",
-    ]
-    if mirror_path and str(mirror_path) != str(primary_path):
-        summary_lines.append(f"同步输出文件: {mirror_path}")
-    if mirror_write_error:
-        summary_lines.append(f"同步输出失败: {mirror_write_error}")
-
-    get_console().print(
-        create_summary_panel(
-            "抖音缓存高赞视频导出完成",
-            summary_lines,
-            border_style="green",
-        )
-    )
-    return output_path
-
-
 def run_cache_liked_videos_as_s(limit=None):
     config = load_analyzer_config()
     setup_logging(config.log_dir, "douyin_liked_video_cache")
@@ -1133,44 +986,6 @@ def _sqlite_table_count(db_path, table_name):
         return int(conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0] or 0)
 
 
-def _load_video_score_grades(db_path):
-    db_path = Path(db_path) if db_path else None
-    if not db_path or not db_path.exists():
-        return {}
-
-    try:
-        with sqlite3.connect(db_path, timeout=10) as conn:
-            exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='video_score_current'"
-            ).fetchone()
-            if not exists:
-                return {}
-
-            columns = [row[1] for row in conn.execute('PRAGMA table_info("video_score_current")').fetchall()]
-            id_column = next((name for name in ("视频ID", "aweme_id", "video_id") if name in columns), None)
-            grade_column = next((name for name in ("视频最终等级", "final_grade", "视频等级") if name in columns), None)
-            if not id_column or not grade_column:
-                return {}
-
-            rows = conn.execute(
-                f'SELECT "{id_column}", "{grade_column}" FROM "video_score_current"'
-            ).fetchall()
-            return {
-                str(video_id).strip(): str(grade or "").strip()
-                for video_id, grade in rows
-                if str(video_id or "").strip()
-            }
-    except Exception as exc:
-        get_console().print(
-            create_summary_panel(
-                "视频等级读取失败",
-                [f"数据库: {db_path}", f"错误: {exc}"],
-                border_style="yellow",
-            )
-        )
-        return {}
-
-
 def _load_liked_video_state_rows(db_path):
     db_path = Path(db_path) if db_path else None
     if not db_path or not db_path.exists():
@@ -1225,100 +1040,6 @@ def _load_liked_video_state_rows(db_path):
         row.setdefault("video_manual_grade", "S")
         videos.append(row)
     return videos
-
-
-def _load_downloader_aweme_status(db_path, aweme_ids):
-    db_path = Path(db_path) if db_path else None
-    aweme_ids = sorted({str(item or "").strip() for item in (aweme_ids or []) if str(item or "").strip()})
-    if not db_path or not db_path.exists() or not aweme_ids:
-        return {}
-
-    def _read_statuses():
-        statuses = {}
-        with sqlite3.connect(db_path, timeout=10) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='aweme'")
-            if cursor.fetchone() is None:
-                return {}
-            for offset in range(0, len(aweme_ids), 900):
-                chunk = aweme_ids[offset : offset + 900]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT aweme_id, download_time, file_path
-                    FROM aweme
-                    WHERE aweme_id IN ({placeholders})
-                    """,
-                    chunk,
-                ).fetchall()
-                for aweme_id, download_time, file_path in rows:
-                    path_text = str(file_path or "").strip()
-                    download_status = "downloaded"
-                    if path_text and not Path(path_text).exists():
-                        download_status = "db_record_missing_path"
-                    statuses[str(aweme_id)] = {
-                        "download_status": download_status,
-                        "download_time": _format_unix_timestamp(download_time),
-                        "download_path": path_text,
-                    }
-        return statuses
-
-    try:
-        return SyncRetryHandler(max_retries=3, delays=[0.5, 1.5], jitter=(0.0, 0.2)).execute(_read_statuses)
-    except Exception as exc:
-        get_console().print(
-            create_summary_panel(
-                "下载器数据库读取失败",
-                [f"数据库: {db_path}", f"错误: {exc}"],
-                border_style="yellow",
-            )
-        )
-        return {}
-
-
-def _load_high_like_failed_keys(file_path):
-    path = Path(file_path) if file_path else None
-    if not path or not path.exists():
-        return set()
-
-    keys = set()
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as csvfile:
-            for row in csv.DictReader(csvfile):
-                row = row if isinstance(row, dict) else {}
-                aweme_id = _csv_value(row, "视频ID", "aweme_id", "aweme_id_str", "id")
-                video_url = _csv_value(row, "视频链接", "url", "link", "video_url")
-                if aweme_id:
-                    keys.add(f"id:{aweme_id}")
-                if video_url:
-                    keys.add(f"url:{video_url}")
-    except Exception as exc:
-        get_console().print(
-            create_summary_panel(
-                "高赞失败CSV读取失败",
-                [f"文件: {path}", f"错误: {exc}"],
-                border_style="yellow",
-            )
-        )
-    return keys
-
-
-def _csv_value(row, *names):
-    for name in names:
-        value = (row or {}).get(name)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def _format_unix_timestamp(value):
-    try:
-        timestamp = int(float(value))
-    except (TypeError, ValueError):
-        return ""
-    if timestamp <= 0:
-        return ""
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def main(fetch_mode_override=None):

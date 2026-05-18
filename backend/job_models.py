@@ -71,7 +71,6 @@ class JobKind(str, Enum):
     DOUYIN_UID_FETCH = "douyin_uid_fetch"
     DOUYIN_UNFOLLOW = "douyin_unfollow"
     DOUYIN_PRUNE_NON_FOLLOWED_CACHE = "douyin_prune_non_followed_cache"
-    DOUYIN_HIGH_LIKE_EXPORT = "douyin_high_like_export"
     DOUYIN_VIDEO_SCORE = "douyin_video_score"
     DOUYIN_CREATOR_SCORE = "douyin_creator_score"
     DOUYIN_RATING_REFRESH = "douyin_rating_refresh"

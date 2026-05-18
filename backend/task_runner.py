@@ -303,12 +303,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         from douyin_analyzer.app import run_prune_non_followed_cache
 
         return run_prune_non_followed_cache()
-    if kind == JobKind.DOUYIN_HIGH_LIKE_EXPORT:
-        from douyin_analyzer.app import run_export_high_like_videos_from_cache
-
-        return run_export_high_like_videos_from_cache(
-            threshold=request.high_like_threshold
-        )
     if kind == JobKind.DOUYIN_VIDEO_SCORE:
         from douyin_analyzer.app import run_score_videos_from_cache
 

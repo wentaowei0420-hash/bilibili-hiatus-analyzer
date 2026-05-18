@@ -51,44 +51,6 @@ https://www.douyin.com/video/1
     ]
 
 
-def test_load_high_like_video_rows_reads_chinese_headers(tmp_path):
-    csv_file = tmp_path / "high_like.csv"
-    csv_file.write_text(
-        """UP主,视频ID,视频标题,视频链接,点赞数
-作者,7612969279038927601,标题,https://www.douyin.com/video/7612969279038927601,2245647
-作者,7612969279038927601,重复,https://www.douyin.com/video/7612969279038927601,2245647
-""",
-        encoding="utf-8-sig",
-    )
-
-    rows = main_module._load_high_like_video_rows(str(csv_file))
-
-    assert len(rows) == 1
-    assert rows[0]["aweme_id"] == "7612969279038927601"
-    assert rows[0]["video_url"] == "https://www.douyin.com/video/7612969279038927601"
-
-
-def test_append_failed_high_like_rows_writes_csv(tmp_path):
-    failed_csv = tmp_path / "failed.csv"
-
-    main_module._append_failed_high_like_rows(
-        str(failed_csv),
-        [
-            {
-                "failed_time": "2026-04-28T02:30:00",
-                "failure_reason": "failed",
-                "UP主": "作者",
-                "视频ID": "123",
-                "视频链接": "https://www.douyin.com/video/123",
-            }
-        ],
-    )
-
-    content = failed_csv.read_text(encoding="utf-8-sig")
-    assert "failure_reason" in content
-    assert "https://www.douyin.com/video/123" in content
-
-
 @pytest.mark.asyncio
 async def test_download_url_resolves_short_link_before_parsing(monkeypatch, tmp_path):
     config = main_module.ConfigLoader()

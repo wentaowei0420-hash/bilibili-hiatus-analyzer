@@ -59,7 +59,6 @@ def capabilities() -> dict[str, object]:
             "douyin_uid_fetch",
             "douyin_unfollow",
             "douyin_prune_non_followed_cache",
-            "douyin_high_like_export",
             "douyin_video_score",
             "douyin_creator_score",
             "douyin_rating_refresh",

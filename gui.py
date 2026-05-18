@@ -2456,7 +2456,7 @@ class MainWindow(QMainWindow):
         self.high_like_spin.setRange(1, 100000000)
         self.high_like_spin.setValue(10000)
         self.high_like_spin.setMaximumWidth(180)
-        self.high_like_spin.setToolTip("导出抖音高赞视频时使用，其它模式不会使用该参数。")
+        self.high_like_spin.setToolTip("抖音统计与精简表导出中的高赞判定阈值。")
         self.auto_full_button = QPushButton("自动 full：关闭")
         self.auto_full_button.setToolTip("开启后按左侧间隔自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
         self.auto_full_button.clicked.connect(self._toggle_auto_full_mode)
@@ -2496,8 +2496,6 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("终止运行")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._request_stop)
-        self.high_like_export_button = QPushButton("导出高赞视频")
-        self.high_like_export_button.clicked.connect(self._start_high_like_export)
         self.video_download_button = QPushButton("视频下载")
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
         self.unfollow_cleanup_button = QPushButton("清理非当前关注缓存")
@@ -2528,7 +2526,6 @@ class MainWindow(QMainWindow):
         toolbar_buttons = (
             self.start_button,
             self.stop_button,
-            self.high_like_export_button,
             self.video_download_button,
             self.unfollow_cleanup_button,
             self.douyin_stats_button,
@@ -2603,7 +2600,6 @@ class MainWindow(QMainWindow):
         self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
         self.high_like_spin.setEnabled(editable)
         self.auto_full_interval_spin.setEnabled(editable)
-        self.high_like_export_button.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
@@ -2863,7 +2859,6 @@ class MainWindow(QMainWindow):
         self._start_task_progress("自动 full 已启动，正在等待抓取总数...")
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
-        self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -2991,36 +2986,6 @@ class MainWindow(QMainWindow):
         self._start_task_progress("任务已启动，正在等待抓取总数...")
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
-        self.high_like_export_button.setEnabled(False)
-        self.unfollow_cleanup_button.setEnabled(False)
-        self.liked_video_cache_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.stop_button.setText("终止运行")
-        self.stop_button.setStyleSheet("")
-        self.worker = RunnerThread(config)
-        self.worker.log_line.connect(self._append_log)
-        self.worker.done.connect(self._on_done)
-        self.worker.start()
-
-    def _start_high_like_export(self):
-        if self.worker and self.worker.isRunning():
-            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
-            return
-        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
-            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
-            return
-
-        config = self._collect_config()
-        config.platform = "douyin_high_like"
-        config.action = "fetch"
-        if self.config_locked:
-            self._save_gui_config()
-
-        self.log_text.clear()
-        self._start_task_progress("高赞视频导出中，正在等待统计结果...")
-        self.start_button.setEnabled(False)
-        self.high_like_export_button.setEnabled(False)
-        self.high_like_export_button.setText("导出中...")
         self.unfollow_cleanup_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -3125,7 +3090,6 @@ class MainWindow(QMainWindow):
         self.log_text.clear()
         self._start_task_progress("缓存清理中，正在等待处理进度...")
         self.start_button.setEnabled(False)
-        self.high_like_export_button.setEnabled(False)
         self.unfollow_cleanup_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
         self.unfollow_cleanup_button.setText("清理中...")
@@ -3312,8 +3276,6 @@ class MainWindow(QMainWindow):
     def _on_done(self, ok, message):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
-        self.high_like_export_button.setEnabled(not self.config_locked)
-        self.high_like_export_button.setText("导出高赞视频")
         self.unfollow_cleanup_button.setEnabled(True)
         self.unfollow_cleanup_button.setText("清理非当前关注缓存")
         self.liked_video_cache_button.setEnabled(not self.config_locked)

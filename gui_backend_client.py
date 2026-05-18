@@ -226,7 +226,6 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
         "douyin_non_followed_cleanup": "douyin_prune_non_followed_cache",
         "bilibili_uid": "bilibili_uid_fetch",
         "douyin_uid": "douyin_uid_fetch",
-        "douyin_high_like": "douyin_high_like_export",
         "douyin_video_score": "douyin_video_score",
         "douyin_creator_score": "douyin_creator_score",
         "douyin_compact_export": "douyin_compact_export",

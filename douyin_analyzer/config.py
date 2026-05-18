@@ -43,8 +43,6 @@ class DouyinAnalyzerConfig:
     post_api_pattern: str
     liked_video_api_pattern: str
     output_csv: Path
-    high_like_export_mirror_csv: Path
-    high_like_failed_csv: Path
     downloader_db_path: Path
     fetch_manifest_jsonl: Path
     all_videos_csv: Path
@@ -183,9 +181,6 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
     data_dir = root_dir / "data" / "douyin"
     output_dir = data_dir / "output"
     state_dir = data_dir / "state"
-    downloader_root = Path(
-        os.getenv("DOUYIN_DOWNLOADER_ROOT", str(root_dir / "douyin-downloader-main"))
-    )
     fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "monitor")).strip().lower()
     try:
         recent_video_limit = (
@@ -229,14 +224,6 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
             "aweme/v1/web/aweme/favorite/",
         ),
         output_csv=output_dir / "douyin_hiatus_ranking.csv",
-        high_like_export_mirror_csv=_resolve_path_env(
-            "DOUYIN_HIGH_LIKE_EXPORT_MIRROR_PATH",
-            downloader_root / "douyin_cached_high_like_videos.csv",
-        ),
-        high_like_failed_csv=_resolve_path_env(
-            "DOUYIN_HIGH_LIKE_FAILED_PATH",
-            downloader_root / "douyin_cached_high_like_videos_failed.csv",
-        ),
         downloader_db_path=_resolve_path_env(
             "DOUYIN_DOWNLOADER_DB_PATH",
             state_dir / "douyin_export_store.db",
