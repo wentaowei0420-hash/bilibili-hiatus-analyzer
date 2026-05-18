@@ -72,7 +72,8 @@ runtime stop flag are not safe to run concurrently.
 - `gui.py` owns PyQt widgets, layout, dialogs, and event wiring.
 - `gui_models.py` owns GUI-facing data models such as `RunConfig`.
 - `gui_backend_client.py` owns HTTP API calls, job creation, cancellation, and
-  log polling for the desktop GUI.
+  log polling for the desktop GUI. It also auto-starts the local backend for
+  `127.0.0.1` / `localhost` API URLs when the GUI opens.
 - `backend.gui_data` owns GUI data reads/writes for Douyin stats, rating
   overview, creator details, full-status reset, and archive management.
 - `backend.config_defaults` owns analyzer default configuration reads for GUI

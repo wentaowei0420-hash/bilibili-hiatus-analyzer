@@ -312,7 +312,7 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
             "aweme/v1/web/aweme/detail/",
         ),
         video_browser_fallback_max_ids=int(
-            os.getenv("DOUYIN_VIDEO_BROWSER_FALLBACK_MAX_IDS", "12")
+            os.getenv("DOUYIN_VIDEO_BROWSER_FALLBACK_MAX_IDS", "0")
         ),
         service_error_retry_wait=float(os.getenv("DOUYIN_SERVICE_ERROR_RETRY_WAIT", "12")),
         service_error_long_cooldown=float(

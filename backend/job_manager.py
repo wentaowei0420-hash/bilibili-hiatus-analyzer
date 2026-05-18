@@ -17,6 +17,10 @@ from .task_runner import TaskContext, run_job
 MAX_LOG_LINES = 5000
 
 
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value))
+
+
 @dataclass
 class ManagedJob:
     request: JobCreateRequest
@@ -40,7 +44,7 @@ class ManagedJob:
             id=self.id,
             kind=self.request.kind,
             status=self.status,
-            title=self.title or self.request.kind.value,
+            title=self.title or _enum_value(self.request.kind),
             created_at=self.created_at,
             started_at=self.started_at,
             finished_at=self.finished_at,
@@ -60,7 +64,7 @@ class JobManager:
         self._lock = threading.RLock()
 
     def create_job(self, request: JobCreateRequest) -> JobSummary:
-        job = ManagedJob(request=request, title=request.kind.value)
+        job = ManagedJob(request=request, title=_enum_value(request.kind))
         with self._lock:
             self._jobs[job.id] = job
             job.future = self._executor.submit(self._run_managed_job, job.id)
@@ -155,4 +159,3 @@ class JobManager:
             for key, value in values.items():
                 if hasattr(job, key):
                     setattr(job, key, value)
-

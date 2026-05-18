@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -13,15 +17,114 @@ from gui_models import RunConfig
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+ROOT_DIR = Path(__file__).resolve().parent
+BACKEND_AUTOSTART_LOG = ROOT_DIR / "runtime" / "logs" / "backend_gui_autostart.log"
+_BACKEND_PROCESS: subprocess.Popen | None = None
+_ACTIVE_API_BASE_URL: str | None = None
 
 
 class BackendApiError(RuntimeError):
     pass
 
 
+def ensure_backend_available(timeout: float = 12.0) -> None:
+    client = BackendApiClient(timeout=1.0)
+    if _backend_is_compatible(client):
+        return
+
+    target_url = client.base_url
+    try:
+        client.health()
+        target_url = _local_base_url_with_free_port(target_url)
+    except BackendApiError:
+        pass
+
+    client = BackendApiClient(base_url=target_url, timeout=1.0)
+    _start_local_backend(client.base_url)
+    deadline = time.time() + timeout
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        if _backend_is_compatible(client):
+            return
+        if _BACKEND_PROCESS is not None and _BACKEND_PROCESS.poll() is not None:
+            break
+        time.sleep(0.4)
+
+    log_hint = f"后端自启动日志：{BACKEND_AUTOSTART_LOG}"
+    if _BACKEND_PROCESS is not None and _BACKEND_PROCESS.poll() is not None:
+        raise BackendApiError(f"后端进程启动后退出，无法连接 API。{log_hint}") from last_error
+    raise BackendApiError(f"后端未在 {timeout:.0f} 秒内就绪。{log_hint}") from last_error
+
+
+def _start_local_backend(base_url: str) -> None:
+    global _ACTIVE_API_BASE_URL
+    global _BACKEND_PROCESS
+    if _BACKEND_PROCESS is not None and _BACKEND_PROCESS.poll() is None:
+        _ACTIVE_API_BASE_URL = base_url
+        return
+
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise BackendApiError(f"当前 API 地址不是本机地址，GUI 不会自动启动远端后端：{base_url}")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 8000)
+    env = os.environ.copy()
+    env["HIATUS_API_HOST"] = host if host != "::1" else "127.0.0.1"
+    env["HIATUS_API_PORT"] = str(port)
+
+    BACKEND_AUTOSTART_LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_file = BACKEND_AUTOSTART_LOG.open("a", encoding="utf-8")
+    log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] GUI autostart backend on {host}:{port}\n")
+    log_file.flush()
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    _BACKEND_PROCESS = subprocess.Popen(
+        [sys.executable, "-m", "backend"],
+        cwd=str(ROOT_DIR),
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        env=env,
+        creationflags=creationflags,
+    )
+    _ACTIVE_API_BASE_URL = f"http://127.0.0.1:{port}"
+
+
+def _backend_is_compatible(client: "BackendApiClient") -> bool:
+    try:
+        health = client.health()
+    except BackendApiError:
+        return False
+    return (
+        health.get("status") == "ok"
+        and health.get("service") == "hiatus-backend"
+        and str(health.get("api_version") or "") >= "3"
+    )
+
+
+def _local_base_url_with_free_port(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return base_url
+    return f"http://127.0.0.1:{_find_free_port()}"
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 class BackendApiClient:
     def __init__(self, base_url: Optional[str] = None, timeout: float = 20.0) -> None:
-        self.base_url = (base_url or os.getenv("HIATUS_GUI_API_URL") or DEFAULT_API_BASE_URL).rstrip("/")
+        self.base_url = (
+            base_url
+            or os.getenv("HIATUS_GUI_API_URL")
+            or _ACTIVE_API_BASE_URL
+            or DEFAULT_API_BASE_URL
+        ).rstrip("/")
         self.timeout = timeout
 
     def request(self, method: str, path: str, **kwargs) -> Any:
@@ -30,7 +133,10 @@ class BackendApiClient:
             response = requests.request(method, url, timeout=self.timeout, **kwargs)
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise BackendApiError(f"Backend API request failed: {url} ({exc})") from exc
+            body = ""
+            if getattr(exc, "response", None) is not None:
+                body = f" body={exc.response.text[:500]}"
+            raise BackendApiError(f"Backend API request failed: {url} ({exc}){body}") from exc
         if not response.content:
             return None
         return response.json()

@@ -353,8 +353,6 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
         "tables": {
             "creator_top": [],
             "creator_low": [],
-            "video_top": [],
-            "video_watch": [],
             "archived_creator": [],
         },
         "message": "",
@@ -456,47 +454,6 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
                 "counts": counts,
                 "low_confidence": low_confidence,
             }
-            video_where = 'WHERE v."UP主UID" = ?' if search_uid else ""
-            video_params = (search_uid,) if search_uid else ()
-            result["tables"]["video_top"] = _rows_to_lists(
-                _query_rows(
-                    conn,
-                    f"""
-                    SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
-                           v."评分置信度", v."点赞数", v."下载状态", v."视频链接"
-                    FROM video_score_current AS v
-                    LEFT JOIN creator_score_current AS c
-                      ON v."UP主UID" = c."UP主UID"
-                    {video_where}
-                    ORDER BY CAST(v."视频最终分" AS REAL) DESC
-                    LIMIT ?
-                    """,
-                    params=video_params,
-                )
-            )
-            watch_conditions = [
-                '(v."评分置信度" IN (\'很低\', \'低\', \'中\') OR v."缺失指标" != \'\')'
-            ]
-            watch_params = []
-            if search_uid:
-                watch_conditions.insert(0, 'v."UP主UID" = ?')
-                watch_params.append(search_uid)
-            result["tables"]["video_watch"] = _rows_to_lists(
-                _query_rows(
-                    conn,
-                    f"""
-                    SELECT v."视频标题", v."UP主姓名", v."视频最终等级", v."视频最终分",
-                           v."评分置信度", v."缺失指标", v."视频链接"
-                    FROM video_score_current AS v
-                    LEFT JOIN creator_score_current AS c
-                      ON v."UP主UID" = c."UP主UID"
-                    WHERE {' AND '.join(watch_conditions)}
-                    ORDER BY CAST(v."视频最终分" AS REAL) DESC
-                    LIMIT ?
-                    """,
-                    params=watch_params,
-                )
-            )
         else:
             result["summary"]["video"] = {"total": 0, "counts": {}, "low_confidence": 0}
 
@@ -511,8 +468,6 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
         warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
     if missing_creator_score_count:
         warning_parts.append(f"full UP缺少评分 {missing_creator_score_count} 位，请重新运行抖音数据同步/UP主评分")
-    if has_video:
-        warning_parts.append("视频榜展示当前缓存视频全集")
     result["warning_parts"] = warning_parts
     result["message"] = (
         f"评分数据已加载：{db_path}\n"

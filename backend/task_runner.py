@@ -81,7 +81,12 @@ DOUYIN_RUNTIME_FIELDS = {
     "unfollow_batch_cooldown": ("DOUYIN_UNFOLLOW_BATCH_COOLDOWN", "float"),
     "unfollow_restart_interval": ("DOUYIN_UNFOLLOW_RESTART_INTERVAL", "int"),
     "unfollow_failure_cooldown": ("DOUYIN_UNFOLLOW_FAILURE_COOLDOWN", "float"),
+    "video_browser_fallback_max_ids": ("DOUYIN_VIDEO_BROWSER_FALLBACK_MAX_IDS", "int"),
 }
+
+
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value))
 
 
 FETCH_ORDER_FIELDS = {
@@ -231,13 +236,13 @@ def run_job(request: JobCreateRequest, context: TaskContext) -> Any:
     env = _build_runtime_env(request)
     writer = LineWriter(context.emit)
     reporter = JobReporter(context.emit, context.update)
-    context.update(message=f"Starting {request.kind.value}")
+    context.update(message=f"Starting {_enum_value(request.kind)}")
 
     with _temporary_env(env), redirect_stdout(writer), redirect_stderr(writer):
         try:
             result = _dispatch_job(request, context, reporter)
             writer.flush()
-            context.update(message=f"Finished {request.kind.value}")
+            context.update(message=f"Finished {_enum_value(request.kind)}")
             return _json_safe(result)
         except OperationCancelled:
             writer.flush()
@@ -251,8 +256,8 @@ def run_job(request: JobCreateRequest, context: TaskContext) -> Any:
 
 def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> Any:
     kind = request.kind
-    context.emit(f"Job kind: {kind.value}")
-    context.emit(f"Action: {request.action.value}")
+    context.emit(f"Job kind: {_enum_value(kind)}")
+    context.emit(f"Action: {_enum_value(request.action)}")
     context.emit(f"Douyin mode: {request.douyin_fetch_mode}")
     context.emit(f"Douyin backend: {request.douyin_backend}")
     context.emit("-" * 60)
@@ -349,7 +354,7 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
             "result": result,
         }
 
-    raise ValueError(f"Unsupported job kind: {kind.value}")
+    raise ValueError(f"Unsupported job kind: {_enum_value(kind)}")
 
 
 def _format_douyin_data_sync_message(result: dict[str, Any]) -> str:
@@ -401,7 +406,7 @@ def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:
         return result
     if request.action == AnalysisAction.UPLOAD:
         return run_feishu_upload()
-    raise ValueError(f"Unsupported Bilibili action: {request.action.value}")
+    raise ValueError(f"Unsupported Bilibili action: {_enum_value(request.action)}")
 
 
 def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
@@ -433,4 +438,4 @@ def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
         return result
     if request.action == AnalysisAction.UPLOAD:
         return run_feishu_upload()
-    raise ValueError(f"Unsupported Douyin action: {request.action.value}")
+    raise ValueError(f"Unsupported Douyin action: {_enum_value(request.action)}")

@@ -2,9 +2,63 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+import sys
+from typing import Any, Optional, get_type_hints
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:
+    _MISSING = object()
+
+    class _FieldDefault:
+        def __init__(self, default: Any = _MISSING, default_factory: Any = None) -> None:
+            self.default = default
+            self.default_factory = default_factory
+
+        def make(self) -> Any:
+            if self.default_factory is not None:
+                return self.default_factory()
+            if self.default is _MISSING:
+                return None
+            return self.default
+
+    def Field(default: Any = _MISSING, default_factory: Any = None, **_kwargs: Any) -> Any:
+        return _FieldDefault(default=default, default_factory=default_factory)
+
+    class BaseModel:
+        def __init__(self, **data: Any) -> None:
+            module_globals = sys.modules[type(self).__module__].__dict__
+            annotations = get_type_hints(type(self), globalns=module_globals, localns=module_globals)
+
+            for name, annotation in annotations.items():
+                if name in data:
+                    value = data.pop(name)
+                else:
+                    default = getattr(type(self), name, _MISSING)
+                    value = default.make() if isinstance(default, _FieldDefault) else default
+                    if value is _MISSING:
+                        value = None
+                setattr(self, name, self._coerce_value(annotation, value))
+
+            for name, value in data.items():
+                setattr(self, name, value)
+
+        @staticmethod
+        def _coerce_value(annotation: Any, value: Any) -> Any:
+            try:
+                if isinstance(annotation, type) and issubclass(annotation, Enum) and not isinstance(value, annotation):
+                    return annotation(value)
+                if isinstance(annotation, type) and issubclass(annotation, BaseModel) and isinstance(value, dict):
+                    return annotation(**value)
+            except TypeError:
+                pass
+            return value
+
+        def dict(self) -> dict[str, Any]:
+            return dict(self.__dict__)
+
+        def model_dump(self) -> dict[str, Any]:
+            return self.dict()
 
 
 class JobKind(str, Enum):

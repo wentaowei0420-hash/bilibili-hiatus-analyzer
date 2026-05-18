@@ -47,6 +47,7 @@ from gui_backend_client import (
     DouyinLikedVideoCacheThread,
     RatingRefreshThread,
     RunnerThread,
+    ensure_backend_available,
 )
 from gui_models import RunConfig
 
@@ -106,6 +107,7 @@ def _bucket_tuples(items):
 
 
 def _load_backend_gui_metadata():
+    ensure_backend_available()
     return BackendApiClient().gui_metadata()
 
 
@@ -141,8 +143,6 @@ def _apply_gui_metadata(metadata):
     DouyinRatingOverviewDialog.GRADE_ORDER = tuple(rating.get("grades") or ())
     DouyinRatingOverviewDialog.CREATOR_TOP_COLUMNS = _column_pairs(tables.get("rating_creator_top"))
     DouyinRatingOverviewDialog.CREATOR_LOW_COLUMNS = _column_pairs(tables.get("rating_creator_low"))
-    DouyinRatingOverviewDialog.VIDEO_TOP_COLUMNS = _column_pairs(tables.get("rating_video_top"))
-    DouyinRatingOverviewDialog.VIDEO_WATCH_COLUMNS = _column_pairs(tables.get("rating_video_watch"))
     DouyinRatingOverviewDialog.ARCHIVED_CREATOR_COLUMNS = _column_pairs(tables.get("rating_archived_creator"))
     CreatorDetailDialog.FACTOR_COLUMNS = _column_pairs(rating.get("factor_columns"))
     DouyinStatusResetDialog.COLUMNS = _column_pairs(tables.get("status_reset"))
@@ -167,6 +167,7 @@ def _load_default_fetch_order_settings():
 
 
 def _load_backend_config_defaults():
+    ensure_backend_available()
     data = BackendApiClient().config_defaults()
     return {
         "bilibili_runtime_settings": dict(data.get("bilibili_runtime_settings") or {}),
@@ -825,8 +826,6 @@ class DouyinRatingOverviewDialog(QDialog):
     GRADE_ORDER = ()
     CREATOR_TOP_COLUMNS = []
     CREATOR_LOW_COLUMNS = []
-    VIDEO_TOP_COLUMNS = []
-    VIDEO_WATCH_COLUMNS = []
     ARCHIVED_CREATOR_COLUMNS = []
 
     def __init__(self, parent=None):
@@ -956,13 +955,9 @@ class DouyinRatingOverviewDialog(QDialog):
         )
         self.creator_top_table = self._make_table([label for label, _ in self.CREATOR_TOP_COLUMNS])
         self.creator_low_table = self._make_table([label for label, _ in self.CREATOR_LOW_COLUMNS])
-        self.video_top_table = self._make_table([label for label, _ in self.VIDEO_TOP_COLUMNS])
-        self.video_watch_table = self._make_table([label for label, _ in self.VIDEO_WATCH_COLUMNS])
         self.archived_creator_table = self._make_table([label for label, _ in self.ARCHIVED_CREATOR_COLUMNS])
         self.tabs.addTab(self.creator_top_table, "抖音排行表")
         self.tabs.addTab(self.creator_low_table, "低分/风险UP")
-        self.tabs.addTab(self.video_top_table, "高分视频")
-        self.tabs.addTab(self.video_watch_table, "待观察视频")
         self.tabs.addTab(self.archived_creator_table, "归档UP")
         layout.addWidget(self.tabs, stretch=1)
 
@@ -1119,8 +1114,6 @@ class DouyinRatingOverviewDialog(QDialog):
         for table in (
             self.creator_top_table,
             self.creator_low_table,
-            self.video_top_table,
-            self.video_watch_table,
             self.archived_creator_table,
         ):
             table.setRowCount(0)
@@ -1166,8 +1159,6 @@ class DouyinRatingOverviewDialog(QDialog):
             tables = data.get("tables") or {}
             self._populate_table(self.creator_top_table, tables.get("creator_top") or [])
             self._populate_table(self.creator_low_table, tables.get("creator_low") or [])
-            self._populate_table(self.video_top_table, tables.get("video_top") or [])
-            self._populate_table(self.video_watch_table, tables.get("video_watch") or [])
             self._populate_table(self.archived_creator_table, tables.get("archived_creator") or [])
 
             warning_parts = data.get("warning_parts") or []
@@ -2262,7 +2253,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"读取后端 GUI 元数据失败：{self._gui_metadata_error}")
             self._show_warning_dialog(
                 "GUI 元数据读取失败",
-                "无法从 /api/gui/metadata 读取界面元数据。请先启动后端：python -m backend",
+                "无法从 /api/gui/metadata 读取界面元数据。GUI 已尝试自动启动后端，请检查 runtime/logs/backend_gui_autostart.log。",
             )
         if self._config_defaults_error:
             self._append_log(f"读取后端默认配置失败：{self._config_defaults_error}")
@@ -3129,7 +3120,7 @@ class MainWindow(QMainWindow):
         if self._gui_metadata_error:
             self._show_warning_dialog(
                 "GUI 元数据未就绪",
-                "界面字段、选项和表格列定义必须从后端 /api/gui/metadata 获取。请先启动后端：python -m backend",
+                "界面字段、选项和表格列定义必须从后端 /api/gui/metadata 获取。GUI 已尝试自动启动后端，请检查 runtime/logs/backend_gui_autostart.log。",
             )
             return False
         if not self.PLATFORM_OPTIONS or not self.ACTION_OPTIONS or not self.DOUYIN_MODE_OPTIONS:

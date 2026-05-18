@@ -10,16 +10,17 @@ def main() -> None:
     if vendor_dir.exists():
         sys.path.insert(0, str(vendor_dir))
 
-    try:
-        import uvicorn
-    except ImportError as exc:
-        raise SystemExit(
-            "Missing API dependencies. Install them with: pip install fastapi uvicorn"
-        ) from exc
-
     host = os.getenv("HIATUS_API_HOST", "127.0.0.1")
     port = int(os.getenv("HIATUS_API_PORT", "8000"))
-    uvicorn.run("backend.api:app", host=host, port=port, reload=False)
+    try:
+        import uvicorn
+
+        uvicorn.run("backend.api:app", host=host, port=port, reload=False)
+    except Exception as exc:
+        print(f"FastAPI backend unavailable, falling back to stdlib backend: {exc}", flush=True)
+        from .stdlib_api import run
+
+        run(host=host, port=port)
 
 
 if __name__ == "__main__":

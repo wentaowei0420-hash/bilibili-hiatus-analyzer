@@ -39,6 +39,7 @@ DOUYIN_RUNTIME_FIELD_UI = {
     "unfollow_batch_cooldown": ("取消关注批次冷却", 0.0, 7200.0, 0.5),
     "unfollow_restart_interval": ("取消关注重启间隔", 1, 10000, 1),
     "unfollow_failure_cooldown": ("取消关注失败冷却", 0.0, 7200.0, 0.5),
+    "video_browser_fallback_max_ids": ("浏览器兜底打开视频数", 0, 100, 1),
 }
 
 
@@ -198,29 +199,6 @@ def get_gui_metadata() -> dict[str, object]:
                     ("未更新天数", "inactive_days"),
                     ("低等级比例", "low_grade_ratio"),
                     ("详情", "uploader_id"),
-                ]
-            ),
-            "rating_video_top": _columns(
-                [
-                    ("视频标题", "video_title"),
-                    ("UP主", "uploader_name"),
-                    ("等级", "final_grade"),
-                    ("分数", "final_score"),
-                    ("置信度", "confidence"),
-                    ("点赞数", "like_count"),
-                    ("下载状态", "download_status"),
-                    ("视频链接", "video_url"),
-                ]
-            ),
-            "rating_video_watch": _columns(
-                [
-                    ("视频标题", "video_title"),
-                    ("UP主", "uploader_name"),
-                    ("等级", "final_grade"),
-                    ("分数", "final_score"),
-                    ("置信度", "confidence"),
-                    ("缺失指标", "missing_metrics"),
-                    ("视频链接", "video_url"),
                 ]
             ),
             "rating_archived_creator": _columns(
