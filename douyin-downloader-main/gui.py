@@ -46,9 +46,12 @@ class HighLikeDownloaderGUI:
         self.active_batch_count = 1
         self.active_skip_failed = False
         self.active_filename_template = ""
-        self.active_filter_mode = "全部CSV"
+        self.active_candidate_source = "SQL库"
+        self.active_filter_mode = "高赞视频"
         self.active_filter_grade = "A"
         self.active_like_threshold = 10000
+        self.active_min_duration = 0
+        self.active_max_duration = 0
         self.preview_after_id = None
 
         default_config_path = str(PROJECT_ROOT / "config.yml")
@@ -74,14 +77,23 @@ class HighLikeDownloaderGUI:
         self.skip_failed_records = tk.BooleanVar(value=bool(saved_gui_settings.get("skip_failed_records", False)))
         self.saved_filename_template = self._load_config_filename_template(default_config_path)
         self.filename_template = tk.StringVar(value=self.saved_filename_template)
+        self.candidate_source = tk.StringVar(
+            value=saved_gui_settings.get("candidate_source") or "SQL库"
+        )
         self.download_filter_mode = tk.StringVar(
-            value=saved_gui_settings.get("download_filter_mode") or "全部CSV"
+            value=self._normalize_filter_mode(saved_gui_settings.get("download_filter_mode"))
         )
         self.download_filter_grade = tk.StringVar(
             value=self._normalize_grade(saved_gui_settings.get("download_filter_grade")) or "A"
         )
         self.download_like_threshold = tk.IntVar(
             value=self._coerce_int(saved_gui_settings.get("download_like_threshold"), 10000, minimum=0)
+        )
+        self.min_duration_seconds = tk.IntVar(
+            value=self._coerce_int(saved_gui_settings.get("min_duration_seconds"), 0, minimum=0)
+        )
+        self.max_duration_seconds = tk.IntVar(
+            value=self._coerce_int(saved_gui_settings.get("max_duration_seconds"), 0, minimum=0)
         )
 
         self.total_count = tk.StringVar(value="0")
@@ -94,8 +106,8 @@ class HighLikeDownloaderGUI:
         self.success_count = tk.StringVar(value="0")
         self.failed_count = tk.StringVar(value="0")
         self.skipped_count = tk.StringVar(value="0")
-        self.status = tk.StringVar(value="请选择 CSV 后点击刷新统计")
-        self.filename_preview = tk.StringVar(value="命名示例：请选择 CSV")
+        self.status = tk.StringVar(value="点击刷新统计后从 SQL 库读取候选视频")
+        self.filename_preview = tk.StringVar(value="命名示例：点击刷新统计后从 SQL 库读取候选视频")
 
         self._build_ui()
         self.filename_template.trace_add("write", self._mark_filename_template_dirty)
@@ -161,11 +173,22 @@ class HighLikeDownloaderGUI:
 
         filter_frame = ttk.LabelFrame(outer, text="下载筛选", padding=10)
         filter_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(filter_frame, text="候选来源").pack(side=tk.LEFT)
+        self.source_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.candidate_source,
+            values=("SQL库", "CSV文件"),
+            state="readonly",
+            width=8,
+        )
+        self.source_combo.pack(side=tk.LEFT, padx=(8, 18))
+        self.source_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
+
         ttk.Label(filter_frame, text="下载范围").pack(side=tk.LEFT)
         self.filter_mode_combo = ttk.Combobox(
             filter_frame,
             textvariable=self.download_filter_mode,
-            values=("全部CSV", "高赞视频", "指定等级"),
+            values=("全部视频", "高赞视频", "指定等级"),
             state="readonly",
             width=10,
         )
@@ -193,9 +216,29 @@ class HighLikeDownloaderGUI:
         )
         self.grade_combo.pack(side=tk.LEFT, padx=(8, 18))
         self.grade_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
+        ttk.Label(filter_frame, text="时长").pack(side=tk.LEFT)
+        self.min_duration_spin = ttk.Spinbox(
+            filter_frame,
+            from_=0,
+            to=86400,
+            textvariable=self.min_duration_seconds,
+            width=7,
+            command=self._on_filter_changed,
+        )
+        self.min_duration_spin.pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(filter_frame, text="~").pack(side=tk.LEFT)
+        self.max_duration_spin = ttk.Spinbox(
+            filter_frame,
+            from_=0,
+            to=86400,
+            textvariable=self.max_duration_seconds,
+            width=7,
+            command=self._on_filter_changed,
+        )
+        self.max_duration_spin.pack(side=tk.LEFT, padx=(4, 18))
         ttk.Label(
             filter_frame,
-            text="提示：选择“指定等级”后可单独下载 A 级等视频。",
+            text="提示：SQL库会直接读取评分表；时长填 0 表示不限。",
             foreground="#4b5563",
         ).pack(side=tk.LEFT)
 
@@ -242,7 +285,7 @@ class HighLikeDownloaderGUI:
         stats.pack(fill=tk.X, pady=(10, 0))
 
         items = [
-            ("CSV 视频总数", self.total_count),
+            ("候选视频总数", self.total_count),
             ("筛选后视频数量", self.filtered_count),
             ("已完成下载视频数量", self.completed_count),
             ("待下载视频数量", self.pending_count),
@@ -371,10 +414,17 @@ class HighLikeDownloaderGUI:
             self.download_path.set(str(self._resolve_download_path(settings.get("download_path") or self._load_config_download_path(path))))
             self.batch_count.set(self._coerce_int(settings.get("batch_count"), self.batch_count.get(), minimum=1))
             self.skip_failed_records.set(bool(settings.get("skip_failed_records", self.skip_failed_records.get())))
-            self.download_filter_mode.set(settings.get("download_filter_mode") or self.download_filter_mode.get())
+            self.candidate_source.set(settings.get("candidate_source") or self.candidate_source.get())
+            self.download_filter_mode.set(self._normalize_filter_mode(settings.get("download_filter_mode")))
             self.download_filter_grade.set(self._normalize_grade(settings.get("download_filter_grade")) or self.download_filter_grade.get())
             self.download_like_threshold.set(
                 self._coerce_int(settings.get("download_like_threshold"), self.download_like_threshold.get(), minimum=0)
+            )
+            self.min_duration_seconds.set(
+                self._coerce_int(settings.get("min_duration_seconds"), self.min_duration_seconds.get(), minimum=0)
+            )
+            self.max_duration_seconds.set(
+                self._coerce_int(settings.get("max_duration_seconds"), self.max_duration_seconds.get(), minimum=0)
             )
             self.saved_filename_template = self._load_config_filename_template(path)
             self.filename_template.set(self.saved_filename_template)
@@ -430,13 +480,16 @@ class HighLikeDownloaderGUI:
                 "download_path": download_path,
                 "batch_count": self._coerce_int(self.batch_count.get(), 20, minimum=1),
                 "skip_failed_records": bool(self.skip_failed_records.get()),
-                "download_filter_mode": self.download_filter_mode.get().strip() or "全部CSV",
+                "candidate_source": self.candidate_source.get().strip() or "SQL库",
+                "download_filter_mode": self._normalize_filter_mode(self.download_filter_mode.get()),
                 "download_filter_grade": self._normalize_grade(self.download_filter_grade.get()) or "A",
                 "download_like_threshold": self._coerce_int(
                     self.download_like_threshold.get(),
                     10000,
                     minimum=0,
                 ),
+                "min_duration_seconds": self._coerce_int(self.min_duration_seconds.get(), 0, minimum=0),
+                "max_duration_seconds": self._coerce_int(self.max_duration_seconds.get(), 0, minimum=0),
             }
             config = ConfigLoader(config_path)
             config.update(
@@ -684,9 +737,12 @@ class HighLikeDownloaderGUI:
         self.reset_button.configure(state=state)
         self.save_filename_button.configure(state=state)
         self.save_settings_button.configure(state=state)
+        self.source_combo.configure(state=tk.DISABLED if busy else "readonly")
         self.filter_mode_combo.configure(state=tk.DISABLED if busy else "readonly")
         self.grade_combo.configure(state=tk.DISABLED if busy else "readonly")
         self.like_threshold_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.min_duration_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.max_duration_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.stop_button.configure(state=tk.NORMAL if allow_stop else tk.DISABLED)
 
     def _run_worker(self, target):
@@ -701,21 +757,49 @@ class HighLikeDownloaderGUI:
         self.active_batch_count = max(int(self.batch_count.get()), 1)
         self.active_skip_failed = bool(self.skip_failed_records.get())
         self.active_filename_template = self.saved_filename_template
-        self.active_filter_mode = self.download_filter_mode.get().strip() or "全部CSV"
+        self.active_candidate_source = self.candidate_source.get().strip() or "SQL库"
+        self.active_filter_mode = self._normalize_filter_mode(self.download_filter_mode.get())
         self.active_filter_grade = self._normalize_grade(self.download_filter_grade.get()) or "A"
         try:
             self.active_like_threshold = max(int(self.download_like_threshold.get()), 0)
         except (TypeError, ValueError, tk.TclError):
             self.active_like_threshold = 10000
+        try:
+            self.active_min_duration = max(int(self.min_duration_seconds.get()), 0)
+        except (TypeError, ValueError, tk.TclError):
+            self.active_min_duration = 0
+        try:
+            self.active_max_duration = max(int(self.max_duration_seconds.get()), 0)
+        except (TypeError, ValueError, tk.TclError):
+            self.active_max_duration = 0
 
     def _on_filter_changed(self, *_args):
-        mode = self.download_filter_mode.get().strip() or "全部CSV"
+        mode = self._normalize_filter_mode(self.download_filter_mode.get())
         grade = self._normalize_grade(self.download_filter_grade.get()) or "A"
         try:
             threshold = max(int(self.download_like_threshold.get()), 0)
         except (TypeError, ValueError, tk.TclError):
             threshold = 10000
-        self.status.set(f"下载筛选已切换：{self._describe_filter(mode, grade, threshold)}，点击刷新统计后生效")
+        try:
+            min_duration = max(int(self.min_duration_seconds.get()), 0)
+        except (TypeError, ValueError, tk.TclError):
+            min_duration = 0
+        try:
+            max_duration = max(int(self.max_duration_seconds.get()), 0)
+        except (TypeError, ValueError, tk.TclError):
+            max_duration = 0
+        source = self.candidate_source.get().strip() or "SQL库"
+        self.status.set(
+            f"下载筛选已切换：{source}；"
+            f"{self._describe_filter(mode, grade, threshold, min_duration, max_duration)}，点击刷新统计后生效"
+        )
+
+    @staticmethod
+    def _normalize_filter_mode(value: Any) -> str:
+        text = str(value or "").strip()
+        if text == "全部CSV":
+            return "高赞视频"
+        return text if text in {"全部视频", "高赞视频", "指定等级"} else "高赞视频"
 
     @staticmethod
     def _normalize_grade(value: Any) -> str:
@@ -743,19 +827,46 @@ class HighLikeDownloaderGUI:
                 return self._safe_int(row.get(key), 0)
         return 0
 
-    def _describe_filter(self, mode: str | None = None, grade: str | None = None, threshold: int | None = None) -> str:
+    def _row_duration_seconds(self, row: dict[str, Any]) -> int:
+        for key in ("duration_seconds", "视频时长(秒)", "video_duration", "duration"):
+            if str(row.get(key) or "").strip():
+                return self._safe_int(row.get(key), 0)
+        return 0
+
+    def _describe_filter(
+        self,
+        mode: str | None = None,
+        grade: str | None = None,
+        threshold: int | None = None,
+        min_duration: int | None = None,
+        max_duration: int | None = None,
+    ) -> str:
         mode = mode or self.active_filter_mode
         grade = grade or self.active_filter_grade
         threshold = self.active_like_threshold if threshold is None else threshold
+        min_duration = self.active_min_duration if min_duration is None else min_duration
+        max_duration = self.active_max_duration if max_duration is None else max_duration
         if mode == "指定等级":
-            return f"仅下载 {grade or 'A'} 级视频"
-        if mode == "高赞视频":
-            return f"仅下载点赞数 ≥ {threshold} 的视频"
-        return "下载 CSV 中全部视频"
+            desc = f"仅下载 {grade or 'A'} 级视频"
+        elif mode == "高赞视频":
+            desc = f"仅下载点赞数 ≥ {threshold} 的视频"
+        else:
+            desc = "下载全部候选视频"
+        if min_duration and max_duration:
+            desc += f"，时长 {min_duration}~{max_duration} 秒"
+        elif min_duration:
+            desc += f"，时长 ≥ {min_duration} 秒"
+        elif max_duration:
+            desc += f"，时长 ≤ {max_duration} 秒"
+        return desc
 
     def _filter_rows_for_download(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         mode = self.active_filter_mode
-        context_by_id = self._load_filter_contexts(rows) if mode in {"指定等级", "高赞视频"} else {}
+        context_by_id = (
+            self._load_filter_contexts(rows)
+            if self.active_candidate_source == "CSV文件" and mode in {"指定等级", "高赞视频"}
+            else {}
+        )
         enriched_rows = []
         for row in rows:
             aweme_id = str(row.get("aweme_id") or row.get("视频ID") or "").strip()
@@ -764,11 +875,144 @@ class HighLikeDownloaderGUI:
 
         if mode == "指定等级":
             target_grade = self.active_filter_grade
-            return [row for row in enriched_rows if self._row_video_grade(row) == target_grade]
-        if mode == "高赞视频":
+            enriched_rows = [row for row in enriched_rows if self._row_video_grade(row) == target_grade]
+        elif mode == "高赞视频":
             threshold = self.active_like_threshold
-            return [row for row in enriched_rows if self._row_like_count(row) >= threshold]
+            enriched_rows = [row for row in enriched_rows if self._row_like_count(row) >= threshold]
+        if self.active_min_duration:
+            enriched_rows = [
+                row for row in enriched_rows if self._row_duration_seconds(row) >= self.active_min_duration
+            ]
+        if self.active_max_duration:
+            enriched_rows = [
+                row
+                for row in enriched_rows
+                if self._row_duration_seconds(row) > 0
+                and self._row_duration_seconds(row) <= self.active_max_duration
+            ]
         return list(enriched_rows)
+
+    def _load_candidate_rows(self, config: ConfigLoader) -> list[dict[str, Any]]:
+        if self.active_candidate_source == "CSV文件":
+            return _load_high_like_video_rows(self.active_csv_path)
+        return self._load_sql_video_rows(config)
+
+    def _load_sql_video_rows(self, config: ConfigLoader) -> list[dict[str, Any]]:
+        db_path = self._resolve_rating_database_path(config)
+        if not db_path.exists():
+            raise FileNotFoundError(f"未找到评分数据库：{db_path}")
+
+        with sqlite3.connect(str(db_path), timeout=10) as conn:
+            conn.row_factory = sqlite3.Row
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='video_score_current'"
+            ).fetchone()
+            if not exists:
+                raise RuntimeError(f"评分数据库缺少 video_score_current 表：{db_path}")
+
+            columns = [row[1] for row in conn.execute('PRAGMA table_info("video_score_current")').fetchall()]
+
+            def pick(*names: str) -> str:
+                return next((name for name in names if name in columns), "")
+
+            id_column = pick("视频ID", "aweme_id", "video_id")
+            if not id_column:
+                raise RuntimeError("video_score_current 缺少视频ID列")
+
+            selected = [
+                name
+                for name in (
+                    pick("UP主姓名", "UP主", "uploader_name"),
+                    pick("UP主UID", "uploader_id"),
+                    pick("视频标题", "video_title", "title"),
+                    id_column,
+                    pick("视频链接", "video_url", "url"),
+                    pick("发布日期", "发布时间", "date"),
+                    pick("发布时间戳", "create_time"),
+                    pick("视频时长(秒)", "duration_seconds", "duration"),
+                    pick("时长分类", "duration_category"),
+                    pick("点赞数", "like_count", "digg_count"),
+                    pick("视频最终等级", "视频等级", "final_grade"),
+                    pick("视频最终分", "final_score"),
+                    pick("下载状态", "download_status"),
+                    pick("下载时间", "download_time"),
+                    pick("下载路径", "download_path"),
+                )
+                if name
+            ]
+            selected = list(dict.fromkeys(selected))
+            order_parts = []
+            score_column = pick("视频最终分", "final_score")
+            like_column = pick("点赞数", "like_count", "digg_count")
+            if score_column:
+                order_parts.append(f'CAST(COALESCE("{score_column}", 0) AS REAL) DESC')
+            if like_column:
+                order_parts.append(f'CAST(COALESCE("{like_column}", 0) AS REAL) DESC')
+            order_sql = "ORDER BY " + ", ".join(order_parts) if order_parts else ""
+            sql = f'SELECT {", ".join(f"""\"{name}\"""" for name in selected)} FROM "video_score_current" {order_sql}'
+            raw_rows = conn.execute(sql).fetchall()
+
+        rows = []
+        for raw in raw_rows:
+            row = dict(raw)
+            aweme_id = str(row.get(id_column) or "").strip()
+            if not aweme_id:
+                continue
+            video_url = str(row.get("视频链接") or row.get("video_url") or row.get("url") or "").strip()
+            if not video_url:
+                video_url = f"https://www.douyin.com/video/{aweme_id}"
+            grade = row.get("视频最终等级") or row.get("视频等级") or row.get("final_grade") or ""
+            like_count = row.get("点赞数") or row.get("like_count") or row.get("digg_count") or ""
+            duration = row.get("视频时长(秒)") or row.get("duration_seconds") or row.get("duration") or ""
+            uploader_name = row.get("UP主姓名") or row.get("UP主") or row.get("uploader_name") or ""
+            video_title = row.get("视频标题") or row.get("video_title") or row.get("title") or ""
+            publish_time = row.get("发布日期") or row.get("发布时间") or row.get("date") or ""
+            normalized = {
+                **row,
+                "aweme_id": aweme_id,
+                "video_id": aweme_id,
+                "视频ID": aweme_id,
+                "video_url": video_url,
+                "视频链接": video_url,
+                "video_grade": grade,
+                "视频等级": grade,
+                "等级": grade,
+                "like_count": like_count,
+                "点赞数": like_count,
+                "duration_seconds": duration,
+                "视频时长(秒)": duration,
+                "uploader_name": uploader_name,
+                "UP主": uploader_name,
+                "UP主姓名": uploader_name,
+                "video_title": video_title,
+                "视频标题": video_title,
+                "发布时间": publish_time,
+                "发表时间": publish_time,
+                "发布日期": publish_time,
+                "date": str(publish_time or "").split(" ", 1)[0],
+                "create_time": row.get("发布时间戳") or row.get("create_time") or "",
+            }
+            rows.append(normalized)
+        return rows
+
+    def _resolve_rating_database_path(self, config: ConfigLoader) -> Path:
+        raw_config = config.config if isinstance(config.config, dict) else {}
+        for key in ("rating_database_path", "rating_store_db", "rating_db_path"):
+            value = raw_config.get(key)
+            if value:
+                path = Path(str(value)).expanduser()
+                return path if path.is_absolute() else PROJECT_ROOT / path
+
+        export_db = self._resolve_database_path(config)
+        candidates = []
+        if export_db.name == "douyin_export_store.db":
+            candidates.append(export_db.with_name("douyin_rating_store.db"))
+        candidates.append(export_db.parent / "douyin_rating_store.db")
+        candidates.append(PROJECT_ROOT.parent / "data" / "douyin" / "state" / "douyin_rating_store.db")
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def _load_filter_contexts(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         ids = []
@@ -852,7 +1096,7 @@ class HighLikeDownloaderGUI:
             self.events.put(
                 (
                     "log",
-                    f"统计完成：CSV 总数 {stats['csv_total']}，筛选后 {stats['total']}，"
+                    f"统计完成：候选总数 {stats['csv_total']}，筛选后 {stats['total']}，"
                     f"筛选条件 {stats['filter_desc']}，已完成 {stats['completed']}，"
                     f"失败跳过 {stats['failed_skipped']}，待下载 {stats['pending']}",
                 )
@@ -863,10 +1107,10 @@ class HighLikeDownloaderGUI:
             self.events.put(("idle", None))
 
     async def _collect_stats(self) -> dict[str, Any]:
-        all_rows = _load_high_like_video_rows(self.active_csv_path)
-        rows = self._filter_rows_for_download(all_rows)
         config = ConfigLoader(self.active_config_path)
         self._apply_runtime_config(config)
+        all_rows = self._load_candidate_rows(config)
+        rows = self._filter_rows_for_download(all_rows)
         database = await self._open_database(config)
         completed = 0
         failed_keys = self._load_failed_video_keys() if self.active_skip_failed else set()
@@ -886,7 +1130,7 @@ class HighLikeDownloaderGUI:
             "completed": completed,
             "pending": max(len(rows) - completed - failed_skipped, 0),
             "failed_skipped": failed_skipped,
-            "filter_desc": self._describe_filter(),
+            "filter_desc": f"{self.active_candidate_source}；{self._describe_filter()}",
         }
 
     def _download_worker(self):
@@ -900,10 +1144,10 @@ class HighLikeDownloaderGUI:
             self.events.put(("idle", None))
 
     async def _download_selected_rows(self) -> dict[str, int]:
-        all_rows = _load_high_like_video_rows(self.active_csv_path)
-        rows = self._filter_rows_for_download(all_rows)
         config = ConfigLoader(self.active_config_path)
         self._apply_runtime_config(config)
+        all_rows = self._load_candidate_rows(config)
+        rows = self._filter_rows_for_download(all_rows)
         database = await self._open_database(config)
         failed_rows: list[dict[str, Any]] = []
 
