@@ -7,6 +7,7 @@ RATING_TABLES = (
     "creator_score_current",
     "douyin_creator_manual_rating",
     "douyin_video_manual_rating",
+    "douyin_creator_ladder_exclusion",
 )
 
 

@@ -142,6 +142,7 @@ def _apply_gui_metadata(metadata):
     DouyinStatsDialogV2.VIDEO_DURATION_BUCKETS = _bucket_tuples(stats.get("video_duration_buckets"))
     DouyinRatingOverviewDialog.GRADE_ORDER = tuple(rating.get("grades") or ())
     DouyinRatingOverviewDialog.CREATOR_TOP_COLUMNS = _column_pairs(tables.get("rating_creator_top"))
+    DouyinRatingOverviewDialog.CREATOR_LADDER_COLUMNS = _column_pairs(tables.get("rating_creator_ladder"))
     DouyinRatingOverviewDialog.CREATOR_LOW_COLUMNS = _column_pairs(tables.get("rating_creator_low"))
     DouyinRatingOverviewDialog.ARCHIVED_CREATOR_COLUMNS = _column_pairs(tables.get("rating_archived_creator"))
     CreatorDetailDialog.FACTOR_COLUMNS = _column_pairs(rating.get("factor_columns"))
@@ -825,6 +826,7 @@ class DouyinRatingOverviewDialog(QDialog):
     ELIGIBLE_UID_TABLE = "_rating_eligible_uids"
     GRADE_ORDER = ()
     CREATOR_TOP_COLUMNS = []
+    CREATOR_LADDER_COLUMNS = []
     CREATOR_LOW_COLUMNS = []
     ARCHIVED_CREATOR_COLUMNS = []
 
@@ -954,9 +956,11 @@ class DouyinRatingOverviewDialog(QDialog):
             """
         )
         self.creator_top_table = self._make_table([label for label, _ in self.CREATOR_TOP_COLUMNS])
+        self.creator_ladder_table = self._make_table([label for label, _ in self.CREATOR_LADDER_COLUMNS])
         self.creator_low_table = self._make_table([label for label, _ in self.CREATOR_LOW_COLUMNS])
         self.archived_creator_table = self._make_table([label for label, _ in self.ARCHIVED_CREATOR_COLUMNS])
         self.tabs.addTab(self.creator_top_table, "抖音排行表")
+        self.tabs.addTab(self.creator_ladder_table, "天梯榜")
         self.tabs.addTab(self.creator_low_table, "低分/风险UP")
         self.tabs.addTab(self.archived_creator_table, "归档UP")
         layout.addWidget(self.tabs, stretch=1)
@@ -996,7 +1000,7 @@ class DouyinRatingOverviewDialog(QDialog):
         table.horizontalHeader().setMinimumHeight(42)
         table.horizontalHeader().setMinimumSectionSize(70)
         for column, header in enumerate(headers):
-            if header == "详情":
+            if header in {"详情", "设为S级", "取消资格"}:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
             elif column == len(headers) - 1 or header in {"UP主主页链接", "视频链接", "视频标题", "归档原因"}:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
@@ -1069,6 +1073,28 @@ class DouyinRatingOverviewDialog(QDialog):
                     item.setData(SORT_ROLE, uid.lower())
                     table.setItem(row_index, column_index, item)
                     continue
+                if header_text == "设为S级":
+                    uid = str(value or "").strip()
+                    button = QPushButton("设为S级")
+                    button.setEnabled(bool(uid))
+                    button.setProperty("uploader_id", uid)
+                    button.clicked.connect(self._set_ladder_creator_s_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("设为S级")
+                    item.setData(SORT_ROLE, uid.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
+                if header_text == "取消资格":
+                    uid = str(value or "").strip()
+                    button = QPushButton("取消资格")
+                    button.setEnabled(bool(uid))
+                    button.setProperty("uploader_id", uid)
+                    button.clicked.connect(self._exclude_ladder_creator_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("取消资格")
+                    item.setData(SORT_ROLE, uid.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
                 text = self._fmt(value)
                 item = SortableTableWidgetItem(text)
                 item.setToolTip(text)
@@ -1113,6 +1139,7 @@ class DouyinRatingOverviewDialog(QDialog):
     def _clear_tables(self):
         for table in (
             self.creator_top_table,
+            self.creator_ladder_table,
             self.creator_low_table,
             self.archived_creator_table,
         ):
@@ -1158,6 +1185,7 @@ class DouyinRatingOverviewDialog(QDialog):
 
             tables = data.get("tables") or {}
             self._populate_table(self.creator_top_table, tables.get("creator_top") or [])
+            self._populate_table(self.creator_ladder_table, tables.get("creator_ladder") or [])
             self._populate_table(self.creator_low_table, tables.get("creator_low") or [])
             self._populate_table(self.archived_creator_table, tables.get("archived_creator") or [])
 
@@ -1176,6 +1204,32 @@ class DouyinRatingOverviewDialog(QDialog):
         for grade in self.GRADE_ORDER:
             self.summary_cells[(key, grade)].setText(str(int((counts or {}).get(grade, 0))))
         self.summary_cells[(key, "low_confidence")].setText(str(low_confidence))
+
+    def _set_ladder_creator_s_from_button(self):
+        button = self.sender()
+        uid = str(button.property("uploader_id") or "").strip() if button else ""
+        if not uid:
+            return
+        try:
+            BackendApiClient().save_creator_manual_grade(uid, "S", "从天梯榜设为S级")
+        except Exception as exc:
+            QMessageBox.warning(self, "设置失败", f"设为S级失败：{exc}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_ladder_table)
+
+    def _exclude_ladder_creator_from_button(self):
+        button = self.sender()
+        uid = str(button.property("uploader_id") or "").strip() if button else ""
+        if not uid:
+            return
+        try:
+            BackendApiClient().exclude_creator_from_ladder(uid)
+        except Exception as exc:
+            QMessageBox.warning(self, "取消资格失败", f"取消资格失败：{exc}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_ladder_table)
 
 
 class LikeLineChartWidget(QWidget):

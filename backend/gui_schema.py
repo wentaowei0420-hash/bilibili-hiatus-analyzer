@@ -190,6 +190,19 @@ def get_gui_metadata() -> dict[str, object]:
                     ("详情", "uploader_id"),
                 ]
             ),
+            "rating_creator_ladder": _columns(
+                [
+                    ("UP主", "uploader_name"),
+                    ("等级", "final_grade"),
+                    ("分数", "final_score"),
+                    ("置信度", "confidence"),
+                    ("粉丝数", "follower_count"),
+                    ("作品数(缓存)", "video_count"),
+                    ("详情", "uploader_id"),
+                    ("设为S级", "uploader_id"),
+                    ("取消资格", "uploader_id"),
+                ]
+            ),
             "rating_creator_low": _columns(
                 [
                     ("UP主", "uploader_name"),

@@ -10,6 +10,8 @@ from typing import Any
 CREATOR_TABLE = "creator_score_current"
 VIDEO_TABLE = "video_score_current"
 ELIGIBLE_UID_TABLE = "_rating_eligible_uids"
+LADDER_EXCLUSION_TABLE = "douyin_creator_ladder_exclusion"
+LADDER_LIMIT = 66
 GRADE_ORDER = ("S", "A", "B", "C", "D")
 
 
@@ -344,6 +346,33 @@ def _load_archived_creator_rows(conn, limit=500, uploader_id=""):
     ).fetchall()
 
 
+def _ensure_ladder_exclusion_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS "{LADDER_EXCLUSION_TABLE}" (
+            uploader_id TEXT PRIMARY KEY,
+            uploader_name TEXT,
+            exclude_status TEXT NOT NULL DEFAULT 'active',
+            excluded_at TEXT NOT NULL,
+            exclude_reason TEXT
+        )
+        """
+    )
+
+
+def _active_ladder_exclusion_count(conn) -> int:
+    if not _table_exists(conn, LADDER_EXCLUSION_TABLE):
+        return 0
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM "{LADDER_EXCLUSION_TABLE}"
+        WHERE exclude_status = 'active'
+        """
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
 def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
     db_path, source_db_path = _rating_db_paths()
     result = {
@@ -352,6 +381,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
         "summary": {},
         "tables": {
             "creator_top": [],
+            "creator_ladder": [],
             "creator_low": [],
             "archived_creator": [],
         },
@@ -384,6 +414,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
             return result
 
         if has_creator:
+            _ensure_ladder_exclusion_table(conn)
             total, counts = _grade_counts(conn, CREATOR_TABLE, "UP最终等级", has_eligible_filter)
             low_confidence = _confidence_count(
                 conn, CREATOR_TABLE, "评级置信度", ["低", "中"], has_eligible_filter
@@ -413,6 +444,49 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
                     """,
                     limit=None,
                     params=creator_params,
+                )
+            )
+            ladder_eligible_join = (
+                f'JOIN "{ELIGIBLE_UID_TABLE}" AS e ON c."UP主UID" = e.uid'
+                if has_eligible_filter and not search_uid
+                else ""
+            )
+            ladder_manual_join = (
+                'LEFT JOIN "douyin_creator_manual_rating" AS m ON c."UP主UID" = m.uploader_id'
+                if _table_exists(conn, "douyin_creator_manual_rating")
+                else ""
+            )
+            ladder_manual_condition = (
+                "AND (m.uploader_id IS NULL OR UPPER(TRIM(COALESCE(m.manual_grade, ''))) != 'S')"
+                if ladder_manual_join
+                else ""
+            )
+            ladder_conditions = [
+                "UPPER(TRIM(COALESCE(c.\"UP最终等级\", ''))) != 'S'",
+                "lx.uploader_id IS NULL",
+            ]
+            ladder_params = []
+            if search_uid:
+                ladder_conditions.insert(0, 'c."UP主UID" = ?')
+                ladder_params.append(search_uid)
+            result["tables"]["creator_ladder"] = _rows_to_lists(
+                _query_rows(
+                    conn,
+                    f"""
+                    SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
+                           c."粉丝数", c."视频数量", c."UP主UID", c."UP主UID", c."UP主UID"
+                    FROM creator_score_current AS c
+                    {ladder_eligible_join}
+                    {ladder_manual_join}
+                    LEFT JOIN "{LADDER_EXCLUSION_TABLE}" AS lx
+                      ON c."UP主UID" = lx.uploader_id AND lx.exclude_status = 'active'
+                    WHERE {' AND '.join(ladder_conditions)}
+                    {ladder_manual_condition}
+                    ORDER BY CAST(c."UP最终分" AS REAL) DESC
+                    LIMIT ?
+                    """,
+                    limit=LADDER_LIMIT,
+                    params=ladder_params,
                 )
             )
             low_conditions = [
@@ -464,6 +538,12 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
         warning_parts.append(f"UP榜仅展示 full 缓存且未归档UP {eligible_count} 位")
     if archived_count:
         warning_parts.append(f"已排除 active 归档UP {archived_count} 位")
+    ladder_excluded_count = 0
+    if db_path.exists():
+        with sqlite3.connect(str(db_path)) as conn:
+            ladder_excluded_count = _active_ladder_exclusion_count(conn)
+    if ladder_excluded_count:
+        warning_parts.append(f"天梯榜已取消资格UP {ladder_excluded_count} 位")
     if stale_creator_count:
         warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
     if missing_creator_score_count:
@@ -787,6 +867,43 @@ def save_creator_manual_grade(uploader_id: str, grade: str, note: str = "") -> d
             )
         conn.commit()
     return {"ok": True, "uploader_id": uploader_id, "manual_grade": grade}
+
+
+def exclude_creator_from_ladder(uploader_id: str, reason: str = "天梯榜取消资格") -> dict[str, Any]:
+    db_path, _source_db_path = _rating_db_paths()
+    uploader_id = str(uploader_id or "").strip()
+    if not uploader_id:
+        raise ValueError("Missing uploader_id")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    uploader_name = ""
+    with sqlite3.connect(str(db_path)) as conn:
+        _ensure_ladder_exclusion_table(conn)
+        if _table_exists(conn, CREATOR_TABLE):
+            row = conn.execute(
+                f'SELECT "UP主姓名" FROM "{CREATOR_TABLE}" WHERE "UP主UID" = ? LIMIT 1',
+                (uploader_id,),
+            ).fetchone()
+            uploader_name = str(row[0] or "").strip() if row else ""
+        conn.execute(
+            f"""
+            INSERT INTO "{LADDER_EXCLUSION_TABLE}"
+                (uploader_id, uploader_name, exclude_status, excluded_at, exclude_reason)
+            VALUES (?, ?, 'active', ?, ?)
+            ON CONFLICT(uploader_id) DO UPDATE SET
+                uploader_name=excluded.uploader_name,
+                exclude_status='active',
+                excluded_at=excluded.excluded_at,
+                exclude_reason=excluded.exclude_reason
+            """,
+            (
+                uploader_id,
+                uploader_name,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                str(reason or "").strip() or "天梯榜取消资格",
+            ),
+        )
+        conn.commit()
+    return {"ok": True, "uploader_id": uploader_id}
 
 
 def _is_full_inventory_row(row):

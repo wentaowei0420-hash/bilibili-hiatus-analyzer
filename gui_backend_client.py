@@ -99,7 +99,7 @@ def _backend_is_compatible(client: "BackendApiClient") -> bool:
     return (
         health.get("status") == "ok"
         and health.get("service") == "hiatus-backend"
-        and str(health.get("api_version") or "") >= "3"
+        and str(health.get("api_version") or "") >= "4"
     )
 
 
@@ -182,6 +182,13 @@ class BackendApiClient:
             "POST",
             "/api/douyin/creator-manual-grade",
             json={"uploader_id": uploader_id, "grade": grade, "note": note},
+        )
+
+    def exclude_creator_from_ladder(self, uploader_id: str, reason: str = "天梯榜取消资格") -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/api/douyin/creator-ladder-exclusion",
+            json={"uploader_id": uploader_id, "reason": reason},
         )
 
     def status_reset_candidates(self, threshold: int) -> dict[str, Any]:

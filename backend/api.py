@@ -38,7 +38,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "hiatus-backend", "api_version": "3"}
+    return {"status": "ok", "service": "hiatus-backend", "api_version": "4"}
 
 
 @app.get("/api/capabilities")
@@ -109,6 +109,14 @@ def douyin_creator_manual_grade(payload: dict[str, object]) -> dict[str, object]
         str(payload.get("uploader_id") or ""),
         str(payload.get("grade") or ""),
         str(payload.get("note") or ""),
+    )
+
+
+@app.post("/api/douyin/creator-ladder-exclusion")
+def douyin_creator_ladder_exclusion(payload: dict[str, object]) -> dict[str, object]:
+    return gui_data.exclude_creator_from_ladder(
+        str(payload.get("uploader_id") or ""),
+        str(payload.get("reason") or "天梯榜取消资格"),
     )
 
 
