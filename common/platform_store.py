@@ -325,6 +325,31 @@ def read_video_rows_for_uploader(db_path, platform, uploader_id):
     return video_rows
 
 
+def read_video_counts_by_uploader(db_path, platform):
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {}
+
+    ensure_platform_schema(db_path, platform)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (_video_table(platform),),
+        )
+        if cursor.fetchone() is None:
+            return {}
+        rows = conn.execute(
+            f"""
+            SELECT uploader_id, COUNT(*)
+            FROM "{_video_table(platform)}"
+            WHERE TRIM(COALESCE(uploader_id, '')) != ''
+            GROUP BY uploader_id
+            """
+        ).fetchall()
+    return {str(uploader_id): int(count or 0) for uploader_id, count in rows}
+
+
 def upsert_cache_entries(
     db_path,
     platform,

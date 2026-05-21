@@ -3,7 +3,7 @@ import time
 
 from loguru import logger
 
-from common.platform_store import read_video_rows_for_uploader
+from common.platform_store import read_video_counts_by_uploader, read_video_rows_for_uploader
 from common.domain_models import AnalysisResult, CreatorSummary, VideoDurationSummary
 from common.output_ports import NoopExportService
 from common.repositories import AnalyzerCacheRepository
@@ -1027,6 +1027,7 @@ class DouyinHiatusAnalyzer:
         }
         all_uids = sorted(set(followings_by_uid) | set(progress.keys()))
         store_reset_uids = self.load_full_status_reset_uids_from_store()
+        stored_video_counts = read_video_counts_by_uploader(self.config.export_store_db, "douyin")
         rows = []
 
         for uid in all_uids:
@@ -1058,9 +1059,8 @@ class DouyinHiatusAnalyzer:
             cached_videos = entry.get("videos", []) if isinstance(entry, dict) else []
             cached_video_count = len(cached_videos or []) if isinstance(cached_videos, list) else 0
             if isinstance(entry, dict) and not status_reset and self.entry_has_full_cache(entry):
-                complete_stored_videos = self.load_complete_stored_videos(user, summary, cached_videos)
-                if complete_stored_videos:
-                    cached_video_count = max(cached_video_count, len(complete_stored_videos))
+                stored_video_count = int(stored_video_counts.get(uid, 0) or 0)
+                cached_video_count = max(cached_video_count, stored_video_count)
 
             rows.append(
                 {
@@ -1432,6 +1432,18 @@ class DouyinHiatusAnalyzer:
                     self.reporter.message(f"❌ 关注列表完整性校验失败，不回退旧缓存，避免未关注博主重新进入表格: {exc}")
                     logger.error("Douyin followings integrity failed | error={}", exc)
                     raise
+                if fetch_mode == "counts":
+                    self.reporter.message(
+                        "❌ 基础统计模式要求先成功打开浏览器并刷新最新关注列表；"
+                        f"本次浏览器启动或页面连接失败，已停止运行: {exc}"
+                    )
+                    logger.error(
+                        "Douyin counts followings refresh failed without cache fallback | "
+                        "cached_rows={} | error={}",
+                        len(cached_followings or []),
+                        exc,
+                    )
+                    raise
                 if cached_followings:
                     followings = cached_followings
                     self.reporter.message(f"🧭 关注列表回退缓存 | 缓存条数={len(followings)} | 失败原因={exc}")
@@ -1657,20 +1669,6 @@ class DouyinHiatusAnalyzer:
                         summary_rows.append(summary)
 
                     progress_bar.advance(task_id)
-
-                    if (
-                        self.config.intermediate_upload_interval_users > 0
-                        and index % self.config.intermediate_upload_interval_users == 0
-                    ):
-                        self.flush_partial_outputs(
-                            results,
-                            all_video_rows,
-                            summary_rows,
-                            progress,
-                            pending_progress_saves,
-                            index,
-                            merge_existing=partial_run,
-                        )
 
             self.display_counts_results(results)
             self.export_service.save_main_results(results, merge_existing=partial_run)
@@ -2002,7 +2000,10 @@ class DouyinHiatusAnalyzer:
                             videos = []
                             full_fetch_validation_error = None
                             full_fetch_attempts = 0
-                            for full_fetch_attempts in range(1, 3):
+                            max_full_fetch_attempts = (
+                                2 if self.config.full_fetch_retry_on_mismatch else 1
+                            )
+                            for full_fetch_attempts in range(1, max_full_fetch_attempts + 1):
                                 try:
                                     retry_videos = self.browser_client.get_all_videos_for_user(user)
                                     videos = self.merge_videos(videos, retry_videos)
@@ -2017,8 +2018,11 @@ class DouyinHiatusAnalyzer:
                                         f"⚠️  {user['nickname']} 全量数量校验未通过 "
                                         f"({exc.actual_count}/{exc.expected_count or '未知'})：{exc}"
                                     )
-                                    if full_fetch_attempts < 2:
-                                        self.reporter.message(f"🔁 正在重新进入 {user['nickname']} 主页执行第 2 次全量抓取校验...")
+                                    if full_fetch_attempts < max_full_fetch_attempts:
+                                        next_attempt = full_fetch_attempts + 1
+                                        self.reporter.message(
+                                            f"🔁 正在重新进入 {user['nickname']} 主页执行第 {next_attempt} 次全量抓取校验..."
+                                        )
                                         continue
                                     user["_full_fetch_validated"] = False
                                     full_fetch_mismatch_rows.append(
@@ -2029,7 +2033,8 @@ class DouyinHiatusAnalyzer:
                                         )
                                     )
                                     self.reporter.message(
-                                        f"📝 {user['nickname']} 全量两次抓取后作品数仍未对齐，"
+                                        f"📝 {user['nickname']} 全量抓取校验未通过"
+                                        f"（共尝试 {full_fetch_attempts} 次），"
                                         f"已记录到 {self.config.full_fetch_mismatch_csv.name}，继续下一个博主。"
                                     )
                             latest_video = self.get_latest_video_from_videos(videos)

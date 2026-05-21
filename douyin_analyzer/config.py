@@ -89,6 +89,7 @@ class DouyinAnalyzerConfig:
     video_scroll_steps_per_round: int
     video_scroll_distance: int
     video_page_retry_count: int
+    full_fetch_retry_on_mismatch: bool
     video_detail_api_pattern: str
     video_browser_fallback_max_ids: int
     service_error_retry_wait: float
@@ -294,6 +295,9 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
         ),
         video_scroll_distance=int(os.getenv("DOUYIN_VIDEO_SCROLL_DISTANCE", "1800")),
         video_page_retry_count=int(os.getenv("DOUYIN_VIDEO_PAGE_RETRY_COUNT", "3")),
+        full_fetch_retry_on_mismatch=_get_bool(
+            "DOUYIN_FULL_FETCH_RETRY_ON_MISMATCH", True
+        ),
         video_detail_api_pattern=os.getenv(
             "DOUYIN_VIDEO_DETAIL_API_PATTERN",
             "aweme/v1/web/aweme/detail/",

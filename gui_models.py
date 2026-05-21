@@ -11,6 +11,7 @@ class RunConfig:
     bilibili_mode: str
     douyin_fetch_mode: str
     douyin_backend: str
+    douyin_full_fetch_retry_on_mismatch: bool
     monitor_video_limit: int
     uid_limit_enabled: bool
     uid_limit: int

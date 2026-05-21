@@ -240,6 +240,9 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
         "bilibili_mode": config.bilibili_mode,
         "douyin_fetch_mode": config.douyin_fetch_mode,
         "douyin_backend": config.douyin_backend,
+        "douyin_full_fetch_retry_on_mismatch": bool(
+            config.douyin_full_fetch_retry_on_mismatch
+        ),
         "monitor_video_limit": config.monitor_video_limit,
         "uid_limit": config.uid_limit if config.uid_limit_enabled else None,
         "high_like_threshold": config.high_like_threshold,
@@ -338,6 +341,25 @@ class DouyinDataSyncThread(BackendJobThread):
 class DouyinLikedVideoCacheThread(BackendJobThread):
     def __init__(self, parent=None):
         super().__init__(payload=liked_video_cache_payload(), parent=parent)
+
+
+class ApiCallThread(QThread):
+    completed = pyqtSignal(bool, object, str)
+
+    def __init__(self, operation: str, *args, timeout: float = 60.0, parent=None, **kwargs) -> None:
+        super().__init__(parent)
+        self.operation = operation
+        self.args = args
+        self.kwargs = kwargs
+        self.timeout = timeout
+
+    def run(self) -> None:
+        try:
+            client = BackendApiClient(timeout=self.timeout)
+            result = getattr(client, self.operation)(*self.args, **self.kwargs)
+            self.completed.emit(True, result, "")
+        except Exception as exc:
+            self.completed.emit(False, None, str(exc))
 
 
 class BilibiliCookieCheckThread(QThread):

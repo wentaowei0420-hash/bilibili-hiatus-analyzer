@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QDialog,
@@ -41,6 +42,7 @@ from PyQt5.QtWidgets import (
 
 from common.file_io import atomic_write_json
 from gui_backend_client import (
+    ApiCallThread,
     BackendApiClient,
     BilibiliCookieCheckThread,
     DouyinDataSyncThread,
@@ -175,6 +177,9 @@ def _load_backend_config_defaults():
         "douyin_runtime_settings": dict(data.get("douyin_runtime_settings") or {}),
         "fetch_order_settings": _normalize_fetch_order_settings(
             data.get("fetch_order_settings") or _load_default_fetch_order_settings()
+        ),
+        "douyin_full_fetch_retry_on_mismatch": bool(
+            data.get("douyin_full_fetch_retry_on_mismatch", True)
         ),
     }
 
@@ -524,6 +529,15 @@ class DouyinStatsDialog(QDialog):
         self.refresh_stats()
 
     def refresh_stats(self):
+        if getattr(self, "stats_worker", None) and self.stats_worker.isRunning():
+            return
+        _set_button_busy(self.refresh_button, "刷新中...")
+        self.close_button.setEnabled(False)
+        self.summary_label.setText("正在后台读取抖音缓存统计...")
+        self.stats_worker = ApiCallThread("douyin_stats", self.high_like_threshold, parent=self)
+        self.stats_worker.completed.connect(self._on_stats_loaded)
+        self.stats_worker.start()
+        return
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
             data = BackendApiClient().douyin_stats(self.high_like_threshold)
@@ -569,6 +583,17 @@ class DouyinStatsDialog(QDialog):
             )
         finally:
             _restore_button_busy(self.refresh_button)
+
+    def _on_stats_loaded(self, ok, data, error):
+        _restore_button_busy(self.refresh_button)
+        self.close_button.setEnabled(True)
+        if ok:
+            try:
+                _apply_douyin_stats_dialog(self, data or {})
+            except Exception as exc:
+                _show_douyin_stats_error(self, str(exc))
+            return
+        _show_douyin_stats_error(self, error)
 
 
 class DouyinStatsDialogV2(QDialog):
@@ -707,6 +732,15 @@ class DouyinStatsDialogV2(QDialog):
         return value <= upper
 
     def refresh_stats(self):
+        if getattr(self, "stats_worker", None) and self.stats_worker.isRunning():
+            return
+        _set_button_busy(self.refresh_button, "刷新中...")
+        self.close_button.setEnabled(False)
+        self.summary_label.setText("正在后台读取抖音缓存统计...")
+        self.stats_worker = ApiCallThread("douyin_stats", self.high_like_threshold, parent=self)
+        self.stats_worker.completed.connect(self._on_stats_loaded)
+        self.stats_worker.start()
+        return
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
             data = BackendApiClient().douyin_stats(self.high_like_threshold)
@@ -774,6 +808,17 @@ class DouyinStatsDialogV2(QDialog):
         finally:
             _restore_button_busy(self.refresh_button)
 
+    def _on_stats_loaded(self, ok, data, error):
+        _restore_button_busy(self.refresh_button)
+        self.close_button.setEnabled(True)
+        if ok:
+            try:
+                _apply_douyin_stats_dialog(self, data or {})
+            except Exception as exc:
+                _show_douyin_stats_error(self, str(exc))
+            return
+        _show_douyin_stats_error(self, error)
+
 
 SORT_ROLE = Qt.UserRole + 1
 BUSY_BUTTON_STYLE = (
@@ -809,6 +854,76 @@ def _restore_button_busy(button):
     button.setProperty("_busy_old_enabled", None)
     button.setProperty("_busy_state_saved", False)
     QApplication.processEvents()
+
+
+def _show_douyin_stats_error(dialog, error):
+    dialog.summary_label.setText(f"读取抖音统计失败：{error}")
+    for mode, _ in dialog.MODE_ROWS:
+        dialog.mode_count_labels[mode].setText("-")
+        dialog.mode_percent_labels[mode].setText("-")
+    dialog.cached_video_count_label.setText("-")
+    dialog.cached_video_ratio_label.setText("-")
+    dialog.high_like_video_count_label.setText("-")
+    dialog.high_like_video_ratio_label.setText("-")
+    if hasattr(dialog, "creator_bucket_count_labels"):
+        for label, _, _ in dialog.CREATOR_VIDEO_BUCKETS:
+            dialog.creator_bucket_count_labels[label].setText("-")
+            dialog.creator_bucket_ratio_labels[label].setText("-")
+    if hasattr(dialog, "duration_bucket_count_labels"):
+        for label, _, _ in dialog.VIDEO_DURATION_BUCKETS:
+            dialog.duration_bucket_count_labels[label].setText("-")
+            dialog.duration_bucket_ratio_labels[label].setText("-")
+    dialog.refresh_info_label.setText(
+        f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+
+def _apply_douyin_stats_dialog(dialog, data):
+    total_followings = int(data.get("total_followings") or 0)
+    for mode, _ in dialog.MODE_ROWS:
+        mode_data = (data.get("modes") or {}).get(mode, {})
+        captured_count = int(mode_data.get("count") or 0)
+        percent = float(mode_data.get("percent") or 0)
+        dialog.mode_count_labels[mode].setText(str(captured_count))
+        dialog.mode_percent_labels[mode].setText(f"{percent:.2f}%")
+
+    cached_video_count = int(data.get("cached_video_count") or 0)
+    high_like_video_count = int(data.get("high_like_video_count") or 0)
+    dialog.cached_video_count_label.setText(str(cached_video_count))
+    dialog.cached_video_ratio_label.setText("100.00%" if cached_video_count else "0.00%")
+    dialog.high_like_video_count_label.setText(str(high_like_video_count))
+    dialog.high_like_video_ratio_label.setText(f"{float(data.get('high_like_ratio') or 0):.2f}%")
+
+    if hasattr(dialog, "creator_bucket_count_labels"):
+        creator_bucket_counts = data.get("creator_buckets") or {}
+        for label, _, _ in dialog.CREATOR_VIDEO_BUCKETS:
+            bucket_count = creator_bucket_counts.get(label, 0)
+            bucket_ratio = (bucket_count / total_followings * 100) if total_followings else 0
+            dialog.creator_bucket_count_labels[label].setText(str(bucket_count))
+            dialog.creator_bucket_ratio_labels[label].setText(f"{bucket_ratio:.2f}%")
+
+    if hasattr(dialog, "duration_bucket_count_labels"):
+        duration_bucket_counts = data.get("duration_buckets") or {}
+        for label, _, _ in dialog.VIDEO_DURATION_BUCKETS:
+            bucket_count = duration_bucket_counts.get(label, 0)
+            bucket_ratio = (bucket_count / cached_video_count * 100) if cached_video_count else 0
+            dialog.duration_bucket_count_labels[label].setText(str(bucket_count))
+            dialog.duration_bucket_ratio_labels[label].setText(f"{bucket_ratio:.2f}%")
+
+    if total_followings:
+        dialog.summary_label.setText(
+            f"当前关注博主总数：{total_followings} 位\n"
+            f"关注列表缓存时间：{data.get('followings_cached_at') or '暂无'}\n"
+            f"进度缓存条目：{data.get('progress_count') or 0} 条"
+        )
+    else:
+        dialog.summary_label.setText(
+            "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看统计信息。"
+        )
+
+    dialog.refresh_info_label.setText(
+        f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
 
 class SortableTableWidgetItem(QTableWidgetItem):
@@ -1126,10 +1241,29 @@ class DouyinRatingOverviewDialog(QDialog):
         QDesktopServices.openUrl(QUrl(str(url)))
 
     def _show_creator_detail(self, uploader_id):
+        uploader_id = str(uploader_id or "").strip()
+        if not uploader_id:
+            return
+        if getattr(self, "detail_worker", None) and self.detail_worker.isRunning():
+            return
+        self.summary_label.setText("正在后台读取 UP 详情...")
+        self.detail_worker = ApiCallThread("creator_detail", uploader_id, parent=self)
+        self.detail_worker.completed.connect(self._on_creator_detail_loaded)
+        self.detail_worker.start()
+        return
         try:
             detail = BackendApiClient().creator_detail(str(uploader_id or "").strip())
         except Exception as exc:
             QMessageBox.warning(self, "读取详情失败", str(exc))
+            return
+        if not detail.get("creator"):
+            QMessageBox.information(self, "没有详情", "未在当前评分快照中找到该 UP 主。")
+            return
+        CreatorDetailDialog(detail, self).exec_()
+
+    def _on_creator_detail_loaded(self, ok, detail, error):
+        if not ok:
+            QMessageBox.warning(self, "读取详情失败", str(error))
             return
         if not detail.get("creator"):
             QMessageBox.information(self, "没有详情", "未在当前评分快照中找到该 UP 主。")
@@ -1166,6 +1300,15 @@ class DouyinRatingOverviewDialog(QDialog):
 
     def refresh_data(self):
         search_uid = self._current_search_uid()
+        if getattr(self, "overview_worker", None) and self.overview_worker.isRunning():
+            return
+        _set_button_busy(self.refresh_button, "读取中...")
+        self.close_button.setEnabled(False)
+        self.summary_label.setText("正在后台读取评分数据...")
+        self.overview_worker = ApiCallThread("rating_overview", search_uid, parent=self)
+        self.overview_worker.completed.connect(self._on_rating_data_loaded)
+        self.overview_worker.start()
+        return
 
         try:
             data = BackendApiClient().rating_overview(search_uid)
@@ -1199,6 +1342,40 @@ class DouyinRatingOverviewDialog(QDialog):
             self.summary_label.setText(f"读取评分数据失败：{exc}")
             self._clear_tables()
 
+    def _on_rating_data_loaded(self, ok, data, error):
+        _restore_button_busy(self.refresh_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            self.summary_label.setText(f"读取评分数据失败：{error}")
+            self._clear_tables()
+            return
+        if not data.get("exists", True):
+            self.summary_label.setText(data.get("message") or "未找到评分数据库")
+            self._clear_tables()
+            return
+        if not data.get("tables"):
+            self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音视频评分或 UP 主评分。")
+            self._clear_tables()
+            return
+
+        summary = data.get("summary") or {}
+        for key in ("creator", "video"):
+            item = summary.get(key) or {}
+            self._set_summary(key, item.get("total", 0), item.get("counts", {}), item.get("low_confidence", 0))
+
+        tables = data.get("tables") or {}
+        self._populate_table(self.creator_top_table, tables.get("creator_top") or [])
+        self._populate_table(self.creator_ladder_table, tables.get("creator_ladder") or [])
+        self._populate_table(self.creator_low_table, tables.get("creator_low") or [])
+        self._populate_table(self.archived_creator_table, tables.get("archived_creator") or [])
+
+        warning_parts = data.get("warning_parts") or []
+        warning_text = f"\n范围：{'；'.join(warning_parts)}" if warning_parts else ""
+        self.summary_label.setText(f"{data.get('message') or '评分数据已加载'}{warning_text}")
+        self.refresh_info_label.setText(
+            f"最近刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
     def _set_summary(self, key, total, counts, low_confidence):
         self.summary_cells[(key, "total")].setText(str(total))
         for grade in self.GRADE_ORDER:
@@ -1210,10 +1387,26 @@ class DouyinRatingOverviewDialog(QDialog):
         uid = str(button.property("uploader_id") or "").strip() if button else ""
         if not uid:
             return
+        if getattr(self, "action_worker", None) and self.action_worker.isRunning():
+            return
+        _set_button_busy(button, "处理中...")
+        self.action_worker_button = button
+        self.action_worker = ApiCallThread("save_creator_manual_grade", uid, "S", "从天梯榜设为S级", parent=self)
+        self.action_worker.completed.connect(self._on_ladder_creator_s_done)
+        self.action_worker.start()
+        return
         try:
             BackendApiClient().save_creator_manual_grade(uid, "S", "从天梯榜设为S级")
         except Exception as exc:
             QMessageBox.warning(self, "设置失败", f"设为S级失败：{exc}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_ladder_table)
+
+    def _on_ladder_creator_s_done(self, ok, _data, error):
+        _restore_button_busy(getattr(self, "action_worker_button", None))
+        if not ok:
+            QMessageBox.warning(self, "设置失败", f"设为S级失败：{error}")
             return
         self.refresh_data()
         self.tabs.setCurrentWidget(self.creator_ladder_table)
@@ -1223,10 +1416,26 @@ class DouyinRatingOverviewDialog(QDialog):
         uid = str(button.property("uploader_id") or "").strip() if button else ""
         if not uid:
             return
+        if getattr(self, "action_worker", None) and self.action_worker.isRunning():
+            return
+        _set_button_busy(button, "处理中...")
+        self.action_worker_button = button
+        self.action_worker = ApiCallThread("exclude_creator_from_ladder", uid, parent=self)
+        self.action_worker.completed.connect(self._on_exclude_ladder_creator_done)
+        self.action_worker.start()
+        return
         try:
             BackendApiClient().exclude_creator_from_ladder(uid)
         except Exception as exc:
             QMessageBox.warning(self, "取消资格失败", f"取消资格失败：{exc}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_ladder_table)
+
+    def _on_exclude_ladder_creator_done(self, ok, _data, error):
+        _restore_button_busy(getattr(self, "action_worker_button", None))
+        if not ok:
+            QMessageBox.warning(self, "取消资格失败", f"取消资格失败：{error}")
             return
         self.refresh_data()
         self.tabs.setCurrentWidget(self.creator_ladder_table)
@@ -1707,6 +1916,19 @@ class CreatorDetailDialog(QDialog):
 
         grade = str(grade_combo.currentData() or "").strip().upper()
         note = note_input.text().strip()
+        if getattr(self, "manual_grade_worker", None) and self.manual_grade_worker.isRunning():
+            return
+        self._pending_manual_grade = (uploader_name, grade)
+        self.manual_grade_worker = ApiCallThread(
+            "save_creator_manual_grade",
+            uploader_id,
+            grade,
+            note,
+            parent=self,
+        )
+        self.manual_grade_worker.completed.connect(self._on_manual_grade_saved)
+        self.manual_grade_worker.start()
+        return
         try:
             self._save_manual_grade(uploader_id, grade, note)
         except Exception as exc:
@@ -1726,6 +1948,22 @@ class CreatorDetailDialog(QDialog):
 
     def _save_manual_grade(self, uploader_id, grade, note):
         BackendApiClient().save_creator_manual_grade(uploader_id, grade, note)
+
+    def _on_manual_grade_saved(self, ok, _data, error):
+        if not ok:
+            QMessageBox.warning(self, "保存失败", f"手动等级保存失败：{error}")
+            return
+        uploader_name, grade = getattr(self, "_pending_manual_grade", ("", ""))
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "refresh_scores"):
+            parent.refresh_scores()
+        QMessageBox.information(
+            self,
+            "已保存",
+            f"已{'设置' if grade else '清除'} {uploader_name} 的手动等级"
+            f"{f'：{grade}' if grade else ''}。\n评分数据正在刷新，完成后列表会更新。",
+        )
+        self.accept()
 
     def _open_homepage(self):
         url = str(self.creator.get("UP主主页链接") or "").strip()
@@ -1853,6 +2091,15 @@ class DouyinStatusResetDialog(QDialog):
         return str(value)
 
     def refresh_data(self):
+        if getattr(self, "status_worker", None) and self.status_worker.isRunning():
+            return
+        _set_button_busy(self.refresh_button, "读取中...")
+        self.close_button.setEnabled(False)
+        self.summary_label.setText("正在后台读取异常 full 状态列表...")
+        self.status_worker = ApiCallThread("status_reset_candidates", self.threshold_spin.value(), parent=self)
+        self.status_worker.completed.connect(self._on_status_reset_data_loaded)
+        self.status_worker.start()
+        return
         try:
             data = BackendApiClient().status_reset_candidates(self.threshold_spin.value())
             self.rows = data.get("rows") or []
@@ -1861,6 +2108,21 @@ class DouyinStatusResetDialog(QDialog):
             self.summary_label.setText(f"读取异常 full 状态列表失败：{exc}")
             self.table.setRowCount(0)
             return
+        self._populate_table(self.rows)
+        self.summary_label.setText(
+            f"数据库：{db_path}\n"
+            f"候选：{len(self.rows)} 位；重置只会撤销 full 状态并置为过期，不删除视频缓存和评分数据。"
+        )
+
+    def _on_status_reset_data_loaded(self, ok, data, error):
+        _restore_button_busy(self.refresh_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            self.summary_label.setText(f"读取异常 full 状态列表失败：{error}")
+            self.table.setRowCount(0)
+            return
+        self.rows = (data or {}).get("rows") or []
+        db_path = (data or {}).get("db_path") or ""
         self._populate_table(self.rows)
         self.summary_label.setText(
             f"数据库：{db_path}\n"
@@ -1915,11 +2177,29 @@ class DouyinStatusResetDialog(QDialog):
             "不会删除已有视频缓存、评分数据或下载文件。是否继续？",
         ) == QMessageBox.Yes:
             return
+        if getattr(self, "reset_worker", None) and self.reset_worker.isRunning():
+            return
+        _set_button_busy(self.reset_selected_button, "重置中...")
+        self.close_button.setEnabled(False)
+        self.reset_worker = ApiCallThread("reset_full_status", uids, parent=self)
+        self.reset_worker.completed.connect(self._on_reset_full_status_done)
+        self.reset_worker.start()
+        return
         try:
             count = int((BackendApiClient().reset_full_status(uids) or {}).get("count") or 0)
         except Exception as exc:
             QMessageBox.warning(self, "重置失败", str(exc))
             return
+        QMessageBox.information(self, "重置完成", f"已重置 {count} 位 UP 的 full 状态。")
+        self.refresh_data()
+
+    def _on_reset_full_status_done(self, ok, data, error):
+        _restore_button_busy(self.reset_selected_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            QMessageBox.warning(self, "重置失败", str(error))
+            return
+        count = int((data or {}).get("count") or 0)
         QMessageBox.information(self, "重置完成", f"已重置 {count} 位 UP 的 full 状态。")
         self.refresh_data()
 
@@ -2115,6 +2395,15 @@ class DouyinArchiveDialog(QDialog):
         return sorted(set(uids))
 
     def refresh_data(self):
+        if getattr(self, "archive_worker", None) and self.archive_worker.isRunning():
+            return
+        _set_button_busy(self.refresh_button, "读取中...")
+        self.close_button.setEnabled(False)
+        self.summary_label.setText("正在后台读取归档数据...")
+        self.archive_worker = ApiCallThread("archive_state", self.threshold_spin.value(), parent=self)
+        self.archive_worker.completed.connect(self._on_archive_data_loaded)
+        self.archive_worker.start()
+        return
         _set_button_busy(self.refresh_button, "刷新中...")
         try:
             data = BackendApiClient().archive_state(self.threshold_spin.value())
@@ -2135,6 +2424,25 @@ class DouyinArchiveDialog(QDialog):
             self.archived_table.setRowCount(0)
         finally:
             _restore_button_busy(self.refresh_button)
+
+    def _on_archive_data_loaded(self, ok, data, error):
+        _restore_button_busy(self.refresh_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            self.summary_label.setText(f"读取归档数据失败：{error}")
+            self.candidate_table.setRowCount(0)
+            self.archived_table.setRowCount(0)
+            return
+        db_path = (data or {}).get("db_path") or ""
+        self.candidates = (data or {}).get("candidates") or []
+        self.archived_rows = (data or {}).get("archived_rows") or []
+        self._populate_table(self.candidate_table, self.CANDIDATE_COLUMNS, self.candidates)
+        self._populate_table(self.archived_table, self.ARCHIVED_COLUMNS, self.archived_rows)
+        active_count = sum(1 for row in self.archived_rows if str(row.get("archive_status") or "") == "active")
+        self.summary_label.setText(
+            f"数据库：{db_path}\n"
+            f"候选归档：{len(self.candidates)} 位；active 已归档：{active_count} 位；归档不会删除历史数据。"
+        )
 
     def _candidate_rows_by_uids(self, uids):
         wanted = set(uids or [])
@@ -2167,12 +2475,37 @@ class DouyinArchiveDialog(QDialog):
         if reply != QMessageBox.Yes:
             return
         uids = [str(row.get("uploader_id") or "").strip() for row in rows]
+        if getattr(self, "archive_action_worker", None) and self.archive_action_worker.isRunning():
+            return
+        _set_button_busy(self.archive_selected_button, "归档中...")
+        _set_button_busy(self.archive_all_button, "归档中...")
+        self.close_button.setEnabled(False)
+        self.archive_action_worker = ApiCallThread(
+            "archive_douyin_creators",
+            uids=uids,
+            threshold=self.threshold_spin.value(),
+            parent=self,
+        )
+        self.archive_action_worker.completed.connect(self._on_archive_action_done)
+        self.archive_action_worker.start()
+        return
         count = int(
             (BackendApiClient().archive_douyin_creators(
                 uids=uids,
                 threshold=self.threshold_spin.value(),
             ) or {}).get("count") or 0
         )
+        QMessageBox.information(self, "归档完成", f"已归档 {count} 位 UP。")
+        self.refresh_data()
+
+    def _on_archive_action_done(self, ok, data, error):
+        _restore_button_busy(self.archive_selected_button)
+        _restore_button_busy(self.archive_all_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            QMessageBox.warning(self, "归档失败", str(error))
+            return
+        count = int((data or {}).get("count") or 0)
         QMessageBox.information(self, "归档完成", f"已归档 {count} 位 UP。")
         self.refresh_data()
 
@@ -2190,7 +2523,25 @@ class DouyinArchiveDialog(QDialog):
         )
         if reply != QMessageBox.Yes:
             return
+        if getattr(self, "restore_worker", None) and self.restore_worker.isRunning():
+            return
+        _set_button_busy(self.restore_selected_button, "恢复中...")
+        self.close_button.setEnabled(False)
+        self.restore_worker = ApiCallThread("restore_archived_creators", uids, parent=self)
+        self.restore_worker.completed.connect(self._on_restore_archived_done)
+        self.restore_worker.start()
+        return
         count = int((BackendApiClient().restore_archived_creators(uids) or {}).get("count") or 0)
+        QMessageBox.information(self, "恢复完成", f"已恢复 {count} 位 active 归档 UP。")
+        self.refresh_data()
+
+    def _on_restore_archived_done(self, ok, data, error):
+        _restore_button_busy(self.restore_selected_button)
+        self.close_button.setEnabled(True)
+        if not ok:
+            QMessageBox.warning(self, "恢复失败", str(error))
+            return
+        count = int((data or {}).get("count") or 0)
         QMessageBox.information(self, "恢复完成", f"已恢复 {count} 位 active 归档 UP。")
         self.refresh_data()
 
@@ -2281,11 +2632,15 @@ class MainWindow(QMainWindow):
             self.bilibili_runtime_settings = config_defaults["bilibili_runtime_settings"]
             self.douyin_runtime_settings = config_defaults["douyin_runtime_settings"]
             self.fetch_order_settings = config_defaults["fetch_order_settings"]
+            self.douyin_full_fetch_retry_on_mismatch = bool(
+                config_defaults.get("douyin_full_fetch_retry_on_mismatch", True)
+            )
             self._config_defaults_error = ""
         except Exception as exc:
             self.bilibili_runtime_settings = {}
             self.douyin_runtime_settings = {}
             self.fetch_order_settings = _load_default_fetch_order_settings()
+            self.douyin_full_fetch_retry_on_mismatch = True
             self._config_defaults_error = str(exc)
         self.auto_full_enabled = False
         self.auto_full_next_run_at = None
@@ -2456,6 +2811,12 @@ class MainWindow(QMainWindow):
         self.high_like_spin.setRange(1, 100000000)
         self.high_like_spin.setValue(10000)
         self.high_like_spin.setMaximumWidth(180)
+        self.full_fetch_retry_checkbox = QCheckBox("数量不一致时自动重抓一次")
+        self.full_fetch_retry_checkbox.setChecked(bool(self.douyin_full_fetch_retry_on_mismatch))
+        self.full_fetch_retry_checkbox.setToolTip(
+            "仅对抖音 full 模式生效。开启后，主页作品数与全量抓取结果不一致时，会自动重新进入主页再抓一次。"
+        )
+        self.full_fetch_retry_checkbox.toggled.connect(self._on_full_fetch_retry_toggle)
         self.high_like_spin.setToolTip("抖音统计与精简表导出中的高赞判定阈值。")
         self.auto_full_button = QPushButton("自动 full：关闭")
         self.auto_full_button.setToolTip("开启后按左侧间隔自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
@@ -2475,6 +2836,7 @@ class MainWindow(QMainWindow):
         auto_full_widget = QWidget()
         auto_full_widget.setLayout(auto_full_row)
         add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", auto_full_widget)
+        add_setting(5, "full 校验", self.full_fetch_retry_checkbox)
         layout.addWidget(settings_group)
 
         self.log_dialog = LogCenterDialog(self)
@@ -2587,6 +2949,7 @@ class MainWindow(QMainWindow):
         is_bilibili = platform in {"both", "bilibili"}
         is_douyin = platform in {"both", "douyin", "douyin_unfollow", "douyin_uid"}
         is_recent_video_mode = self.douyin_mode_combo.currentData() in {"monitor", "delta"}
+        supports_full_fetch_retry = platform in {"both", "douyin"} and self.douyin_mode_combo.currentData() == "full"
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
@@ -2599,6 +2962,7 @@ class MainWindow(QMainWindow):
         self.uid_fetch_partial_radio.setEnabled(editable)
         self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
         self.high_like_spin.setEnabled(editable)
+        self.full_fetch_retry_checkbox.setEnabled(editable and supports_full_fetch_retry)
         self.auto_full_interval_spin.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
@@ -2625,6 +2989,7 @@ class MainWindow(QMainWindow):
             uid_limit_enabled=self.uid_fetch_partial_radio.isChecked(),
             uid_limit=self.uid_limit_spin.value(),
             high_like_threshold=self.high_like_spin.value(),
+            douyin_full_fetch_retry_on_mismatch=self.full_fetch_retry_checkbox.isChecked(),
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
             bilibili_uid_list_path=Path(self.bilibili_uid_list_path).expanduser(),
             douyin_uid_list_path=Path(self.douyin_uid_list_path).expanduser(),
@@ -2651,6 +3016,7 @@ class MainWindow(QMainWindow):
             "uid_limit_enabled": self.uid_fetch_partial_radio.isChecked(),
             "uid_limit": self.uid_limit_spin.value(),
             "high_like_threshold": self.high_like_spin.value(),
+            "douyin_full_fetch_retry_on_mismatch": self.full_fetch_retry_checkbox.isChecked(),
             "unfollow_list_path": self.unfollow_list_path,
             "bilibili_uid_list_path": self.bilibili_uid_list_path,
             "douyin_uid_list_path": self.douyin_uid_list_path,
@@ -2698,6 +3064,8 @@ class MainWindow(QMainWindow):
             self.high_like_spin.setValue(
                 int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
             )
+            if "douyin_full_fetch_retry_on_mismatch" in data:
+                self.full_fetch_retry_checkbox.setChecked(bool(data.get("douyin_full_fetch_retry_on_mismatch")))
             self.auto_full_interval_spin.setValue(
                 int(data.get("auto_full_interval_minutes", self.auto_full_interval_spin.value()) or self.auto_full_interval_spin.value())
             )
@@ -2799,6 +3167,12 @@ class MainWindow(QMainWindow):
             self._append_log(f"自动 full 间隔已改为 {self._auto_full_interval_text()}，下一次触发时间已重新计算。")
         self._save_gui_config()
         self._sync_auto_full_timer()
+
+    def _on_full_fetch_retry_toggle(self, checked):
+        self.douyin_full_fetch_retry_on_mismatch = bool(checked)
+        if self._loading_gui_config:
+            return
+        self._save_gui_config()
 
     def _toggle_auto_full_mode(self):
         self.auto_full_enabled = not self.auto_full_enabled

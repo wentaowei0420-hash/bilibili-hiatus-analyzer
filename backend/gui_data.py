@@ -81,6 +81,11 @@ def _safe_number(value) -> int:
     return _safe_int(value, 0)
 
 
+def _is_truthy_text(value) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"是", "yes", "true", "1", "y"}
+
+
 def _extract_year(publish_ts, publish_date) -> str:
     timestamp = _safe_number(publish_ts)
     if timestamp > 0:
@@ -107,7 +112,149 @@ def _json_safe(value):
     return value
 
 
-def get_douyin_stats(high_like_threshold: int = 10000) -> dict[str, Any]:
+def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, Any] | None:
+    db_path = Path(config.export_store_db)
+    if not db_path.exists():
+        return None
+
+    with sqlite3.connect(str(db_path), timeout=5) as conn:
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "cache_inventory_current"):
+            return None
+
+        inventory_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("cache_inventory_current")')
+        }
+        required_columns = {
+            "UP主UID",
+            "发布视频数量",
+            "有关注列表缓存",
+            "关注列表缓存时间",
+            "有进度缓存",
+            "有verify缓存",
+            "有monitor缓存",
+            "有full缓存",
+        }
+        if not required_columns.issubset(inventory_columns):
+            return None
+
+        rows = conn.execute(
+            """
+            SELECT
+                "UP主UID" AS uploader_id,
+                "发布视频数量" AS published_video_count,
+                "有关注列表缓存" AS has_followings_cache,
+                "关注列表缓存时间" AS followings_cached_at,
+                "有进度缓存" AS has_progress_cache,
+                "有verify缓存" AS has_verify_cache,
+                "有monitor缓存" AS has_monitor_cache,
+                "有full缓存" AS has_full_cache
+            FROM cache_inventory_current
+            """
+        ).fetchall()
+
+        active_rows = [
+            dict(row)
+            for row in rows
+            if _is_truthy_text(row["has_followings_cache"])
+            and str(row["uploader_id"] or "").strip()
+        ]
+        total_followings = len(active_rows)
+
+        modes = {}
+        for mode in ("verify", "monitor", "full"):
+            column = f"has_{mode}_cache"
+            count = sum(1 for row in active_rows if _is_truthy_text(row.get(column)))
+            modes[mode] = {
+                "count": count,
+                "percent": (count / total_followings * 100) if total_followings else 0,
+            }
+
+        creator_buckets = [
+            ("0~50", 0, 50),
+            ("51~300", 51, 300),
+            ("301~500", 301, 500),
+            ("501~1000", 501, 1000),
+            ("1001以上", 1001, None),
+        ]
+        creator_bucket_counts = {label: 0 for label, _, _ in creator_buckets}
+        for row in active_rows:
+            count = _safe_int(row.get("published_video_count"), 0)
+            for label, lower, upper in creator_buckets:
+                if count >= lower and (upper is None or count <= upper):
+                    creator_bucket_counts[label] += 1
+                    break
+
+        duration_buckets = [("0~20s", 0, 20), ("21~60s", 21, 60), ("61s以上", 61, None)]
+        duration_bucket_counts = {label: 0 for label, _, _ in duration_buckets}
+        cached_video_count = 0
+        high_like_video_count = 0
+
+        if _table_exists(conn, "douyin_video_state"):
+            video_columns = {
+                row[1] for row in conn.execute('PRAGMA table_info("douyin_video_state")')
+            }
+            if {"uploader_id", "like_count", "duration_seconds"}.issubset(video_columns):
+                conn.execute('DROP TABLE IF EXISTS "_stats_active_uids"')
+                conn.execute('CREATE TEMP TABLE "_stats_active_uids" (uid TEXT PRIMARY KEY)')
+                conn.executemany(
+                    'INSERT OR IGNORE INTO "_stats_active_uids" (uid) VALUES (?)',
+                    [(str(row["uploader_id"]).strip(),) for row in active_rows],
+                )
+                availability_filter = (
+                    "AND COALESCE(v.is_available, 1) = 1"
+                    if "is_available" in video_columns
+                    else ""
+                )
+                row = conn.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS total_count,
+                        SUM(CASE WHEN COALESCE(v.like_count, 0) > ? THEN 1 ELSE 0 END) AS high_like_count,
+                        SUM(CASE WHEN COALESCE(v.duration_seconds, 0) BETWEEN 0 AND 20 THEN 1 ELSE 0 END) AS duration_0_20,
+                        SUM(CASE WHEN COALESCE(v.duration_seconds, 0) BETWEEN 21 AND 60 THEN 1 ELSE 0 END) AS duration_21_60,
+                        SUM(CASE WHEN COALESCE(v.duration_seconds, 0) >= 61 THEN 1 ELSE 0 END) AS duration_61_plus
+                    FROM douyin_video_state AS v
+                    JOIN "_stats_active_uids" AS a ON v.uploader_id = a.uid
+                    WHERE 1=1 {availability_filter}
+                    """,
+                    (int(high_like_threshold or 10000),),
+                ).fetchone()
+                cached_video_count = int((row or {})["total_count"] or 0) if row else 0
+                high_like_video_count = int((row or {})["high_like_count"] or 0) if row else 0
+                if row:
+                    duration_bucket_counts["0~20s"] = int(row["duration_0_20"] or 0)
+                    duration_bucket_counts["21~60s"] = int(row["duration_21_60"] or 0)
+                    duration_bucket_counts["61s以上"] = int(row["duration_61_plus"] or 0)
+
+        followings_cached_at = next(
+            (
+                str(row.get("followings_cached_at") or "").strip()
+                for row in active_rows
+                if str(row.get("followings_cached_at") or "").strip()
+            ),
+            "",
+        )
+        return {
+            "total_followings": total_followings,
+            "followings_cached_at": followings_cached_at,
+            "progress_count": sum(
+                1 for row in active_rows if _is_truthy_text(row.get("has_progress_cache"))
+            ),
+            "modes": modes,
+            "cached_video_count": cached_video_count,
+            "high_like_video_count": high_like_video_count,
+            "high_like_ratio": (
+                high_like_video_count / cached_video_count * 100
+                if cached_video_count
+                else 0
+            ),
+            "creator_buckets": creator_bucket_counts,
+            "duration_buckets": duration_bucket_counts,
+        }
+
+
+def _get_douyin_stats_from_cache(high_like_threshold: int = 10000) -> dict[str, Any]:
     from douyin_analyzer.analyzer import DouyinHiatusAnalyzer
     from douyin_analyzer.cache import CacheStore
 
@@ -202,6 +349,17 @@ def get_douyin_stats(high_like_threshold: int = 10000) -> dict[str, Any]:
         "creator_buckets": creator_bucket_counts,
         "duration_buckets": duration_bucket_counts,
     }
+
+
+def get_douyin_stats(high_like_threshold: int = 10000) -> dict[str, Any]:
+    config = _load_douyin_config()
+    try:
+        stats = _get_douyin_stats_from_store(config, high_like_threshold)
+    except sqlite3.Error:
+        stats = None
+    if stats is not None:
+        return stats
+    return _get_douyin_stats_from_cache(high_like_threshold)
 
 
 def _grade_counts(conn, table, column, eligible_only=False):

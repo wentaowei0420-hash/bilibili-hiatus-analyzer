@@ -173,6 +173,9 @@ def _build_runtime_env(request: JobCreateRequest) -> dict[str, str]:
     )
     env = {
         "DOUYIN_BROWSER_BACKEND": (request.douyin_backend or "drission").strip().lower(),
+        "DOUYIN_FULL_FETCH_RETRY_ON_MISMATCH": (
+            "true" if request.douyin_full_fetch_retry_on_mismatch else "false"
+        ),
         "ANALYSIS_MODE": analysis_mode,
         "ENABLE_VIDEO_DURATION_ANALYSIS": (
             "true" if enable_video_analysis else "false"
