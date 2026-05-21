@@ -46,6 +46,46 @@ def test_build_signed_path_prefers_abogus(monkeypatch):
     assert "a_bogus=fake_ab" in signed_url
 
 
+def test_request_json_tracks_empty_body_error(monkeypatch):
+    class _FakeResponse:
+        status = 200
+
+        async def read(self):
+            return b""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _FakeSession:
+        closed = False
+
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+    client = DouyinAPIClient({"msToken": "token-1"})
+    client._session = _FakeSession()
+    monkeypatch.setattr(
+        client,
+        "build_signed_path",
+        lambda _path, _params: ("https://example.com/detail", "UnitTestAgent/1.0"),
+    )
+
+    result = asyncio.run(
+        client._request_json(
+            "/aweme/v1/web/aweme/detail/",
+            {"aweme_id": "123"},
+            suppress_error=True,
+            max_retries=1,
+        )
+    )
+
+    assert result == {}
+    assert client.last_error == "Empty response body for /aweme/v1/web/aweme/detail/"
+
+
 def test_browser_fallback_caps_warmup_wait(monkeypatch):
     class _FakeMouse:
         async def wheel(self, _x, _y):

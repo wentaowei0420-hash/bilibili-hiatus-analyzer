@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -69,6 +70,7 @@ class DouyinAPIClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._browser_post_aweme_items: Dict[str, Dict[str, Any]] = {}
         self._browser_post_stats: Dict[str, int] = {}
+        self.last_error: str = ""
         selected_ua = random.choice(_USER_AGENT_POOL)
         self.headers = {
             "User-Agent": selected_ua,
@@ -198,6 +200,7 @@ class DouyinAPIClient:
         await self._ensure_session()
         delays = [1, 2, 5]
         last_exc: Optional[Exception] = None
+        self.last_error = ""
 
         for attempt in range(max_retries):
             signed_url, ua = self.build_signed_path(path, params)
@@ -208,9 +211,28 @@ class DouyinAPIClient:
                     proxy=self.proxy or None,
                 ) as response:
                     if response.status == 200:
-                        data = await response.json(content_type=None)
-                        return data if isinstance(data, dict) else {}
+                        body = await response.read()
+                        if not body:
+                            self.last_error = f"Empty response body for {path}"
+                            last_exc = RuntimeError(self.last_error)
+                            continue
+                        try:
+                            data = json.loads(body)
+                        except Exception as exc:
+                            snippet = body[:160].decode("utf-8", errors="replace")
+                            self.last_error = (
+                                f"Invalid JSON for {path}: {type(exc).__name__}: {snippet}"
+                            )
+                            last_exc = RuntimeError(self.last_error)
+                            continue
+                        if isinstance(data, dict):
+                            self.last_error = ""
+                            return data
+                        self.last_error = f"Unexpected JSON payload type for {path}: {type(data).__name__}"
+                        last_exc = RuntimeError(self.last_error)
+                        continue
                     if response.status < 500 and response.status != 429:
+                        self.last_error = f"HTTP {response.status} for {path}"
                         log_fn = logger.debug if suppress_error else logger.error
                         log_fn(
                             "Request failed: path=%s, status=%s",
@@ -223,6 +245,7 @@ class DouyinAPIClient:
                     )
             except Exception as exc:
                 last_exc = exc
+                self.last_error = f"{type(exc).__name__}: {exc}"
 
             if attempt < max_retries - 1:
                 delay = delays[min(attempt, len(delays) - 1)]

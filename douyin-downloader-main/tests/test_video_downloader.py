@@ -7,6 +7,7 @@ import pytest
 from auth import CookieManager
 from config import ConfigLoader
 from control import QueueManager, RateLimiter, RetryHandler
+import core.video_downloader as video_module
 from core.api_client import DouyinAPIClient
 from core.video_downloader import VideoDownloader
 from storage import FileManager
@@ -48,6 +49,30 @@ def _build_downloader(tmp_path):
     )
 
     return downloader, api_client
+
+
+def test_local_aweme_index_is_reused_between_downloaders(tmp_path):
+    aweme_id = "7447096682656894267"
+    (tmp_path / f"video_{aweme_id}.mp4").write_bytes(b"video")
+    first_downloader, first_api_client = _build_downloader(tmp_path)
+    second_downloader, second_api_client = _build_downloader(tmp_path)
+    cache_key = str(tmp_path.resolve())
+    original_cache = VideoDownloader._local_aweme_index_cache.copy()
+    VideoDownloader._local_aweme_index_cache.pop(cache_key, None)
+
+    try:
+        first_downloader._build_local_aweme_index()
+        assert aweme_id in first_downloader._local_aweme_ids
+
+        (tmp_path / "video_7555555555555555555.mp4").write_bytes(b"new video")
+        second_downloader._build_local_aweme_index()
+        assert second_downloader._local_aweme_ids is first_downloader._local_aweme_ids
+        assert "7555555555555555555" not in second_downloader._local_aweme_ids
+    finally:
+        VideoDownloader._local_aweme_index_cache.clear()
+        VideoDownloader._local_aweme_index_cache.update(original_cache)
+        asyncio.run(first_api_client.close())
+        asyncio.run(second_api_client.close())
 
 
 @pytest.mark.asyncio
@@ -103,6 +128,78 @@ async def test_video_downloader_reports_item_progress(tmp_path, monkeypatch):
     assert reporter.item_events == [("success", "123")]
 
     await api_client.close()
+
+
+def test_fetch_aweme_data_uses_browser_fallback_when_enabled(tmp_path, monkeypatch):
+    downloader, api_client = _build_downloader(tmp_path)
+    api_client.last_error = "Empty response body"
+    downloader.config.update(
+        browser_fallback={
+            "enabled": True,
+            "user_data_path": str(tmp_path / "profile"),
+            "detail_timeout_seconds": 7,
+            "detail_page_load_delay": 0,
+        }
+    )
+
+    async def _fake_get_video_detail(_aweme_id):
+        return None
+
+    calls = []
+
+    class _FakeFallback:
+        def fetch(self, aweme_id, **kwargs):
+            calls.append((aweme_id, kwargs))
+            return {"aweme_id": aweme_id, "author": {"nickname": "browser"}}
+
+    monkeypatch.setattr(api_client, "get_video_detail", _fake_get_video_detail)
+    monkeypatch.setattr(
+        video_module,
+        "get_shared_browser_detail_fallback",
+        lambda: _FakeFallback(),
+    )
+
+    detail = asyncio.run(downloader._fetch_aweme_data("123"))
+
+    assert detail["aweme_id"] == "123"
+    assert calls == [
+        (
+            "123",
+            {
+                "user_data_path": str(tmp_path / "profile"),
+                "browser_binary_path": "",
+                "timeout_seconds": 7,
+                "page_load_delay": 0.0,
+            },
+        )
+    ]
+
+    asyncio.run(api_client.close())
+
+
+def test_fetch_aweme_data_does_not_use_browser_fallback_when_disabled(tmp_path, monkeypatch):
+    downloader, api_client = _build_downloader(tmp_path)
+    downloader.config.update(browser_fallback={"enabled": False})
+
+    async def _fake_get_video_detail(_aweme_id):
+        return None
+
+    class _UnexpectedFallback:
+        def fetch(self, *_args, **_kwargs):
+            raise AssertionError("browser fallback should not be called")
+
+    monkeypatch.setattr(api_client, "get_video_detail", _fake_get_video_detail)
+    monkeypatch.setattr(
+        video_module,
+        "get_shared_browser_detail_fallback",
+        lambda: _UnexpectedFallback(),
+    )
+
+    detail = asyncio.run(downloader._fetch_aweme_data("123"))
+
+    assert detail is None
+
+    asyncio.run(api_client.close())
 
 
 @pytest.mark.asyncio

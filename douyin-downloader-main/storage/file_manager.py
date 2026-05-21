@@ -62,7 +62,13 @@ class FileManager:
         *,
         prefer_response_content_type: bool = False,
         return_saved_path: bool = False,
+        chunk_size: int = 262144,
     ) -> Union[bool, Path]:
+        try:
+            chunk_size = max(int(chunk_size), 8192)
+        except (TypeError, ValueError):
+            chunk_size = 262144
+
         should_close = False
         if session is None:
             default_headers = headers or {
@@ -93,7 +99,7 @@ class FileManager:
                     expected_size = response.content_length
                     written = 0
                     async with aiofiles.open(tmp_path, "wb") as f:
-                        async for chunk in response.content.iter_chunked(8192):
+                        async for chunk in response.content.iter_chunked(chunk_size):
                             await f.write(chunk)
                             written += len(chunk)
                     if expected_size is not None and written != expected_size:

@@ -1,7 +1,11 @@
+import asyncio
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from config import ConfigLoader
+import gui as gui_module
 from gui import HighLikeDownloaderGUI
 
 
@@ -67,3 +71,46 @@ def test_sql_source_can_download_grade_video_below_high_like_threshold(tmp_path)
     probe.active_filter_mode = "高赞视频"
     high_like_rows = probe._filter_rows_for_download(rows)
     assert [row["aweme_id"] for row in high_like_rows] == ["100000000000000002"]
+
+
+def test_preflight_selected_rows_raises_clear_error_when_detail_api_fails(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        f"path: {tmp_path / 'downloads'}\n"
+        "cookies: {}\n",
+        encoding="utf-8",
+    )
+    config = ConfigLoader(str(config_path))
+    probe = object.__new__(HighLikeDownloaderGUI)
+    probe.active_browser_fallback_enabled = False
+
+    class _FakeAPIClient:
+        def __init__(self, *_args, **_kwargs):
+            self.last_error = "Empty response body for /aweme/v1/web/aweme/detail/"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get_video_detail(self, _aweme_id, suppress_error=False):
+            return None
+
+    monkeypatch.setattr(gui_module, "DouyinAPIClient", _FakeAPIClient)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            probe._preflight_selected_rows(
+                [
+                    {"aweme_id": "100001", "video_url": "https://www.douyin.com/video/100001"},
+                    {"aweme_id": "100002", "video_url": "https://www.douyin.com/video/100002"},
+                    {"aweme_id": "100003", "video_url": "https://www.douyin.com/video/100003"},
+                ],
+                config,
+            )
+        )
+
+    message = str(exc_info.value)
+    assert "指定等级筛选本身没有问题" in message
+    assert "Empty response body" in message

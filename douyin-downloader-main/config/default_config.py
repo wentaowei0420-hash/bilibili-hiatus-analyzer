@@ -29,6 +29,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "thread": 5,
     "retry_times": 3,
+    "download_chunk_size": 262144,
     "rate_limit": 2,
     "proxy": "",
     "database": True,
@@ -49,6 +50,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "browser_fallback": {
         "enabled": True,
         "headless": False,
+        "user_data_path": "",
+        "browser_binary_path": "",
+        "detail_timeout_seconds": 25,
+        "detail_page_load_delay": 2.5,
         "max_scrolls": 240,
         "idle_rounds": 8,
         "wait_timeout_seconds": 600,

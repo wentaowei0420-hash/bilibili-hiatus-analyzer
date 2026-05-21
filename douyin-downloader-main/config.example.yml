@@ -35,6 +35,7 @@ increase:
 
 thread: 5
 retry_times: 3
+download_chunk_size: 262144
 proxy: ""
 database: true
 database_path: ../data/douyin/state/douyin_export_store.db
@@ -56,6 +57,10 @@ transcript:
 browser_fallback:
   enabled: true
   headless: false
+  user_data_path: ""
+  browser_binary_path: ""
+  detail_timeout_seconds: 25
+  detail_page_load_delay: 2.5
   max_scrolls: 240
   idle_rounds: 8
   wait_timeout_seconds: 600

@@ -41,6 +41,8 @@ class DownloadResult:
 
 
 class BaseDownloader(ABC):
+    _local_aweme_index_cache: Dict[str, set[str]] = {}
+
     def __init__(
         self,
         config: ConfigLoader,
@@ -167,6 +169,16 @@ class BaseDownloader(ABC):
 
     def _build_local_aweme_index(self):
         base_path = self.file_manager.base_path
+        try:
+            cache_key = str(base_path.resolve())
+        except OSError:
+            cache_key = str(base_path)
+
+        cached_ids = self._local_aweme_index_cache.get(cache_key)
+        if cached_ids is not None:
+            self._local_aweme_ids = cached_ids
+            return
+
         aweme_ids: set[str] = set()
 
         if base_path.exists():
@@ -184,6 +196,7 @@ class BaseDownloader(ABC):
                     aweme_ids.add(match.group(1))
 
         self._local_aweme_ids = aweme_ids
+        self._local_aweme_index_cache[cache_key] = aweme_ids
 
     def _mark_local_aweme_downloaded(self, aweme_id: str):
         if not aweme_id:
@@ -192,6 +205,14 @@ class BaseDownloader(ABC):
         if self._local_aweme_ids is None:
             self._local_aweme_ids = set()
         self._local_aweme_ids.add(aweme_id)
+
+        try:
+            cache_key = str(self.file_manager.base_path.resolve())
+        except OSError:
+            cache_key = str(self.file_manager.base_path)
+        self._local_aweme_index_cache.setdefault(cache_key, self._local_aweme_ids).add(
+            aweme_id
+        )
 
     def _filter_by_time(self, aweme_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         start_time = self.config.get("start_time")
@@ -472,6 +493,7 @@ class BaseDownloader(ABC):
                 proxy=getattr(self.api_client, "proxy", None),
                 prefer_response_content_type=prefer_response_content_type,
                 return_saved_path=return_saved_path,
+                chunk_size=self._download_chunk_size(),
             )
             if not download_result:
                 raise RuntimeError(f"Download failed for {url}")
@@ -489,6 +511,12 @@ class BaseDownloader(ABC):
                 f"Download error for {save_path.name}: {error}",
             )
             return False
+
+    def _download_chunk_size(self) -> int:
+        try:
+            return max(int(self.config.get("download_chunk_size", 262144)), 8192)
+        except (TypeError, ValueError):
+            return 262144
 
     # aweme_type codes that indicate image/note content
     _GALLERY_AWEME_TYPES = {2, 68, 150}

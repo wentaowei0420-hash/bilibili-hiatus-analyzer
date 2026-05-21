@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import queue
 import sqlite3
 import threading
@@ -12,6 +13,7 @@ from typing import Any
 from auth import CookieManager
 from cli.main import download_url
 from config import ConfigLoader
+from core import DouyinAPIClient
 from core.downloader_base import _FilenameTemplateValues, _normalize_filename_template
 from storage import Database
 from utils.logger import set_console_log_level
@@ -42,6 +44,8 @@ class HighLikeDownloaderGUI:
         self.active_like_threshold = 10000
         self.active_min_duration = 0
         self.active_max_duration = 0
+        self.active_skip_failed_records = False
+        self.active_browser_fallback_enabled = True
         self.preview_after_id = None
 
         default_config_path = str(PROJECT_ROOT / "config.yml")
@@ -74,6 +78,17 @@ class HighLikeDownloaderGUI:
         )
         self.max_duration_seconds = tk.IntVar(
             value=self._coerce_int(saved_gui_settings.get("max_duration_seconds"), 0, minimum=0)
+        )
+        self.skip_failed_records = tk.BooleanVar(
+            value=bool(saved_gui_settings.get("skip_failed_records", False))
+        )
+        self.browser_fallback_enabled = tk.BooleanVar(
+            value=bool(
+                saved_gui_settings.get(
+                    "browser_fallback_enabled",
+                    self._load_browser_fallback_enabled(default_config_path),
+                )
+            )
         )
 
         self.total_count = tk.StringVar(value="0")
@@ -194,6 +209,20 @@ class HighLikeDownloaderGUI:
             command=self._on_filter_changed,
         )
         self.max_duration_spin.pack(side=tk.LEFT, padx=(4, 18))
+        self.skip_failed_check = ttk.Checkbutton(
+            filter_frame,
+            text="跳过失败记录",
+            variable=self.skip_failed_records,
+            command=self._on_filter_changed,
+        )
+        self.skip_failed_check.pack(side=tk.LEFT, padx=(0, 18))
+        self.browser_fallback_check = ttk.Checkbutton(
+            filter_frame,
+            text="浏览器兜底",
+            variable=self.browser_fallback_enabled,
+            command=self._on_filter_changed,
+        )
+        self.browser_fallback_check.pack(side=tk.LEFT, padx=(0, 18))
         ttk.Label(
             filter_frame,
             text="提示：SQL库会直接读取评分表；时长填 0 表示不限。",
@@ -335,6 +364,20 @@ class HighLikeDownloaderGUI:
         return settings if isinstance(settings, dict) else {}
 
     @staticmethod
+    def _load_browser_fallback_enabled(config_path: str) -> bool:
+        try:
+            config = ConfigLoader(config_path)
+            browser_cfg = config.get("browser_fallback", {}) or {}
+        except Exception:
+            return True
+        if not isinstance(browser_cfg, dict):
+            return True
+        value = browser_cfg.get("enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
     def _resolve_download_path(path_value: str) -> Path:
         path = Path(str(path_value or "./Downloaded/")).expanduser()
         if path.is_absolute():
@@ -361,6 +404,17 @@ class HighLikeDownloaderGUI:
             )
             self.max_duration_seconds.set(
                 self._coerce_int(settings.get("max_duration_seconds"), self.max_duration_seconds.get(), minimum=0)
+            )
+            self.skip_failed_records.set(
+                bool(settings.get("skip_failed_records", self.skip_failed_records.get()))
+            )
+            self.browser_fallback_enabled.set(
+                bool(
+                    settings.get(
+                        "browser_fallback_enabled",
+                        self._load_browser_fallback_enabled(path),
+                    )
+                )
             )
             self.saved_filename_template = self._load_config_filename_template(path)
             self.filename_template.set(self.saved_filename_template)
@@ -410,7 +464,12 @@ class HighLikeDownloaderGUI:
         template = self.filename_template.get().strip() or DEFAULT_FILENAME_TEMPLATE
         try:
             download_path = str(self._resolve_download_path(self.download_path.get()))
+            config = ConfigLoader(config_path)
+            existing_settings = config.get(GUI_SETTINGS_KEY, {})
+            if not isinstance(existing_settings, dict):
+                existing_settings = {}
             settings = {
+                **existing_settings,
                 "download_path": download_path,
                 "batch_count": self._coerce_int(self.batch_count.get(), 20, minimum=1),
                 "download_filter_mode": self._normalize_filter_mode(self.download_filter_mode.get()),
@@ -422,11 +481,13 @@ class HighLikeDownloaderGUI:
                 ),
                 "min_duration_seconds": self._coerce_int(self.min_duration_seconds.get(), 0, minimum=0),
                 "max_duration_seconds": self._coerce_int(self.max_duration_seconds.get(), 0, minimum=0),
+                "skip_failed_records": bool(self.skip_failed_records.get()),
+                "browser_fallback_enabled": bool(self.browser_fallback_enabled.get()),
             }
-            config = ConfigLoader(config_path)
             config.update(
                 path=download_path,
                 filename_template=template,
+                browser_fallback={"enabled": bool(self.browser_fallback_enabled.get())},
                 **{GUI_SETTINGS_KEY: settings},
             )
             config.save(config_path)
@@ -659,6 +720,8 @@ class HighLikeDownloaderGUI:
         self.like_threshold_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.min_duration_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.max_duration_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.skip_failed_check.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.browser_fallback_check.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.stop_button.configure(state=tk.NORMAL if allow_stop else tk.DISABLED)
 
     def _run_worker(self, target):
@@ -684,6 +747,8 @@ class HighLikeDownloaderGUI:
             self.active_max_duration = max(int(self.max_duration_seconds.get()), 0)
         except (TypeError, ValueError, tk.TclError):
             self.active_max_duration = 0
+        self.active_skip_failed_records = bool(self.skip_failed_records.get())
+        self.active_browser_fallback_enabled = bool(self.browser_fallback_enabled.get())
 
     def _on_filter_changed(self, *_args):
         mode = self._normalize_filter_mode(self.download_filter_mode.get())
@@ -701,7 +766,7 @@ class HighLikeDownloaderGUI:
         except (TypeError, ValueError, tk.TclError):
             max_duration = 0
         self.status.set(
-            f"下载筛选已切换：{self._describe_filter(mode, grade, threshold, min_duration, max_duration)}，点击刷新统计后生效"
+            f"下载筛选已切换：{self._describe_filter(mode, grade, threshold, min_duration, max_duration, bool(self.skip_failed_records.get()), bool(self.browser_fallback_enabled.get()))}，点击刷新统计后生效"
         )
 
     @staticmethod
@@ -748,12 +813,24 @@ class HighLikeDownloaderGUI:
         threshold: int | None = None,
         min_duration: int | None = None,
         max_duration: int | None = None,
+        skip_failed_records: bool | None = None,
+        browser_fallback_enabled: bool | None = None,
     ) -> str:
         mode = mode or self.active_filter_mode
         grade = grade or self.active_filter_grade
         threshold = self.active_like_threshold if threshold is None else threshold
         min_duration = self.active_min_duration if min_duration is None else min_duration
         max_duration = self.active_max_duration if max_duration is None else max_duration
+        skip_failed_records = (
+            getattr(self, "active_skip_failed_records", False)
+            if skip_failed_records is None
+            else skip_failed_records
+        )
+        browser_fallback_enabled = (
+            getattr(self, "active_browser_fallback_enabled", True)
+            if browser_fallback_enabled is None
+            else browser_fallback_enabled
+        )
         if mode == "指定等级":
             desc = f"仅下载 {grade or 'A'} 级视频"
         elif mode == "高赞视频":
@@ -766,9 +843,17 @@ class HighLikeDownloaderGUI:
             desc += f"，时长 ≥ {min_duration} 秒"
         elif max_duration:
             desc += f"，时长 ≤ {max_duration} 秒"
+        if skip_failed_records:
+            desc += "，跳过失败记录"
+        if browser_fallback_enabled:
+            desc += "，浏览器兜底"
         return desc
 
-    def _filter_rows_for_download(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _filter_rows_for_download(
+        self,
+        rows: list[dict[str, Any]],
+        config: ConfigLoader | None = None,
+    ) -> list[dict[str, Any]]:
         mode = self.active_filter_mode
         enriched_rows = list(rows)
 
@@ -789,6 +874,16 @@ class HighLikeDownloaderGUI:
                 if self._row_duration_seconds(row) > 0
                 and self._row_duration_seconds(row) <= self.active_max_duration
             ]
+        if getattr(self, "active_skip_failed_records", False):
+            failed_aweme_ids = self._load_failed_aweme_ids(
+                self._resolve_failed_csv_path(config)
+            )
+            if failed_aweme_ids:
+                enriched_rows = [
+                    row
+                    for row in enriched_rows
+                    if str(row.get("aweme_id") or "").strip() not in failed_aweme_ids
+                ]
         return list(enriched_rows)
 
     def _load_candidate_rows(self, config: ConfigLoader) -> list[dict[str, Any]]:
@@ -932,7 +1027,7 @@ class HighLikeDownloaderGUI:
         config = ConfigLoader(self.active_config_path)
         self._apply_runtime_config(config)
         all_rows = self._load_candidate_rows(config)
-        rows = self._filter_rows_for_download(all_rows)
+        rows = self._filter_rows_for_download(all_rows, config)
         database = await self._open_database(config)
         completed = 0
         try:
@@ -964,7 +1059,7 @@ class HighLikeDownloaderGUI:
         config = ConfigLoader(self.active_config_path)
         self._apply_runtime_config(config)
         all_rows = self._load_candidate_rows(config)
-        rows = self._filter_rows_for_download(all_rows)
+        rows = self._filter_rows_for_download(all_rows, config)
         database = await self._open_database(config)
 
         try:
@@ -978,12 +1073,14 @@ class HighLikeDownloaderGUI:
                 pending_rows.append(row)
 
             selected_rows = pending_rows[: self.active_batch_count]
+            await self._preflight_selected_rows(selected_rows, config)
             config.update(link=[row["video_url"] for row in selected_rows if row.get("video_url")])
             if selected_rows and not config.validate():
                 raise RuntimeError("配置无效：请检查 config.yml 中的 path、cookie 等设置")
 
             cookie_manager = CookieManager()
             cookie_manager.set_cookies(config.get_cookies())
+            failed_csv_path = self._resolve_failed_csv_path(config)
 
             self.events.put(
                 (
@@ -1019,10 +1116,13 @@ class HighLikeDownloaderGUI:
                 if result and result.success > 0:
                     success += result.success
                     completed += result.success
+                    self._remove_failed_record(failed_csv_path, aweme_id)
                 elif result and result.skipped > 0:
                     skipped += result.skipped
+                    self._remove_failed_record(failed_csv_path, aweme_id)
                 else:
                     failed += 1
+                    self._append_failed_record(failed_csv_path, row)
 
                 self.events.put(
                     (
@@ -1048,6 +1148,48 @@ class HighLikeDownloaderGUI:
         finally:
             await database.close()
 
+    async def _preflight_selected_rows(
+        self,
+        selected_rows: list[dict[str, Any]],
+        config: ConfigLoader,
+    ) -> None:
+        if self.active_browser_fallback_enabled:
+            return
+
+        sample_rows = [
+            row
+            for row in selected_rows
+            if str(row.get("aweme_id") or "").strip()
+        ][:3]
+        if not sample_rows:
+            return
+
+        cookie_manager = CookieManager()
+        cookie_manager.set_cookies(config.get_cookies())
+        failures: list[tuple[str, str]] = []
+
+        async with DouyinAPIClient(
+            cookie_manager.get_cookies(),
+            proxy=config.get("proxy"),
+        ) as api_client:
+            for row in sample_rows:
+                aweme_id = str(row.get("aweme_id") or "").strip()
+                detail = await api_client.get_video_detail(aweme_id, suppress_error=True)
+                if detail:
+                    return
+                failures.append((aweme_id, api_client.last_error or "未返回详情"))
+
+        if failures and len(failures) == len(sample_rows):
+            detail_text = "；".join(
+                f"{aweme_id}: {reason}" for aweme_id, reason in failures
+            )
+            raise RuntimeError(
+                "下载前检测失败：指定等级筛选本身没有问题，但下载器当前无法从抖音详情接口取回视频详情。"
+                "这通常意味着直连 API 被风控拦截、签名链路失效，或接口返回空响应。"
+                f"抽样 {len(sample_rows)}/{len(sample_rows)} 条均失败：{detail_text}。"
+                "如果主系统 full 模式正常，那是因为 full 模式走浏览器抓包链路，不依赖这里的直连接口。"
+            )
+
     async def _open_database(self, config: ConfigLoader) -> Database:
         database = Database(db_path=str(self._resolve_database_path(config)))
         await database.initialize()
@@ -1069,6 +1211,86 @@ class HighLikeDownloaderGUI:
         if default_manifest != current_manifest:
             paths.append(default_manifest)
         return paths
+
+    def _resolve_failed_csv_path(self, config: ConfigLoader | None = None) -> Path:
+        config = config or ConfigLoader(self.active_config_path)
+        gui_settings = config.get(GUI_SETTINGS_KEY, {})
+        if isinstance(gui_settings, dict):
+            raw_path = gui_settings.get("failed_csv_path")
+            if raw_path:
+                path = Path(str(raw_path)).expanduser()
+                return path if path.is_absolute() else PROJECT_ROOT / path
+        return PROJECT_ROOT / "douyin_cached_high_like_videos_failed.csv"
+
+    @staticmethod
+    def _load_failed_aweme_ids(path: Path) -> set[str]:
+        if not path.exists():
+            return set()
+
+        failed_aweme_ids: set[str] = set()
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    aweme_id = str((row or {}).get("aweme_id") or "").strip()
+                    if aweme_id:
+                        failed_aweme_ids.add(aweme_id)
+        except Exception:
+            return set()
+        return failed_aweme_ids
+
+    def _append_failed_record(self, path: Path, row: dict[str, Any]) -> None:
+        aweme_id = str(row.get("aweme_id") or "").strip()
+        if not aweme_id:
+            return
+
+        existing_rows = self._read_failed_rows(path)
+        existing_rows[aweme_id] = {
+            "aweme_id": aweme_id,
+            "video_url": str(row.get("video_url") or "").strip(),
+            "uploader_name": str(row.get("uploader_name") or "").strip(),
+            "video_title": str(row.get("video_title") or "").strip(),
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._write_failed_rows(path, existing_rows)
+
+    def _remove_failed_record(self, path: Path, aweme_id: Any) -> None:
+        normalized_aweme_id = str(aweme_id or "").strip()
+        if not normalized_aweme_id or not path.exists():
+            return
+
+        existing_rows = self._read_failed_rows(path)
+        if normalized_aweme_id not in existing_rows:
+            return
+        existing_rows.pop(normalized_aweme_id, None)
+        self._write_failed_rows(path, existing_rows)
+
+    @staticmethod
+    def _read_failed_rows(path: Path) -> dict[str, dict[str, str]]:
+        rows: dict[str, dict[str, str]] = {}
+        if not path.exists():
+            return rows
+
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    aweme_id = str((row or {}).get("aweme_id") or "").strip()
+                    if aweme_id:
+                        rows[aweme_id] = {key: str(value or "") for key, value in row.items()}
+        except Exception:
+            return {}
+        return rows
+
+    @staticmethod
+    def _write_failed_rows(path: Path, rows: dict[str, dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = ["aweme_id", "video_url", "uploader_name", "video_title", "recorded_at"]
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for aweme_id in sorted(rows):
+                writer.writerow({name: rows[aweme_id].get(name, "") for name in fieldnames})
 
     @staticmethod
     def _clear_aweme_records(db_path: Path) -> int:
@@ -1136,6 +1358,7 @@ class HighLikeDownloaderGUI:
         # The GUI downloader should place media directly in the selected folder,
         # without the original author/mode/work subdirectories.
         config.update(folderstyle=False, flat_output=True)
+        config.update(browser_fallback={"enabled": bool(self.active_browser_fallback_enabled)})
         if self.active_filename_template:
             config.update(filename_template=self.active_filename_template)
 

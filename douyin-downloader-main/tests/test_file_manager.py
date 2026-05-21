@@ -50,8 +50,10 @@ async def test_download_file_atomic_write(tmp_path):
     mock_response = AsyncMock()
     mock_response.status = 200
     mock_response.content_length = len(content)
+    chunk_sizes = []
 
     async def iter_chunked(size):
+        chunk_sizes.append(size)
         yield content
 
     mock_response.content = MagicMock()
@@ -66,6 +68,7 @@ async def test_download_file_atomic_write(tmp_path):
 
     result = await fm.download_file("https://example.com/v.mp4", save_path, session=mock_session)
     assert result is True
+    assert chunk_sizes == [262144]
     assert save_path.exists()
     assert save_path.read_bytes() == content
     assert not save_path.with_suffix(".mp4.tmp").exists()
