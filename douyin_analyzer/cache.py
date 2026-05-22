@@ -188,42 +188,6 @@ class CacheStore:
 
         return sorted(removed_uids)
 
-    def prune_non_followed_cache(self):
-        followings_payload = self.load_followings_cache_payload()
-        followings = followings_payload.get("followings", []) if isinstance(followings_payload, dict) else []
-        current_uids = {
-            str((item or {}).get("sec_uid") or "").strip()
-            for item in (followings or [])
-            if isinstance(item, dict) and str((item or {}).get("sec_uid") or "").strip()
-        }
-        if not current_uids:
-            return []
-
-        progress = self.load_progress()
-        cached_progress_uids = {
-            str(uid).strip()
-            for uid in (progress or {}).keys()
-            if str(uid).strip()
-        }
-        cached_store_uids = self._load_cached_uploader_ids_from_store()
-        removed_uids = sorted((cached_progress_uids | cached_store_uids) - current_uids)
-        if not removed_uids:
-            return []
-
-        updated_progress = {
-            key: value
-            for key, value in (progress or {}).items()
-            if str(key).strip() not in removed_uids
-        }
-        if len(updated_progress) != len(progress):
-            self.save_progress(updated_progress)
-
-        self._remove_uploader_rows_from_store(removed_uids)
-        print(
-            f"🧹 检测到 {len(removed_uids)} 位非当前关注博主，已从本地缓存与导出状态中清理。"
-        )
-        return removed_uids
-
     def is_followings_cache_expired(self):
         try:
             with self.config.followings_cache_json.open("r", encoding="utf-8") as cache_file:

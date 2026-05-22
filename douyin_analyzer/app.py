@@ -593,62 +593,6 @@ def run_unfollow(list_path):
     return results
 
 
-def run_prune_non_followed_cache():
-    config = load_analyzer_config(fetch_mode_override="counts")
-    setup_logging(config.log_dir, "douyin_prune_non_followed_cache")
-    cache_store = CacheStore(config)
-
-    if cache_store.is_followings_cache_expired():
-        get_console().print(
-            create_summary_panel(
-                "Douyin Non-Followed Cache Cleanup Blocked",
-                [
-                    "当前关注列表缓存已过期，已阻止自动清理。",
-                    "请先运行一次基础统计模式刷新关注列表，再执行一键清理。",
-                ],
-                border_style="yellow",
-            )
-        )
-        return []
-
-    followings = cache_store.load_followings_cache()
-    if not followings:
-        get_console().print(
-            create_summary_panel(
-                "Douyin Non-Followed Cache Cleanup",
-                ["当前没有可用的关注列表缓存，请先运行一次基础统计模式。"],
-                border_style="yellow",
-            )
-        )
-        return []
-
-    removed_uids = cache_store.prune_non_followed_cache()
-    if removed_uids:
-        get_console().print(
-            create_summary_panel(
-                "Douyin Non-Followed Cache Cleanup Finished",
-                [
-                    f"当前关注缓存: {len(followings)} 位",
-                    f"已清理非当前关注缓存: {len(removed_uids)} 位",
-                    f"UIDs: {', '.join(removed_uids[:8])}" + (" ..." if len(removed_uids) > 8 else ""),
-                ],
-                border_style="green",
-            )
-        )
-    else:
-        get_console().print(
-            create_summary_panel(
-                "Douyin Non-Followed Cache Cleanup Finished",
-                [
-                    f"当前关注缓存: {len(followings)} 位",
-                    "未发现需要清理的非当前关注博主缓存。",
-                ],
-                border_style="cyan",
-            )
-        )
-    return removed_uids
-
-
 def run_fetch_uid_videos(list_path, max_targets=None):
     config = load_analyzer_config(fetch_mode_override="full")
     setup_logging(config.log_dir, "douyin_uid_fetch")

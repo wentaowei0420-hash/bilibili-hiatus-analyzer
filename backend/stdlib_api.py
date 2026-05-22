@@ -177,12 +177,10 @@ def _capabilities() -> dict[str, object]:
             "bilibili_uid_fetch",
             "douyin_uid_fetch",
             "douyin_unfollow",
-            "douyin_prune_non_followed_cache",
             "douyin_video_score",
             "douyin_creator_score",
             "douyin_rating_refresh",
             "douyin_compact_export",
-            "douyin_data_sync",
             "douyin_liked_video_cache",
         ],
     }

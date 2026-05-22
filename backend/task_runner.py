@@ -302,10 +302,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         return run_unfollow(
             _path_or_default(request.unfollow_list_path, DEFAULT_DOUYIN_UNFOLLOW_LIST)
         )
-    if kind == JobKind.DOUYIN_PRUNE_NON_FOLLOWED_CACHE:
-        from douyin_analyzer.app import run_prune_non_followed_cache
-
-        return run_prune_non_followed_cache()
     if kind == JobKind.DOUYIN_VIDEO_SCORE:
         from douyin_analyzer.app import run_score_videos_from_cache
 
@@ -329,15 +325,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         return run_export_compact_tables_from_cache(
             high_like_threshold=request.high_like_threshold
         )
-    if kind == JobKind.DOUYIN_DATA_SYNC:
-        from douyin_analyzer.config import load_analyzer_config
-        from douyin_analyzer.data_sync import sync_progress_videos_to_state
-
-        config = load_analyzer_config()
-        result = sync_progress_videos_to_state(config, rerun_scores=True)
-        if isinstance(result, dict):
-            result["message"] = _format_douyin_data_sync_message(result)
-        return result
     if kind == JobKind.DOUYIN_LIKED_VIDEO_CACHE:
         from douyin_analyzer.app import run_cache_liked_videos_as_s
 
@@ -352,30 +339,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         }
 
     raise ValueError(f"Unsupported job kind: {_enum_value(kind)}")
-
-
-def _format_douyin_data_sync_message(result: dict[str, Any]) -> str:
-    before = result.get("before_diagnostics", {}) or {}
-    after = result.get("after_diagnostics", {}) or {}
-    return (
-        "抖音数据同步完成："
-        f"同步UP {result.get('processed_creators', 0)} 位，"
-        f"progress视频 {result.get('processed_videos', 0)} 条，"
-        f"raw视频 {result.get('raw_videos_processed', 0)} 条；"
-        f"解除full重置 {result.get('resolved_full_status_resets', 0)} 位；"
-        f"清单缓存数更新 {result.get('inventory_rows_updated', 0)} 行；"
-        f"douyin_video_state {result.get('video_state_before', 0)} -> {result.get('video_state_after', 0)}；"
-        f"video_score_current {result.get('video_score_before', 0)} -> {result.get('video_score_after', 0)}；"
-        f"creator_score_current {result.get('creator_score_before', 0)} -> {result.get('creator_score_after', 0)}；"
-        f"当前缓存视频 {after.get('current_progress_videos', 0)} 条；"
-        f"当前缓存未评分 {before.get('current_progress_not_scored', 0)} -> "
-        f"{after.get('current_progress_not_scored', 0)}；"
-        f"评分不在当前缓存 {before.get('score_not_current_progress', 0)} -> "
-        f"{after.get('score_not_current_progress', 0)}；"
-        f"下载标记孤儿 {before.get('score_download_mark_without_aweme', 0)} -> "
-        f"{after.get('score_download_mark_without_aweme', 0)}；"
-        f"需人工状态重置 {after.get('full_cache_count_mismatch_gt_30', 0)} 位"
-    )
 
 
 def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:

@@ -70,12 +70,10 @@ class JobKind(str, Enum):
     BILIBILI_UID_FETCH = "bilibili_uid_fetch"
     DOUYIN_UID_FETCH = "douyin_uid_fetch"
     DOUYIN_UNFOLLOW = "douyin_unfollow"
-    DOUYIN_PRUNE_NON_FOLLOWED_CACHE = "douyin_prune_non_followed_cache"
     DOUYIN_VIDEO_SCORE = "douyin_video_score"
     DOUYIN_CREATOR_SCORE = "douyin_creator_score"
     DOUYIN_RATING_REFRESH = "douyin_rating_refresh"
     DOUYIN_COMPACT_EXPORT = "douyin_compact_export"
-    DOUYIN_DATA_SYNC = "douyin_data_sync"
     DOUYIN_LIKED_VIDEO_CACHE = "douyin_liked_video_cache"
 
 

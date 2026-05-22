@@ -705,7 +705,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
     if stale_creator_count:
         warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
     if missing_creator_score_count:
-        warning_parts.append(f"full UP缺少评分 {missing_creator_score_count} 位，请重新运行抖音数据同步/UP主评分")
+        warning_parts.append(f"full UP缺少评分 {missing_creator_score_count} 位，请重新运行UP主评分或评分刷新")
     result["warning_parts"] = warning_parts
     result["message"] = (
         f"评分数据已加载：{db_path}\n"

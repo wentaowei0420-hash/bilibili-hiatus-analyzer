@@ -223,7 +223,6 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
         "douyin": "douyin_analysis",
         "both": "both_analysis",
         "douyin_unfollow": "douyin_unfollow",
-        "douyin_non_followed_cleanup": "douyin_prune_non_followed_cache",
         "bilibili_uid": "bilibili_uid_fetch",
         "douyin_uid": "douyin_uid_fetch",
         "douyin_video_score": "douyin_video_score",
@@ -257,10 +256,6 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
 
 def rating_refresh_payload() -> dict[str, Any]:
     return {"kind": "douyin_rating_refresh", "action": "fetch"}
-
-
-def data_sync_payload() -> dict[str, Any]:
-    return {"kind": "douyin_data_sync", "action": "fetch"}
 
 
 def liked_video_cache_payload() -> dict[str, Any]:
@@ -331,11 +326,6 @@ class RunnerThread(BackendJobThread):
 class RatingRefreshThread(BackendJobThread):
     def __init__(self, parent=None):
         super().__init__(payload=rating_refresh_payload(), parent=parent)
-
-
-class DouyinDataSyncThread(BackendJobThread):
-    def __init__(self, parent=None):
-        super().__init__(payload=data_sync_payload(), parent=parent)
 
 
 class DouyinLikedVideoCacheThread(BackendJobThread):

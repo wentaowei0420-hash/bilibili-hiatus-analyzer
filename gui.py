@@ -6,7 +6,6 @@ from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QDialog,
@@ -22,7 +21,6 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -62,7 +60,6 @@ from gui_backend_client import (
     ApiCallThread,
     BackendApiClient,
     BilibiliCookieCheckThread,
-    DouyinDataSyncThread,
     DouyinLikedVideoCacheThread,
     RatingRefreshThread,
     RunnerThread,
@@ -2576,7 +2573,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.worker = None
         self.cookie_checker = None
-        self.data_sync_worker = None
         self.liked_video_cache_worker = None
         self.log_dialog = None
         self.config_locked = False
@@ -2658,10 +2654,6 @@ class MainWindow(QMainWindow):
                 min-height: 30px;
                 padding: 3px 6px;
             }
-            QRadioButton {
-                font-size: 14px;
-                spacing: 8px;
-            }
             QPushButton {
                 font-size: 14px;
                 min-height: 32px;
@@ -2726,67 +2718,42 @@ class MainWindow(QMainWindow):
         default_douyin_index = self.douyin_mode_combo.findData("monitor")
         self.douyin_mode_combo.setCurrentIndex(default_douyin_index if default_douyin_index >= 0 else 0)
         self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
-        add_setting(1, "B站抓取模式", self.bilibili_mode_combo, "抖音抓取模式", self.douyin_mode_combo)
+        add_setting(1, "B站抓取模式", self.bilibili_mode_combo)
 
         self.monitor_video_limit_spin = QSpinBox()
         self.monitor_video_limit_spin.setRange(1, 500)
         self.monitor_video_limit_spin.setValue(10)
-        self.monitor_video_limit_spin.setMaximumWidth(140)
         self.monitor_video_limit_spin.setToolTip("监控/增量模式下，每位博主最多抓取最近 N 条视频。基础统计和完整模式会忽略该参数。")
 
         self.backend_combo = QComboBox()
         for label, value in self.BROWSER_BACKEND_OPTIONS:
             self.backend_combo.addItem(label, value)
-        add_setting(2, "监控视频数", self.monitor_video_limit_spin, "抖音浏览器后端", self.backend_combo)
 
-        self.uid_fetch_all_radio = QRadioButton("全抓取模式")
-        self.uid_fetch_all_radio.setToolTip("抓取 UID 名单中的全部博主。")
-        self.uid_fetch_partial_radio = QRadioButton("部分抓取模式")
-        self.uid_fetch_partial_radio.setToolTip(
-            "只抓取排序后的前 N 个 UID。已存在博主会更新，新博主会添加，未涉及博主保持不变。"
+        self.uid_fetch_mode_button = QPushButton()
+        self.uid_fetch_mode_button.setCheckable(True)
+        self.uid_fetch_mode_button.setChecked(False)
+        self.uid_fetch_mode_button.setToolTip(
+            "点击切换全抓取/部分抓取。部分抓取只处理排序后的前 N 个 UID。"
         )
-        self.uid_fetch_all_radio.setChecked(True)
-        self.uid_fetch_all_radio.toggled.connect(self._sync_visible_options)
-        self.uid_fetch_partial_radio.toggled.connect(self._sync_visible_options)
+        self.uid_fetch_mode_button.toggled.connect(self._on_uid_fetch_mode_toggled)
+        self._sync_uid_fetch_mode_button()
         self.uid_limit_spin = QSpinBox()
         self.uid_limit_spin.setRange(1, 100000)
         self.uid_limit_spin.setValue(100)
-        self.uid_limit_spin.setMaximumWidth(120)
         self.uid_limit_spin.setToolTip("部分抓取模式下生效；全抓取模式会忽略该数量。")
-        fetch_mode_row = QHBoxLayout()
-        fetch_mode_row.setContentsMargins(0, 0, 0, 0)
-        fetch_mode_row.setSpacing(12)
-        fetch_mode_row.addWidget(self.uid_fetch_all_radio)
-        fetch_mode_row.addWidget(self.uid_fetch_partial_radio)
-        fetch_mode_row.addStretch(1)
-        fetch_mode_widget = QWidget()
-        fetch_mode_widget.setLayout(fetch_mode_row)
-        fetch_mode_widget.setMinimumWidth(280)
-
-        limit_row = QHBoxLayout()
-        limit_row.setContentsMargins(0, 0, 0, 0)
-        limit_row.setSpacing(10)
-        uid_limit_label = QLabel("抓取前 N 个 UID")
-        uid_limit_label.setMinimumWidth(110)
-        limit_row.addWidget(uid_limit_label)
-        limit_row.addWidget(self.uid_limit_spin)
-        limit_row.addStretch(1)
-        limit_widget = QWidget()
-        limit_widget.setLayout(limit_row)
-        limit_widget.setMinimumWidth(260)
-        add_setting(3, "抓取方式", fetch_mode_widget, "UID 数量", limit_widget)
 
         self.high_like_spin = QSpinBox()
         self.high_like_spin.setRange(1, 100000000)
         self.high_like_spin.setValue(10000)
-        self.high_like_spin.setMaximumWidth(180)
-        self.full_fetch_retry_checkbox = QCheckBox("数量不一致时自动重抓一次")
-        self.full_fetch_retry_checkbox.setChecked(bool(self.douyin_full_fetch_retry_on_mismatch))
-        self.full_fetch_retry_checkbox.setToolTip(
+        self.high_like_spin.setToolTip("抖音统计与精简表导出中的高赞判定阈值。")
+        self.full_fetch_retry_button = QPushButton()
+        self.full_fetch_retry_button.setCheckable(True)
+        self.full_fetch_retry_button.setChecked(bool(self.douyin_full_fetch_retry_on_mismatch))
+        self.full_fetch_retry_button.setToolTip(
             "仅对抖音 full 模式生效。开启后，主页作品数与全量抓取结果不一致时，会自动重新进入主页再抓一次。"
         )
-        self.full_fetch_retry_checkbox.toggled.connect(self._on_full_fetch_retry_toggle)
-        self.high_like_spin.setToolTip("抖音统计与精简表导出中的高赞判定阈值。")
+        self.full_fetch_retry_button.toggled.connect(self._on_full_fetch_retry_toggle)
+        self._sync_full_fetch_retry_button()
         self.auto_full_button = QPushButton("自动 full：关闭")
         self.auto_full_button.setToolTip("开启后按左侧间隔自动运行一次抖音 full 模式；任务运行中会跳过当次触发。")
         self.auto_full_button.clicked.connect(self._toggle_auto_full_mode)
@@ -2794,18 +2761,8 @@ class MainWindow(QMainWindow):
         self.auto_full_interval_spin.setRange(1, 10080)
         self.auto_full_interval_spin.setValue(DEFAULT_AUTO_FULL_INTERVAL_MINUTES)
         self.auto_full_interval_spin.setSuffix(" 分钟")
-        self.auto_full_interval_spin.setMaximumWidth(140)
         self.auto_full_interval_spin.setToolTip("自动 full 的触发间隔。修改后会立即保存，并在已开启时重新计算下一次触发时间。")
         self.auto_full_interval_spin.valueChanged.connect(self._on_auto_full_interval_changed)
-        auto_full_row = QHBoxLayout()
-        auto_full_row.setContentsMargins(0, 0, 0, 0)
-        auto_full_row.addWidget(QLabel("间隔"))
-        auto_full_row.addWidget(self.auto_full_interval_spin)
-        auto_full_row.addStretch(1)
-        auto_full_widget = QWidget()
-        auto_full_widget.setLayout(auto_full_row)
-        add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", auto_full_widget)
-        add_setting(5, "full 校验", self.full_fetch_retry_checkbox)
         layout.addWidget(settings_group)
 
         self.log_dialog = LogCenterDialog(self)
@@ -2829,8 +2786,6 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.video_download_button = QPushButton("视频下载")
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
-        self.unfollow_cleanup_button = QPushButton("清理缓存")
-        self.unfollow_cleanup_button.clicked.connect(self._start_douyin_non_followed_cache_cleanup)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.rating_overview_button = QPushButton("评分概览")
@@ -2839,8 +2794,6 @@ class MainWindow(QMainWindow):
         self.archive_button.clicked.connect(self._open_archive_manager)
         self.douyin_status_reset_button = QPushButton("状态重置")
         self.douyin_status_reset_button.clicked.connect(self._open_douyin_status_reset)
-        self.douyin_data_sync_button = QPushButton("数据同步")
-        self.douyin_data_sync_button.clicked.connect(self._start_douyin_data_sync)
         self.liked_video_cache_button = QPushButton("\u7f13\u5b58\u559c\u6b22S\u7ea7")
         self.liked_video_cache_button.setToolTip("\u6293\u53d6\u5f53\u524d\u767b\u5f55\u8d26\u53f7\u4e3b\u9875\u559c\u6b22\u9875\u7684\u89c6\u9891\uff0c\u5199\u5165\u672c\u5730\u7f13\u5b58\u5e76\u8bbe\u4e3a S \u7ea7\u3002")
         self.liked_video_cache_button.clicked.connect(self._start_liked_video_cache)
@@ -2865,14 +2818,14 @@ class MainWindow(QMainWindow):
             self.clear_button,
         )
         douyin_quick_buttons = (
-            self.unfollow_cleanup_button,
             self.douyin_stats_button,
             self.rating_overview_button,
             self.archive_button,
             self.douyin_status_reset_button,
-            self.douyin_data_sync_button,
             self.liked_video_cache_button,
+            self.full_fetch_retry_button,
             self.auto_full_button,
+            self.uid_fetch_mode_button,
         )
         for button in toolbar_buttons + douyin_quick_buttons:
             button.setMinimumWidth(0)
@@ -2885,14 +2838,57 @@ class MainWindow(QMainWindow):
         controls_layout.addLayout(button_grid)
 
         douyin_quick_group = QGroupBox("抖音快捷操作")
-        douyin_quick_layout = QGridLayout(douyin_quick_group)
+        douyin_quick_layout = QVBoxLayout(douyin_quick_group)
         douyin_quick_layout.setContentsMargins(12, 18, 12, 12)
-        douyin_quick_layout.setHorizontalSpacing(10)
-        douyin_quick_layout.setVerticalSpacing(8)
+        douyin_quick_layout.setSpacing(10)
+        douyin_settings_grid = QGridLayout()
+        douyin_settings_grid.setHorizontalSpacing(12)
+        douyin_settings_grid.setVerticalSpacing(8)
+        douyin_settings_grid.setColumnMinimumWidth(0, 92)
+        douyin_settings_grid.setColumnMinimumWidth(2, 116)
+        douyin_settings_grid.setColumnStretch(1, 1)
+        douyin_settings_grid.setColumnStretch(3, 1)
+
+        def add_douyin_setting(row, left_label, left_widget, right_label=None, right_widget=None):
+            douyin_settings_grid.addWidget(QLabel(left_label), row, 0)
+            douyin_settings_grid.addWidget(left_widget, row, 1)
+            if right_label is not None and right_widget is not None:
+                douyin_settings_grid.addWidget(QLabel(right_label), row, 2)
+                douyin_settings_grid.addWidget(right_widget, row, 3)
+
+        add_douyin_setting(0, "抖音抓取模式", self.douyin_mode_combo, "抖音浏览器后端", self.backend_combo)
+        metric_grid = QGridLayout()
+        metric_grid.setHorizontalSpacing(10)
+        metric_grid.setVerticalSpacing(0)
+        metric_items = (
+            ("监控视频数", self.monitor_video_limit_spin),
+            ("UID 数量", self.uid_limit_spin),
+            ("高赞阈值", self.high_like_spin),
+            ("自动间隔", self.auto_full_interval_spin),
+        )
+        for column, (label_text, widget) in enumerate(metric_items):
+            label = QLabel(label_text)
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumHeight(28)
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
+            widget.setMinimumHeight(28)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            metric_grid.setColumnStretch(column * 2, 0)
+            metric_grid.setColumnStretch(column * 2 + 1, 1)
+            metric_grid.addWidget(label, 0, column * 2)
+            metric_grid.addWidget(widget, 0, column * 2 + 1)
+        douyin_settings_grid.addLayout(metric_grid, 1, 0, 1, 4)
+        douyin_quick_layout.addLayout(douyin_settings_grid)
+
+        douyin_button_grid = QGridLayout()
+        douyin_button_grid.setHorizontalSpacing(10)
+        douyin_button_grid.setVerticalSpacing(8)
         for column in range(8):
-            douyin_quick_layout.setColumnStretch(column, 1)
+            douyin_button_grid.setColumnStretch(column, 1)
         for index, button in enumerate(douyin_quick_buttons):
-            douyin_quick_layout.addWidget(button, index // 8, index % 8)
+            douyin_button_grid.addWidget(button, index // 8, index % 8)
+        douyin_quick_layout.addLayout(douyin_button_grid)
         controls_layout.addWidget(douyin_quick_group)
         layout.addWidget(controls_group)
 
@@ -2925,6 +2921,21 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
+    def _on_uid_fetch_mode_toggled(self, _checked):
+        self._sync_uid_fetch_mode_button()
+        self._sync_visible_options()
+
+    def _sync_uid_fetch_mode_button(self):
+        if not hasattr(self, "uid_fetch_mode_button"):
+            return
+        base_style = "font-size: 13px; padding: 3px 8px;"
+        if self.uid_fetch_mode_button.isChecked():
+            self.uid_fetch_mode_button.setText("部分抓取")
+            self.uid_fetch_mode_button.setStyleSheet(f"{base_style} font-weight: 700; color: #1565c0;")
+        else:
+            self.uid_fetch_mode_button.setText("全抓取")
+            self.uid_fetch_mode_button.setStyleSheet(base_style)
+
     def _sync_visible_options(self):
         platform = self.platform_combo.currentData()
         is_normal = platform in {"both", "bilibili", "douyin"}
@@ -2940,11 +2951,10 @@ class MainWindow(QMainWindow):
         self.monitor_video_limit_spin.setEnabled(editable and is_douyin and is_recent_video_mode)
         self.backend_combo.setEnabled(editable and is_douyin)
         self.platform_combo.setEnabled(editable)
-        self.uid_fetch_all_radio.setEnabled(editable)
-        self.uid_fetch_partial_radio.setEnabled(editable)
-        self.uid_limit_spin.setEnabled(editable and self.uid_fetch_partial_radio.isChecked())
+        self.uid_fetch_mode_button.setEnabled(editable)
+        self.uid_limit_spin.setEnabled(editable and self.uid_fetch_mode_button.isChecked())
         self.high_like_spin.setEnabled(editable)
-        self.full_fetch_retry_checkbox.setEnabled(editable and supports_full_fetch_retry)
+        self.full_fetch_retry_button.setEnabled(editable and supports_full_fetch_retry)
         self.auto_full_interval_spin.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
@@ -2968,10 +2978,10 @@ class MainWindow(QMainWindow):
             douyin_fetch_mode=self.douyin_mode_combo.currentData(),
             douyin_backend=self.backend_combo.currentData(),
             monitor_video_limit=self.monitor_video_limit_spin.value(),
-            uid_limit_enabled=self.uid_fetch_partial_radio.isChecked(),
+            uid_limit_enabled=self.uid_fetch_mode_button.isChecked(),
             uid_limit=self.uid_limit_spin.value(),
             high_like_threshold=self.high_like_spin.value(),
-            douyin_full_fetch_retry_on_mismatch=self.full_fetch_retry_checkbox.isChecked(),
+            douyin_full_fetch_retry_on_mismatch=self.full_fetch_retry_button.isChecked(),
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
             bilibili_uid_list_path=Path(self.bilibili_uid_list_path).expanduser(),
             douyin_uid_list_path=Path(self.douyin_uid_list_path).expanduser(),
@@ -2995,10 +3005,10 @@ class MainWindow(QMainWindow):
             "douyin_fetch_mode": self.douyin_mode_combo.currentData(),
             "douyin_backend": self.backend_combo.currentData(),
             "monitor_video_limit": self.monitor_video_limit_spin.value(),
-            "uid_limit_enabled": self.uid_fetch_partial_radio.isChecked(),
+            "uid_limit_enabled": self.uid_fetch_mode_button.isChecked(),
             "uid_limit": self.uid_limit_spin.value(),
             "high_like_threshold": self.high_like_spin.value(),
-            "douyin_full_fetch_retry_on_mismatch": self.full_fetch_retry_checkbox.isChecked(),
+            "douyin_full_fetch_retry_on_mismatch": self.full_fetch_retry_button.isChecked(),
             "unfollow_list_path": self.unfollow_list_path,
             "bilibili_uid_list_path": self.bilibili_uid_list_path,
             "douyin_uid_list_path": self.douyin_uid_list_path,
@@ -3035,10 +3045,8 @@ class MainWindow(QMainWindow):
                 if index >= 0:
                     combo.setCurrentIndex(index)
 
-            if bool(data.get("uid_limit_enabled", False)):
-                self.uid_fetch_partial_radio.setChecked(True)
-            else:
-                self.uid_fetch_all_radio.setChecked(True)
+            self.uid_fetch_mode_button.setChecked(bool(data.get("uid_limit_enabled", False)))
+            self._sync_uid_fetch_mode_button()
             self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
             self.monitor_video_limit_spin.setValue(
                 int(data.get("monitor_video_limit", self.monitor_video_limit_spin.value()) or self.monitor_video_limit_spin.value())
@@ -3047,7 +3055,7 @@ class MainWindow(QMainWindow):
                 int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
             )
             if "douyin_full_fetch_retry_on_mismatch" in data:
-                self.full_fetch_retry_checkbox.setChecked(bool(data.get("douyin_full_fetch_retry_on_mismatch")))
+                self.full_fetch_retry_button.setChecked(bool(data.get("douyin_full_fetch_retry_on_mismatch")))
             self.auto_full_interval_spin.setValue(
                 int(data.get("auto_full_interval_minutes", self.auto_full_interval_spin.value()) or self.auto_full_interval_spin.value())
             )
@@ -3152,9 +3160,20 @@ class MainWindow(QMainWindow):
 
     def _on_full_fetch_retry_toggle(self, checked):
         self.douyin_full_fetch_retry_on_mismatch = bool(checked)
+        self._sync_full_fetch_retry_button()
         if self._loading_gui_config:
             return
         self._save_gui_config()
+
+    def _sync_full_fetch_retry_button(self):
+        if not hasattr(self, "full_fetch_retry_button"):
+            return
+        if self.douyin_full_fetch_retry_on_mismatch:
+            self.full_fetch_retry_button.setText("full校验：开启")
+            self.full_fetch_retry_button.setStyleSheet("font-weight: 700; color: #1565c0;")
+        else:
+            self.full_fetch_retry_button.setText("full校验：关闭")
+            self.full_fetch_retry_button.setStyleSheet("")
 
     def _toggle_auto_full_mode(self):
         self.auto_full_enabled = not self.auto_full_enabled
@@ -3196,9 +3215,6 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self._append_log("自动 full 触发时已有任务运行，本次跳过。")
             return
-        if self.data_sync_worker and self.data_sync_worker.isRunning():
-            self._append_log("自动 full 触发时抖音数据同步仍在运行，本次跳过。")
-            return
 
         config = self._collect_config()
         config.platform = "douyin"
@@ -3215,7 +3231,6 @@ class MainWindow(QMainWindow):
         self._start_task_progress("自动 full 已启动，正在等待抓取总数...")
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
-        self.unfollow_cleanup_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -3241,50 +3256,9 @@ class MainWindow(QMainWindow):
         dialog = DouyinStatusResetDialog(self)
         dialog.exec_()
 
-    def _start_douyin_data_sync(self):
-        if self.worker and self.worker.isRunning():
-            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
-            return
-        if self.data_sync_worker and self.data_sync_worker.isRunning():
-            self._show_info_dialog("同步运行中", "抖音数据同步还在运行，请等待完成。")
-            return
-        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
-            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
-            return
-        if (
-            QMessageBox.question(
-                self,
-                "确认数据同步",
-                "将从本地 progress/raw 缓存补写视频明细到 SQLite，并重新生成视频评分和 UP 主评分。\n"
-                "不会重新抓取网页，也不会删除缓存。是否继续？",
-            )
-            != QMessageBox.Yes
-        ):
-            return
-
-        self._append_log("开始抖音数据同步：progress/raw -> douyin_video_state -> video_score_current -> creator_score_current")
-        self._start_task_progress("抖音数据同步中，正在补齐本地表数据...")
-        _set_button_busy(self.douyin_data_sync_button, "同步中...")
-        self.data_sync_worker = DouyinDataSyncThread()
-        self.data_sync_worker.log_line.connect(self._append_log)
-        self.data_sync_worker.done.connect(self._on_douyin_data_sync_done)
-        self.data_sync_worker.start()
-
-    def _on_douyin_data_sync_done(self, ok, message):
-        _restore_button_busy(self.douyin_data_sync_button)
-        self._append_log(message)
-        self._finish_task_progress(ok, message)
-        if ok:
-            self._show_info_dialog("同步完成", message)
-        else:
-            self._show_error_dialog("同步失败", message)
-
     def _start_liked_video_cache(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
-            return
-        if self.data_sync_worker and self.data_sync_worker.isRunning():
-            self._show_info_dialog("同步运行中", "抖音数据同步还在运行，请等待完成。")
             return
         if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
             return
@@ -3342,7 +3316,6 @@ class MainWindow(QMainWindow):
         self._start_task_progress("任务已启动，正在等待抓取总数...")
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
-        self.unfollow_cleanup_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -3361,34 +3334,6 @@ class MainWindow(QMainWindow):
             self._append_log(message)
         else:
             self._show_error_dialog("启动失败", message)
-
-    def _start_douyin_non_followed_cache_cleanup(self):
-        if self.worker and self.worker.isRunning():
-            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
-            return
-        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
-            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
-            return
-
-        config = self._collect_config()
-        config.platform = "douyin_non_followed_cleanup"
-        config.action = "fetch"
-        if self.config_locked:
-            self._save_gui_config()
-
-        self.log_text.clear()
-        self._start_task_progress("缓存清理中，正在等待处理进度...")
-        self.start_button.setEnabled(False)
-        self.unfollow_cleanup_button.setEnabled(False)
-        self.liked_video_cache_button.setEnabled(False)
-        self.unfollow_cleanup_button.setText("清理中...")
-        self.stop_button.setEnabled(True)
-        self.stop_button.setText("终止运行")
-        self.stop_button.setStyleSheet("")
-        self.worker = RunnerThread(config)
-        self.worker.log_line.connect(self._append_log)
-        self.worker.done.connect(self._on_done)
-        self.worker.start()
 
     def _request_stop(self):
         if not self.worker or not self.worker.isRunning():
@@ -3536,8 +3481,6 @@ class MainWindow(QMainWindow):
     def _on_done(self, ok, message):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
-        self.unfollow_cleanup_button.setEnabled(True)
-        self.unfollow_cleanup_button.setText("清理非当前关注缓存")
         self.liked_video_cache_button.setEnabled(not self.config_locked)
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):
