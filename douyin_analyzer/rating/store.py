@@ -1,6 +1,8 @@
 from pathlib import Path
 import sqlite3
 
+from common.sqlite_utils import connect_sqlite
+
 
 RATING_TABLES = (
     "video_score_current",
@@ -40,7 +42,7 @@ def migrate_legacy_rating_tables(config, *, drop_legacy=False):
         return result
 
     rating_db.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(source_db) as source_conn, sqlite3.connect(rating_db) as rating_conn:
+    with connect_sqlite(source_db) as source_conn, connect_sqlite(rating_db) as rating_conn:
         for table_name in RATING_TABLES:
             if not _table_exists(source_conn, table_name):
                 result[table_name] = {"source_rows": 0, "target_rows": _table_count(rating_conn, table_name), "migrated": False}

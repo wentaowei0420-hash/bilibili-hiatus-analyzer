@@ -15,6 +15,7 @@ from common.platform_store import (
     upsert_cache_entries,
     upsert_video_state_rows,
 )
+from common.sqlite_utils import connect_sqlite
 
 from .rating.store import rating_store_db_path
 from .utils import calculate_days_since, normalize_timestamp, timestamp_to_date
@@ -632,7 +633,7 @@ class CacheStore:
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            with sqlite3.connect(self.config.export_store_db) as conn:
+            with connect_sqlite(self.config.export_store_db) as conn:
                 exists = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='douyin_full_status_reset'"
                 ).fetchone()

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -200,6 +201,13 @@ def test_fetch_aweme_data_does_not_use_browser_fallback_when_disabled(tmp_path, 
     assert detail is None
 
     asyncio.run(api_client.close())
+
+
+def test_browser_fallback_default_profile_is_separate_from_main_analyzer():
+    profile_path = Path(video_module.VideoDownloader._browser_user_data_path({}))
+
+    assert profile_path.name == "downloader_edge_data"
+    assert profile_path.name != "edge_data"
 
 
 @pytest.mark.asyncio

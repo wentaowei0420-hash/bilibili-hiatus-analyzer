@@ -83,6 +83,7 @@ def test_preflight_selected_rows_raises_clear_error_when_detail_api_fails(tmp_pa
     config = ConfigLoader(str(config_path))
     probe = object.__new__(HighLikeDownloaderGUI)
     probe.active_browser_fallback_enabled = False
+    probe.active_preflight_sample_enabled = True
 
     class _FakeAPIClient:
         def __init__(self, *_args, **_kwargs):
@@ -114,3 +115,31 @@ def test_preflight_selected_rows_raises_clear_error_when_detail_api_fails(tmp_pa
     message = str(exc_info.value)
     assert "指定等级筛选本身没有问题" in message
     assert "Empty response body" in message
+
+
+def test_preflight_selected_rows_can_be_disabled(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        f"path: {tmp_path / 'downloads'}\n"
+        "cookies: {}\n",
+        encoding="utf-8",
+    )
+    config = ConfigLoader(str(config_path))
+    probe = object.__new__(HighLikeDownloaderGUI)
+    probe.active_browser_fallback_enabled = False
+    probe.active_preflight_sample_enabled = False
+
+    class _UnexpectedAPIClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("preflight API should not be called")
+
+    monkeypatch.setattr(gui_module, "DouyinAPIClient", _UnexpectedAPIClient)
+
+    asyncio.run(
+        probe._preflight_selected_rows(
+            [
+                {"aweme_id": "100001", "video_url": "https://www.douyin.com/video/100001"},
+            ],
+            config,
+        )
+    )

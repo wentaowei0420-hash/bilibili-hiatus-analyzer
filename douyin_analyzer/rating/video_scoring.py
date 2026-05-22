@@ -7,6 +7,7 @@ from pathlib import Path
 
 from common.export_store import write_rows_to_table
 from common.file_io import atomic_write_csv
+from common.sqlite_utils import connect_sqlite
 from .store import rating_store_db_path, source_store_db_path
 
 
@@ -195,7 +196,7 @@ class DouyinVideoScorer:
 
     def _ensure_manual_rating_tables(self):
         self.rating_db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.rating_db_path) as conn:
+        with connect_sqlite(self.rating_db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS douyin_creator_manual_rating (
@@ -219,7 +220,7 @@ class DouyinVideoScorer:
             conn.commit()
 
     def _load_manual_grades(self, table_name, key_column):
-        with sqlite3.connect(self.rating_db_path) as conn:
+        with connect_sqlite(self.rating_db_path) as conn:
             rows = conn.execute(
                 f'SELECT {key_column}, manual_grade FROM "{table_name}"'
             ).fetchall()
@@ -234,7 +235,7 @@ class DouyinVideoScorer:
         table = "main_sheet_current" if summary_type == "main" else "analysis_sheet_current"
         if not self._table_exists(table, self.source_db_path):
             return {}
-        with sqlite3.connect(self.source_db_path) as conn:
+        with connect_sqlite(self.source_db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(f'SELECT * FROM "{table}"').fetchall()
         result = {}
@@ -256,7 +257,7 @@ class DouyinVideoScorer:
 
         if not self._table_exists("douyin_video_raw", self.source_db_path):
             return []
-        with sqlite3.connect(self.source_db_path) as conn:
+        with connect_sqlite(self.source_db_path) as conn:
             rows = conn.execute('SELECT payload_json FROM douyin_video_raw').fetchall()
         videos = []
         for (payload_json,) in rows:
@@ -269,7 +270,7 @@ class DouyinVideoScorer:
         if not self._table_exists("douyin_video_state", self.source_db_path):
             return []
         where = "WHERE video_id IS NOT NULL AND TRIM(video_id) != ''"
-        with sqlite3.connect(self.source_db_path) as conn:
+        with connect_sqlite(self.source_db_path) as conn:
             conn.row_factory = sqlite3.Row
             raw_rows = conn.execute(
                 f"""
@@ -361,7 +362,7 @@ class DouyinVideoScorer:
     def _load_download_status(self):
         if not self._table_exists("aweme", self.source_db_path):
             return {}
-        with sqlite3.connect(self.source_db_path) as conn:
+        with connect_sqlite(self.source_db_path) as conn:
             rows = conn.execute(
                 "SELECT aweme_id, download_time, file_path FROM aweme"
             ).fetchall()
@@ -384,7 +385,7 @@ class DouyinVideoScorer:
         db_path = Path(db_path or self.rating_db_path)
         if not db_path.exists():
             return False
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table_name,),

@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime
 
 from common.platform_store import ensure_platform_schema
+from common.sqlite_utils import connect_sqlite
 
 from .analyzer import DouyinHiatusAnalyzer
 from .cache import CacheStore
@@ -25,7 +26,7 @@ CACHED_VIDEO_COUNT_COLUMN = "\u7f13\u5b58\u89c6\u9891\u6570"
 def _table_count(db_path, table_name):
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),
@@ -115,7 +116,7 @@ def _load_status_reset_uids(config):
     db_path = config.export_store_db
     if db_path.exists():
         try:
-            with sqlite3.connect(db_path) as conn:
+            with connect_sqlite(db_path) as conn:
                 if _table_exists(conn, "douyin_full_status_reset"):
                     reset_uids.update(
                         str(row[0] or "").strip()
@@ -240,7 +241,7 @@ def _sync_raw_videos_to_state(config, batch_size=5000):
         return 0
     ensure_platform_schema(db_path, "douyin")
     processed = 0
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         if not _table_exists(conn, "douyin_video_raw"):
             return 0
         missing_raw_count = conn.execute(
@@ -334,7 +335,7 @@ def _sync_progress_videos_to_state(config, progress):
             skipped_creators += 1
 
     if video_rows:
-        with sqlite3.connect(config.export_store_db) as conn:
+        with connect_sqlite(config.export_store_db) as conn:
             _bulk_upsert_video_state(conn, video_rows, source_mode="progress")
             conn.commit()
 
@@ -360,7 +361,7 @@ def _refresh_inventory_video_counts(config):
     db_path = config.export_store_db
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         if not (
             _table_exists(conn, "cache_inventory_current")
             and _table_exists(conn, "douyin_video_state")
@@ -434,7 +435,7 @@ def diagnose_data_links(config):
         reset_filter = f'AND i."{UPLOADER_ID_COLUMN}" NOT IN ({placeholders})'
         reset_params = sorted(reset_uids)
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         _attach_rating_views(conn, score_db_path)
         if current_progress_video_ids:
             scored_ids = set()

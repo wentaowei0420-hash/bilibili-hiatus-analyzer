@@ -96,7 +96,8 @@ class VideoDownloader(BaseDownloader):
         if configured:
             return configured
 
-        # Share the main analyzer's default browser profile so existing Douyin
-        # login state can be reused by downloader fallback.
+        # Keep the downloader fallback browser profile separate from the main
+        # analyzer. FULL mode may already own runtime/edge_data, and opening the
+        # same Chromium profile twice can make DrissionPage miss detail packets.
         workspace_root = Path(__file__).resolve().parents[2]
-        return str(workspace_root / "runtime" / "edge_data")
+        return str(workspace_root / "runtime" / "downloader_edge_data")

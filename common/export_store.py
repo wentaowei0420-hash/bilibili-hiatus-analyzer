@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common.sqlite_utils import connect_sqlite
+
 
 SNAPSHOT_META_TABLE = "_sheet_current_meta"
 SNAPSHOT_HISTORY_TABLE = "_sheet_snapshots"
@@ -134,7 +136,7 @@ def write_dataframe_to_table(db_path, table_name, dataframe):
         payload_json = None
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         dataframe.to_sql(table_name, conn, if_exists="replace", index=False)
         _ensure_snapshot_tables(conn)
 
@@ -201,7 +203,7 @@ def prune_disabled_snapshot_history(db_path):
     db_path = Path(db_path)
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         _ensure_snapshot_tables(conn)
         tables = sorted(_snapshot_disabled_tables())
         deleted = 0
@@ -265,7 +267,7 @@ def read_table_to_dataframe(db_path, table_name):
     if not db_path.exists():
         return None
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -281,7 +283,7 @@ def read_latest_snapshot_to_dataframe(db_path, table_name):
     if not db_path.exists():
         return None
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -317,7 +319,7 @@ def delete_rows_by_values(db_path, table_name, values, candidate_columns=None):
         candidate_columns.insert(0, "UP主UID")
     placeholders = ",".join("?" for _ in values)
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",

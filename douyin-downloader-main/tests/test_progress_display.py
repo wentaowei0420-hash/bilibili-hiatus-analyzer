@@ -45,6 +45,27 @@ class _FakeProgressContext:
         self.exited = True
 
 
+def test_status_messages_are_windows_console_safe():
+    display = ProgressDisplay()
+    messages = []
+    display.console = SimpleNamespace(print=lambda message, **_kwargs: messages.append(str(message)))
+
+    display.print_info("info")
+    display.print_success("success")
+    display.print_warning("warning")
+    display.print_error("error")
+
+    rendered = "\n".join(messages)
+    assert "ℹ" not in rendered
+    assert "✓" not in rendered
+    assert "⚠" not in rendered
+    assert "✗" not in rendered
+    assert "[INFO]" in rendered
+    assert "[OK]" in rendered
+    assert "[WARN]" in rendered
+    assert "[ERROR]" in rendered
+
+
 def test_single_url_overall_progress_follows_item_count(monkeypatch):
     display = ProgressDisplay()
     fake_progress = _FakeProgress()

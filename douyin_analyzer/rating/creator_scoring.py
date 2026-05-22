@@ -6,6 +6,7 @@ from pathlib import Path
 
 from common.export_store import write_rows_to_table
 from common.file_io import atomic_write_csv
+from common.sqlite_utils import connect_sqlite
 from .store import rating_store_db_path, source_store_db_path
 from .video_scoring import (
     GRADE_SCORES,
@@ -210,7 +211,7 @@ class DouyinCreatorScorer:
 
     def _ensure_manual_rating_tables(self):
         self.rating_db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.rating_db_path) as conn:
+        with connect_sqlite(self.rating_db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS douyin_creator_manual_rating (
@@ -226,7 +227,7 @@ class DouyinCreatorScorer:
     def _load_manual_grades(self):
         if not self._table_exists("douyin_creator_manual_rating", self.rating_db_path):
             return {}
-        with sqlite3.connect(self.rating_db_path) as conn:
+        with connect_sqlite(self.rating_db_path) as conn:
             rows = conn.execute(
                 'SELECT uploader_id, manual_grade FROM "douyin_creator_manual_rating"'
             ).fetchall()
@@ -240,7 +241,7 @@ class DouyinCreatorScorer:
     def _load_video_manual_grades(self):
         if not self._table_exists("douyin_video_manual_rating", self.rating_db_path):
             return {}
-        with sqlite3.connect(self.rating_db_path) as conn:
+        with connect_sqlite(self.rating_db_path) as conn:
             rows = conn.execute(
                 'SELECT video_id, manual_grade FROM "douyin_video_manual_rating"'
             ).fetchall()
@@ -272,7 +273,7 @@ class DouyinCreatorScorer:
             return set()
 
         video_manual = self._load_video_manual_grades()
-        with sqlite3.connect(self.source_db_path) as conn:
+        with connect_sqlite(self.source_db_path) as conn:
             columns = {
                 row[1]
                 for row in conn.execute('PRAGMA table_info("douyin_video_state")').fetchall()
@@ -499,7 +500,7 @@ class DouyinCreatorScorer:
                     item["latest_publish_ts"] = publish_ts
 
         if self._table_exists("douyin_video_state", self.source_db_path):
-            with sqlite3.connect(self.source_db_path) as conn:
+            with connect_sqlite(self.source_db_path) as conn:
                 state_rows = conn.execute(
                     """
                     SELECT uploader_id, publish_timestamp
@@ -719,7 +720,7 @@ class DouyinCreatorScorer:
         db_path = Path(db_path or self.source_db_path)
         if not self._table_exists(table_name, db_path):
             return []
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(f'SELECT * FROM "{table_name}"').fetchall()]
 
@@ -727,7 +728,7 @@ class DouyinCreatorScorer:
         db_path = Path(db_path or self.source_db_path)
         if not db_path.exists():
             return False
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table_name,),

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common.sqlite_utils import connect_sqlite
+
 
 def _now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -33,7 +35,7 @@ def _summary_table(platform):
 def ensure_platform_schema(db_path, platform):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS "{_creator_table(platform)}" (
@@ -122,7 +124,7 @@ def _safe_int(value, default=None):
 def upsert_creator_rows(db_path, platform, rows, uploader_id_column="UP主UID", source_mode="current"):
     ensure_platform_schema(db_path, platform)
     now_text = _now_text()
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         for row in rows or []:
             row = row if isinstance(row, dict) else {}
             uploader_id = str(row.get(uploader_id_column) or "").strip()
@@ -153,7 +155,7 @@ def upsert_video_state_rows(
 ):
     ensure_platform_schema(db_path, platform)
     now_text = _now_text()
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         for row in rows or []:
             row = row if isinstance(row, dict) else {}
             video_id = str(row.get(video_id_column) or row.get("video_id") or row.get("aweme_id") or "").strip()
@@ -227,7 +229,7 @@ def read_latest_video_state_timestamp(db_path, platform, uploader_id):
         return None
 
     ensure_platform_schema(db_path, platform)
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         row = conn.execute(
             f"""
             SELECT MAX(publish_timestamp)
@@ -252,7 +254,7 @@ def replace_video_rows_for_uploader(
     if not uploader_id:
         return
     now_text = _now_text()
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         conn.execute(f'DELETE FROM "{_video_table(platform)}" WHERE uploader_id=?', (uploader_id,))
         for row in rows or []:
             row = row if isinstance(row, dict) else {}
@@ -296,7 +298,7 @@ def read_video_rows_for_uploader(db_path, platform, uploader_id):
         return []
 
     ensure_platform_schema(db_path, platform)
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -331,7 +333,7 @@ def read_video_counts_by_uploader(db_path, platform):
         return {}
 
     ensure_platform_schema(db_path, platform)
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -364,7 +366,7 @@ def upsert_cache_entries(
     uploader_id_getter = uploader_id_getter or (lambda key, payload: key)
     cached_at_getter = cached_at_getter or (lambda payload: payload.get("cached_at") if isinstance(payload, dict) else "")
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         for key, payload in (entries or {}).items():
             uploader_id = uploader_id_getter(key, payload)
             uploader_id = str(uploader_id or "").strip()
@@ -403,7 +405,7 @@ def upsert_cache_entries(
 def replace_summary_rows(db_path, platform, summary_type, rows, uploader_id_column="UP主UID"):
     ensure_platform_schema(db_path, platform)
     now_text = _now_text()
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         conn.execute(f'DELETE FROM "{_summary_table(platform)}" WHERE summary_type=?', (summary_type,))
         for row in rows or []:
             row = row if isinstance(row, dict) else {}
@@ -425,7 +427,7 @@ def read_summary_rows(db_path, platform, summary_type):
     db_path = Path(db_path)
     if not db_path.exists():
         return []
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -459,7 +461,7 @@ def load_uploader_ids_from_tables(
         candidate_columns.insert(0, "UP主UID")
     uploader_ids = set()
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         for table_name, preferred_column in table_targets or []:
             cursor.execute(
@@ -505,7 +507,7 @@ def delete_uploader_rows(db_path, platform, uploader_ids):
     ensure_platform_schema(db_path, platform)
     placeholders = ",".join("?" for _ in uploader_ids)
     deleted_rows = 0
-    with sqlite3.connect(db_path) as conn:
+    with connect_sqlite(db_path) as conn:
         cursor = conn.cursor()
         statements = [
             (f'DELETE FROM "{_creator_table(platform)}" WHERE uploader_id IN ({placeholders})', uploader_ids),

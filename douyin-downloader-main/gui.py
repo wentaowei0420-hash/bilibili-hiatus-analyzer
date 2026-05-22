@@ -1,5 +1,4 @@
 import asyncio
-import csv
 import queue
 import sqlite3
 import threading
@@ -15,6 +14,29 @@ from cli.main import download_url
 from config import ConfigLoader
 from core import DouyinAPIClient
 from core.downloader_base import _FilenameTemplateValues, _normalize_filename_template
+from gui_modules.data_source import (
+    load_sql_video_rows,
+    resolve_database_path,
+    resolve_rating_database_path,
+)
+from gui_modules.failed_records import (
+    append_failed_record,
+    load_failed_aweme_ids,
+    read_failed_rows,
+    remove_failed_record,
+    write_failed_rows,
+)
+from gui_modules.filtering import (
+    DownloadFilter,
+    describe_filter,
+    filter_rows_for_download,
+    normalize_filter_mode,
+    normalize_grade,
+    row_duration_seconds,
+    row_like_count,
+    row_video_grade,
+    safe_int,
+)
 from storage import Database
 from utils.logger import set_console_log_level
 from utils.validators import sanitize_filename
@@ -46,6 +68,7 @@ class HighLikeDownloaderGUI:
         self.active_max_duration = 0
         self.active_skip_failed_records = False
         self.active_browser_fallback_enabled = True
+        self.active_preflight_sample_enabled = True
         self.preview_after_id = None
 
         default_config_path = str(PROJECT_ROOT / "config.yml")
@@ -89,6 +112,9 @@ class HighLikeDownloaderGUI:
                     self._load_browser_fallback_enabled(default_config_path),
                 )
             )
+        )
+        self.preflight_sample_enabled = tk.BooleanVar(
+            value=bool(saved_gui_settings.get("preflight_sample_enabled", True))
         )
 
         self.total_count = tk.StringVar(value="0")
@@ -157,9 +183,14 @@ class HighLikeDownloaderGUI:
 
         filter_frame = ttk.LabelFrame(outer, text="下载筛选", padding=10)
         filter_frame.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(filter_frame, text="下载范围").pack(side=tk.LEFT)
+        filter_row = ttk.Frame(filter_frame)
+        filter_row.pack(fill=tk.X)
+        option_row = ttk.Frame(filter_frame)
+        option_row.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(filter_row, text="下载范围").pack(side=tk.LEFT)
         self.filter_mode_combo = ttk.Combobox(
-            filter_frame,
+            filter_row,
             textvariable=self.download_filter_mode,
             values=("全部视频", "高赞视频", "指定等级"),
             state="readonly",
@@ -168,9 +199,9 @@ class HighLikeDownloaderGUI:
         self.filter_mode_combo.pack(side=tk.LEFT, padx=(8, 18))
         self.filter_mode_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
 
-        ttk.Label(filter_frame, text="高赞阈值 ≥").pack(side=tk.LEFT)
+        ttk.Label(filter_row, text="高赞阈值 ≥").pack(side=tk.LEFT)
         self.like_threshold_spin = ttk.Spinbox(
-            filter_frame,
+            filter_row,
             from_=0,
             to=100000000,
             textvariable=self.download_like_threshold,
@@ -179,9 +210,9 @@ class HighLikeDownloaderGUI:
         )
         self.like_threshold_spin.pack(side=tk.LEFT, padx=(8, 18))
 
-        ttk.Label(filter_frame, text="视频等级").pack(side=tk.LEFT)
+        ttk.Label(filter_row, text="视频等级").pack(side=tk.LEFT)
         self.grade_combo = ttk.Combobox(
-            filter_frame,
+            filter_row,
             textvariable=self.download_filter_grade,
             values=("S", "A", "B", "C", "D"),
             state="readonly",
@@ -189,9 +220,9 @@ class HighLikeDownloaderGUI:
         )
         self.grade_combo.pack(side=tk.LEFT, padx=(8, 18))
         self.grade_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
-        ttk.Label(filter_frame, text="时长").pack(side=tk.LEFT)
+        ttk.Label(filter_row, text="时长").pack(side=tk.LEFT)
         self.min_duration_spin = ttk.Spinbox(
-            filter_frame,
+            filter_row,
             from_=0,
             to=86400,
             textvariable=self.min_duration_seconds,
@@ -199,32 +230,39 @@ class HighLikeDownloaderGUI:
             command=self._on_filter_changed,
         )
         self.min_duration_spin.pack(side=tk.LEFT, padx=(8, 4))
-        ttk.Label(filter_frame, text="~").pack(side=tk.LEFT)
+        ttk.Label(filter_row, text="~").pack(side=tk.LEFT)
         self.max_duration_spin = ttk.Spinbox(
-            filter_frame,
+            filter_row,
             from_=0,
             to=86400,
             textvariable=self.max_duration_seconds,
             width=7,
             command=self._on_filter_changed,
         )
-        self.max_duration_spin.pack(side=tk.LEFT, padx=(4, 18))
+        self.max_duration_spin.pack(side=tk.LEFT, padx=(4, 0))
         self.skip_failed_check = ttk.Checkbutton(
-            filter_frame,
+            option_row,
             text="跳过失败记录",
             variable=self.skip_failed_records,
             command=self._on_filter_changed,
         )
         self.skip_failed_check.pack(side=tk.LEFT, padx=(0, 18))
         self.browser_fallback_check = ttk.Checkbutton(
-            filter_frame,
-            text="浏览器兜底",
+            option_row,
+            text="启用浏览器兜底",
             variable=self.browser_fallback_enabled,
             command=self._on_filter_changed,
         )
         self.browser_fallback_check.pack(side=tk.LEFT, padx=(0, 18))
+        self.preflight_sample_check = ttk.Checkbutton(
+            option_row,
+            text="下载前抽样检测",
+            variable=self.preflight_sample_enabled,
+            command=self._on_filter_changed,
+        )
+        self.preflight_sample_check.pack(side=tk.LEFT, padx=(0, 18))
         ttk.Label(
-            filter_frame,
+            option_row,
             text="提示：SQL库会直接读取评分表；时长填 0 表示不限。",
             foreground="#4b5563",
         ).pack(side=tk.LEFT)
@@ -416,6 +454,9 @@ class HighLikeDownloaderGUI:
                     )
                 )
             )
+            self.preflight_sample_enabled.set(
+                bool(settings.get("preflight_sample_enabled", self.preflight_sample_enabled.get()))
+            )
             self.saved_filename_template = self._load_config_filename_template(path)
             self.filename_template.set(self.saved_filename_template)
             self._schedule_filename_preview_update()
@@ -483,6 +524,7 @@ class HighLikeDownloaderGUI:
                 "max_duration_seconds": self._coerce_int(self.max_duration_seconds.get(), 0, minimum=0),
                 "skip_failed_records": bool(self.skip_failed_records.get()),
                 "browser_fallback_enabled": bool(self.browser_fallback_enabled.get()),
+                "preflight_sample_enabled": bool(self.preflight_sample_enabled.get()),
             }
             config.update(
                 path=download_path,
@@ -722,6 +764,7 @@ class HighLikeDownloaderGUI:
         self.max_duration_spin.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.skip_failed_check.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.browser_fallback_check.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.preflight_sample_check.configure(state=tk.DISABLED if busy else tk.NORMAL)
         self.stop_button.configure(state=tk.NORMAL if allow_stop else tk.DISABLED)
 
     def _run_worker(self, target):
@@ -749,6 +792,7 @@ class HighLikeDownloaderGUI:
             self.active_max_duration = 0
         self.active_skip_failed_records = bool(self.skip_failed_records.get())
         self.active_browser_fallback_enabled = bool(self.browser_fallback_enabled.get())
+        self.active_preflight_sample_enabled = bool(self.preflight_sample_enabled.get())
 
     def _on_filter_changed(self, *_args):
         mode = self._normalize_filter_mode(self.download_filter_mode.get())
@@ -766,21 +810,24 @@ class HighLikeDownloaderGUI:
         except (TypeError, ValueError, tk.TclError):
             max_duration = 0
         self.status.set(
-            f"下载筛选已切换：{self._describe_filter(mode, grade, threshold, min_duration, max_duration, bool(self.skip_failed_records.get()), bool(self.browser_fallback_enabled.get()))}，点击刷新统计后生效"
+            f"下载筛选已切换：{self._describe_filter(mode, grade, threshold, min_duration, max_duration, bool(self.skip_failed_records.get()), bool(self.browser_fallback_enabled.get()), bool(self.preflight_sample_enabled.get()))}，点击刷新统计后生效"
         )
 
     @staticmethod
     def _normalize_filter_mode(value: Any) -> str:
+        return normalize_filter_mode(value)
         text = str(value or "").strip()
         return text if text in {"全部视频", "高赞视频", "指定等级"} else "高赞视频"
 
     @staticmethod
     def _normalize_grade(value: Any) -> str:
+        return normalize_grade(value)
         text = str(value or "").strip().upper().replace("级", "")
         return text[:1] if text[:1] in {"S", "A", "B", "C", "D"} else ""
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
+        return safe_int(value, default)
         try:
             text = str(value or "").replace(",", "").strip()
             return int(float(text)) if text else default
@@ -788,6 +835,7 @@ class HighLikeDownloaderGUI:
             return default
 
     def _row_video_grade(self, row: dict[str, Any]) -> str:
+        return row_video_grade(row)
         for key in ("video_grade", "视频最终等级", "视频等级", "等级", "final_grade", "grade", "level"):
             grade = self._normalize_grade(row.get(key))
             if grade:
@@ -795,12 +843,14 @@ class HighLikeDownloaderGUI:
         return ""
 
     def _row_like_count(self, row: dict[str, Any]) -> int:
+        return row_like_count(row)
         for key in ("like_count", "点赞数", "digg_count"):
             if str(row.get(key) or "").strip():
                 return self._safe_int(row.get(key), 0)
         return 0
 
     def _row_duration_seconds(self, row: dict[str, Any]) -> int:
+        return row_duration_seconds(row)
         for key in ("duration_seconds", "视频时长(秒)", "video_duration", "duration"):
             if str(row.get(key) or "").strip():
                 return self._safe_int(row.get(key), 0)
@@ -815,7 +865,38 @@ class HighLikeDownloaderGUI:
         max_duration: int | None = None,
         skip_failed_records: bool | None = None,
         browser_fallback_enabled: bool | None = None,
+        preflight_sample_enabled: bool | None = None,
     ) -> str:
+        return describe_filter(
+            DownloadFilter(
+                mode=mode or self.active_filter_mode,
+                grade=grade or self.active_filter_grade,
+                like_threshold=(
+                    self.active_like_threshold if threshold is None else threshold
+                ),
+                min_duration=(
+                    self.active_min_duration if min_duration is None else min_duration
+                ),
+                max_duration=(
+                    self.active_max_duration if max_duration is None else max_duration
+                ),
+                skip_failed_records=(
+                    getattr(self, "active_skip_failed_records", False)
+                    if skip_failed_records is None
+                    else skip_failed_records
+                ),
+                browser_fallback_enabled=(
+                    getattr(self, "active_browser_fallback_enabled", True)
+                    if browser_fallback_enabled is None
+                    else browser_fallback_enabled
+                ),
+                preflight_sample_enabled=(
+                    getattr(self, "active_preflight_sample_enabled", True)
+                    if preflight_sample_enabled is None
+                    else preflight_sample_enabled
+                ),
+            )
+        )
         mode = mode or self.active_filter_mode
         grade = grade or self.active_filter_grade
         threshold = self.active_like_threshold if threshold is None else threshold
@@ -830,6 +911,11 @@ class HighLikeDownloaderGUI:
             getattr(self, "active_browser_fallback_enabled", True)
             if browser_fallback_enabled is None
             else browser_fallback_enabled
+        )
+        preflight_sample_enabled = (
+            getattr(self, "active_preflight_sample_enabled", True)
+            if preflight_sample_enabled is None
+            else preflight_sample_enabled
         )
         if mode == "指定等级":
             desc = f"仅下载 {grade or 'A'} 级视频"
@@ -847,6 +933,8 @@ class HighLikeDownloaderGUI:
             desc += "，跳过失败记录"
         if browser_fallback_enabled:
             desc += "，浏览器兜底"
+        if preflight_sample_enabled:
+            desc += "，抽样检测"
         return desc
 
     def _filter_rows_for_download(
@@ -854,6 +942,28 @@ class HighLikeDownloaderGUI:
         rows: list[dict[str, Any]],
         config: ConfigLoader | None = None,
     ) -> list[dict[str, Any]]:
+        return filter_rows_for_download(
+            rows,
+            DownloadFilter(
+                mode=self.active_filter_mode,
+                grade=self.active_filter_grade,
+                like_threshold=self.active_like_threshold,
+                min_duration=self.active_min_duration,
+                max_duration=self.active_max_duration,
+                skip_failed_records=getattr(self, "active_skip_failed_records", False),
+                browser_fallback_enabled=getattr(
+                    self, "active_browser_fallback_enabled", True
+                ),
+                preflight_sample_enabled=getattr(
+                    self, "active_preflight_sample_enabled", True
+                ),
+            ),
+            failed_csv_path=(
+                self._resolve_failed_csv_path(config)
+                if getattr(self, "active_skip_failed_records", False)
+                else None
+            ),
+        )
         mode = self.active_filter_mode
         enriched_rows = list(rows)
 
@@ -890,6 +1000,7 @@ class HighLikeDownloaderGUI:
         return self._load_sql_video_rows(config)
 
     def _load_sql_video_rows(self, config: ConfigLoader) -> list[dict[str, Any]]:
+        return load_sql_video_rows(config, project_root=PROJECT_ROOT)
         db_path = self._resolve_rating_database_path(config)
         if not db_path.exists():
             raise FileNotFoundError(f"未找到评分数据库：{db_path}")
@@ -988,6 +1099,7 @@ class HighLikeDownloaderGUI:
         return rows
 
     def _resolve_rating_database_path(self, config: ConfigLoader) -> Path:
+        return resolve_rating_database_path(config, project_root=PROJECT_ROOT)
         raw_config = config.config if isinstance(config.config, dict) else {}
         for key in ("rating_database_path", "rating_store_db", "rating_db_path"):
             value = raw_config.get(key)
@@ -1153,6 +1265,8 @@ class HighLikeDownloaderGUI:
         selected_rows: list[dict[str, Any]],
         config: ConfigLoader,
     ) -> None:
+        if not getattr(self, "active_preflight_sample_enabled", True):
+            return
         if self.active_browser_fallback_enabled:
             return
 
@@ -1197,6 +1311,7 @@ class HighLikeDownloaderGUI:
 
     @staticmethod
     def _resolve_database_path(config: ConfigLoader) -> Path:
+        return resolve_database_path(config, project_root=PROJECT_ROOT)
         db_path = config.get("database_path", "dy_downloader.db") or "dy_downloader.db"
         path = Path(str(db_path)).expanduser()
         if path.is_absolute():
@@ -1224,6 +1339,7 @@ class HighLikeDownloaderGUI:
 
     @staticmethod
     def _load_failed_aweme_ids(path: Path) -> set[str]:
+        return load_failed_aweme_ids(path)
         if not path.exists():
             return set()
 
@@ -1240,6 +1356,7 @@ class HighLikeDownloaderGUI:
         return failed_aweme_ids
 
     def _append_failed_record(self, path: Path, row: dict[str, Any]) -> None:
+        return append_failed_record(path, row)
         aweme_id = str(row.get("aweme_id") or "").strip()
         if not aweme_id:
             return
@@ -1255,6 +1372,7 @@ class HighLikeDownloaderGUI:
         self._write_failed_rows(path, existing_rows)
 
     def _remove_failed_record(self, path: Path, aweme_id: Any) -> None:
+        return remove_failed_record(path, aweme_id)
         normalized_aweme_id = str(aweme_id or "").strip()
         if not normalized_aweme_id or not path.exists():
             return
@@ -1267,6 +1385,7 @@ class HighLikeDownloaderGUI:
 
     @staticmethod
     def _read_failed_rows(path: Path) -> dict[str, dict[str, str]]:
+        return read_failed_rows(path)
         rows: dict[str, dict[str, str]] = {}
         if not path.exists():
             return rows
@@ -1284,6 +1403,7 @@ class HighLikeDownloaderGUI:
 
     @staticmethod
     def _write_failed_rows(path: Path, rows: dict[str, dict[str, str]]) -> None:
+        return write_failed_rows(path, rows)
         path.parent.mkdir(parents=True, exist_ok=True)
         fieldnames = ["aweme_id", "video_url", "uploader_name", "video_title", "recorded_at"]
         with path.open("w", encoding="utf-8-sig", newline="") as handle:

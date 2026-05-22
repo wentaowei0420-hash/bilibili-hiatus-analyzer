@@ -1,10 +1,4 @@
-import os
-import json
-import re
-import shutil
-import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,7 +34,30 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from common.file_io import atomic_write_json
+from gui_business import (
+    DEFAULT_AUTO_FULL_INTERVAL_MINUTES,
+    DEFAULT_BILIBILI_UID_LIST,
+    DEFAULT_DOUYIN_UID_LIST,
+    DEFAULT_DOUYIN_UNFOLLOW_LIST,
+    GUI_CONFIG_PATH,
+    ROOT_DIR,
+    bucket_tuples,
+    coerce_setting_value,
+    column_pairs,
+    extract_progress_current,
+    extract_progress_total,
+    fetch_order_option_map,
+    launch_video_downloader_gui,
+    load_backend_config_defaults,
+    load_backend_gui_metadata,
+    load_default_fetch_order_settings,
+    load_gui_config,
+    normalize_fetch_order_settings,
+    option_pairs,
+    runtime_field_tuples,
+    save_gui_config,
+    video_downloader_launch_commands,
+)
 from gui_backend_client import (
     ApiCallThread,
     BackendApiClient,
@@ -49,23 +66,9 @@ from gui_backend_client import (
     DouyinLikedVideoCacheThread,
     RatingRefreshThread,
     RunnerThread,
-    ensure_backend_available,
 )
 from gui_models import RunConfig
 
-
-ROOT_DIR = Path(__file__).resolve().parent
-DEFAULT_DOUYIN_UNFOLLOW_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
-DEFAULT_BILIBILI_UID_LIST = ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
-DEFAULT_DOUYIN_UID_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
-GUI_CONFIG_PATH = ROOT_DIR / "data" / "state" / "gui_config.json"
-DEFAULT_DOUYIN_DOWNLOADER_ROOT = ROOT_DIR / "douyin-downloader-main"
-EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
-    os.getenv("DOUYIN_DOWNLOADER_ROOT", str(DEFAULT_DOUYIN_DOWNLOADER_ROOT))
-)
-EXTERNAL_DOUYIN_DOWNLOADER_RUNNER = EXTERNAL_DOUYIN_DOWNLOADER_ROOT / "run.py"
-EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG = ROOT_DIR / "runtime" / "logs" / "douyin_downloader_gui_launch.log"
-DEFAULT_AUTO_FULL_INTERVAL_MINUTES = 180
 
 BILIBILI_RUNTIME_FIELDS = []
 DOUYIN_RUNTIME_FIELDS = []
@@ -75,42 +78,27 @@ FETCH_ORDER_DIRECTION_OPTIONS = []
 
 
 def _fetch_order_option_map(options):
-    return {value: label for label, value in options}
+    return fetch_order_option_map(options)
 
 
 def _option_pairs(items):
-    return [(item.get("label", ""), item.get("value", "")) for item in (items or [])]
+    return option_pairs(items)
 
 
 def _column_pairs(items):
-    return [(item.get("label", ""), item.get("key", "")) for item in (items or [])]
+    return column_pairs(items)
 
 
 def _runtime_field_tuples(items):
-    return [
-        (
-            item.get("name", ""),
-            item.get("env_name", ""),
-            item.get("label", ""),
-            item.get("type", "int"),
-            item.get("minimum", 0),
-            item.get("maximum", 0),
-            item.get("step", 1),
-        )
-        for item in (items or [])
-    ]
+    return runtime_field_tuples(items)
 
 
 def _bucket_tuples(items):
-    return [
-        (item.get("label", ""), item.get("lower", 0), item.get("upper"))
-        for item in (items or [])
-    ]
+    return bucket_tuples(items)
 
 
 def _load_backend_gui_metadata():
-    ensure_backend_available()
-    return BackendApiClient().gui_metadata()
+    return load_backend_gui_metadata()
 
 
 def _apply_gui_metadata(metadata):
@@ -154,55 +142,28 @@ def _apply_gui_metadata(metadata):
 
 
 def _coerce_setting_value(value, field_type, fallback):
-    if value is None:
-        return fallback
-    try:
-        return int(value) if field_type == "int" else float(value)
-    except (TypeError, ValueError):
-        return fallback
+    return coerce_setting_value(value, field_type, fallback)
 
 
 def _load_default_fetch_order_settings():
-    return {
-        "bilibili": {"field": "follower_count", "direction": "desc"},
-        "douyin": {"field": "follower_count", "direction": "desc"},
-    }
+    return load_default_fetch_order_settings()
 
 
 def _load_backend_config_defaults():
-    ensure_backend_available()
-    data = BackendApiClient().config_defaults()
-    return {
-        "bilibili_runtime_settings": dict(data.get("bilibili_runtime_settings") or {}),
-        "douyin_runtime_settings": dict(data.get("douyin_runtime_settings") or {}),
-        "fetch_order_settings": _normalize_fetch_order_settings(
-            data.get("fetch_order_settings") or _load_default_fetch_order_settings()
-        ),
-        "douyin_full_fetch_retry_on_mismatch": bool(
-            data.get("douyin_full_fetch_retry_on_mismatch", True)
-        ),
-    }
+    return load_backend_config_defaults(
+        bilibili_options=BILIBILI_FETCH_ORDER_OPTIONS,
+        douyin_options=DOUYIN_FETCH_ORDER_OPTIONS,
+        direction_options=FETCH_ORDER_DIRECTION_OPTIONS,
+    )
 
 
 def _normalize_fetch_order_settings(settings):
-    defaults = _load_default_fetch_order_settings()
-    normalized = {}
-    platform_options = {
-        "bilibili": BILIBILI_FETCH_ORDER_OPTIONS,
-        "douyin": DOUYIN_FETCH_ORDER_OPTIONS,
-    }
-    for platform, options in platform_options.items():
-        allowed_fields = set(_fetch_order_option_map(options))
-        current = (settings or {}).get(platform, {}) if isinstance(settings, dict) else {}
-        field = current.get("field")
-        if allowed_fields and field not in allowed_fields:
-            field = defaults[platform]["field"]
-        direction = str(current.get("direction") or defaults[platform]["direction"]).strip().lower()
-        allowed_directions = set(_fetch_order_option_map(FETCH_ORDER_DIRECTION_OPTIONS))
-        if allowed_directions and direction not in allowed_directions:
-            direction = defaults[platform]["direction"]
-        normalized[platform] = {"field": field, "direction": direction}
-    return normalized
+    return normalize_fetch_order_settings(
+        settings,
+        bilibili_options=BILIBILI_FETCH_ORDER_OPTIONS,
+        douyin_options=DOUYIN_FETCH_ORDER_OPTIONS,
+        direction_options=FETCH_ORDER_DIRECTION_OPTIONS,
+    )
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -2651,8 +2612,8 @@ class MainWindow(QMainWindow):
         self._progress_total = 0
         self._progress_running = False
         self.setWindowTitle("B站/抖音数据分析系统")
-        self.resize(1240, 720)
-        self.setMinimumSize(1120, 660)
+        self.resize(1320, 840)
+        self.setMinimumSize(1180, 760)
         self._apply_readable_style()
         self._build_ui()
         self._load_gui_config()
@@ -2722,8 +2683,8 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget(self)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
         layout.setAlignment(Qt.AlignTop)
 
         settings_group = QGroupBox("运行设置")
@@ -2793,18 +2754,26 @@ class MainWindow(QMainWindow):
         self.uid_limit_spin.setMaximumWidth(120)
         self.uid_limit_spin.setToolTip("部分抓取模式下生效；全抓取模式会忽略该数量。")
         fetch_mode_row = QHBoxLayout()
+        fetch_mode_row.setContentsMargins(0, 0, 0, 0)
+        fetch_mode_row.setSpacing(12)
         fetch_mode_row.addWidget(self.uid_fetch_all_radio)
         fetch_mode_row.addWidget(self.uid_fetch_partial_radio)
         fetch_mode_row.addStretch(1)
         fetch_mode_widget = QWidget()
         fetch_mode_widget.setLayout(fetch_mode_row)
+        fetch_mode_widget.setMinimumWidth(280)
 
         limit_row = QHBoxLayout()
-        limit_row.addWidget(QLabel("抓取前 N 个 UID"))
+        limit_row.setContentsMargins(0, 0, 0, 0)
+        limit_row.setSpacing(10)
+        uid_limit_label = QLabel("抓取前 N 个 UID")
+        uid_limit_label.setMinimumWidth(110)
+        limit_row.addWidget(uid_limit_label)
         limit_row.addWidget(self.uid_limit_spin)
         limit_row.addStretch(1)
         limit_widget = QWidget()
         limit_widget.setLayout(limit_row)
+        limit_widget.setMinimumWidth(260)
         add_setting(3, "抓取方式", fetch_mode_widget, "UID 数量", limit_widget)
 
         self.high_like_spin = QSpinBox()
@@ -2832,7 +2801,7 @@ class MainWindow(QMainWindow):
         auto_full_row.setContentsMargins(0, 0, 0, 0)
         auto_full_row.addWidget(QLabel("间隔"))
         auto_full_row.addWidget(self.auto_full_interval_spin)
-        auto_full_row.addWidget(self.auto_full_button, stretch=1)
+        auto_full_row.addStretch(1)
         auto_full_widget = QWidget()
         auto_full_widget.setLayout(auto_full_row)
         add_setting(4, "高赞阈值", self.high_like_spin, "自动模式", auto_full_widget)
@@ -2845,12 +2814,12 @@ class MainWindow(QMainWindow):
         controls_group = QGroupBox("快捷操作")
         controls_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         controls_layout = QVBoxLayout(controls_group)
-        controls_layout.setContentsMargins(14, 16, 14, 12)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(16, 18, 16, 14)
+        controls_layout.setSpacing(12)
         button_grid = QGridLayout()
         button_grid.setHorizontalSpacing(10)
         button_grid.setVerticalSpacing(8)
-        for column in range(7):
+        for column in range(8):
             button_grid.setColumnStretch(column, 1)
         self.start_button = QPushButton("开始运行")
         self.start_button.setStyleSheet("font-weight: 700;")
@@ -2860,7 +2829,7 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.video_download_button = QPushButton("视频下载")
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
-        self.unfollow_cleanup_button = QPushButton("清理非当前关注缓存")
+        self.unfollow_cleanup_button = QPushButton("清理缓存")
         self.unfollow_cleanup_button.clicked.connect(self._start_douyin_non_followed_cache_cleanup)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
@@ -2868,9 +2837,9 @@ class MainWindow(QMainWindow):
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
         self.archive_button = QPushButton("归档管理")
         self.archive_button.clicked.connect(self._open_archive_manager)
-        self.douyin_status_reset_button = QPushButton("抖音状态重置")
+        self.douyin_status_reset_button = QPushButton("状态重置")
         self.douyin_status_reset_button.clicked.connect(self._open_douyin_status_reset)
-        self.douyin_data_sync_button = QPushButton("抖音数据同步")
+        self.douyin_data_sync_button = QPushButton("数据同步")
         self.douyin_data_sync_button.clicked.connect(self._start_douyin_data_sync)
         self.liked_video_cache_button = QPushButton("\u7f13\u5b58\u559c\u6b22S\u7ea7")
         self.liked_video_cache_button.setToolTip("\u6293\u53d6\u5f53\u524d\u767b\u5f55\u8d26\u53f7\u4e3b\u9875\u559c\u6b22\u9875\u7684\u89c6\u9891\uff0c\u5199\u5165\u672c\u5730\u7f13\u5b58\u5e76\u8bbe\u4e3a S \u7ea7\u3002")
@@ -2889,6 +2858,13 @@ class MainWindow(QMainWindow):
             self.start_button,
             self.stop_button,
             self.video_download_button,
+            self.log_center_button,
+            self.cookie_check_button,
+            self.advanced_button,
+            self.lock_button,
+            self.clear_button,
+        )
+        douyin_quick_buttons = (
             self.unfollow_cleanup_button,
             self.douyin_stats_button,
             self.rating_overview_button,
@@ -2896,22 +2872,28 @@ class MainWindow(QMainWindow):
             self.douyin_status_reset_button,
             self.douyin_data_sync_button,
             self.liked_video_cache_button,
-            self.log_center_button,
-            self.cookie_check_button,
-            self.advanced_button,
-            self.lock_button,
-            self.clear_button,
+            self.auto_full_button,
         )
-        for button in toolbar_buttons:
+        for button in toolbar_buttons + douyin_quick_buttons:
             button.setMinimumWidth(0)
             button.setMaximumWidth(16777215)
-            button.setMinimumHeight(30)
-            button.setMaximumHeight(32)
-            button.setStyleSheet((button.styleSheet() + " " if button.styleSheet() else "") + "font-size: 14px; padding: 4px 8px;")
+            button.setMinimumHeight(28)
+            button.setStyleSheet((button.styleSheet() + " " if button.styleSheet() else "") + "font-size: 13px; padding: 3px 8px;")
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for index, button in enumerate(toolbar_buttons):
-            button_grid.addWidget(button, index // 7, index % 7)
+            button_grid.addWidget(button, index // 8, index % 8)
         controls_layout.addLayout(button_grid)
+
+        douyin_quick_group = QGroupBox("抖音快捷操作")
+        douyin_quick_layout = QGridLayout(douyin_quick_group)
+        douyin_quick_layout.setContentsMargins(12, 18, 12, 12)
+        douyin_quick_layout.setHorizontalSpacing(10)
+        douyin_quick_layout.setVerticalSpacing(8)
+        for column in range(8):
+            douyin_quick_layout.setColumnStretch(column, 1)
+        for index, button in enumerate(douyin_quick_buttons):
+            douyin_quick_layout.addWidget(button, index // 8, index % 8)
+        controls_layout.addWidget(douyin_quick_group)
         layout.addWidget(controls_group)
 
         status_group = QGroupBox("运行状态")
@@ -3028,16 +3010,16 @@ class MainWindow(QMainWindow):
         }
 
     def _save_gui_config(self):
-        atomic_write_json(GUI_CONFIG_PATH, self._snapshot_gui_config(), indent=2)
+        save_gui_config(self._snapshot_gui_config())
 
     def _load_gui_config(self):
-        if not GUI_CONFIG_PATH.exists():
-            return
         self._loading_gui_config = True
         try:
-            with GUI_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
-                data = json.load(config_file)
+            data = load_gui_config()
         except Exception:
+            self._loading_gui_config = False
+            return
+        if not data:
             self._loading_gui_config = False
             return
 
@@ -3371,81 +3353,14 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _video_downloader_launch_commands(self):
-        commands = []
-        seen = set()
-
-        def add_command(parts):
-            key = tuple(str(part) for part in parts)
-            if not key or key in seen:
-                return
-            seen.add(key)
-            commands.append(list(key))
-
-        python_executable = Path(sys.executable) if sys.executable else None
-        if python_executable and python_executable.exists():
-            if python_executable.name.lower() == "python.exe":
-                pythonw = python_executable.with_name("pythonw.exe")
-                if pythonw.exists():
-                    add_command([str(pythonw), str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
-            add_command([str(python_executable), str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
-
-        for launcher in ("pyw", "py", "pythonw", "python"):
-            resolved = shutil.which(launcher)
-            if resolved:
-                add_command([resolved, str(EXTERNAL_DOUYIN_DOWNLOADER_RUNNER), "--gui"])
-
-        return commands
+        return video_downloader_launch_commands()
 
     def _open_video_downloader_gui(self):
-        if not EXTERNAL_DOUYIN_DOWNLOADER_RUNNER.exists():
-            self._show_error_dialog(
-                "下载器不存在",
-                f"未找到下载器启动文件：\n{EXTERNAL_DOUYIN_DOWNLOADER_RUNNER}",
-            )
-            return
-
-        launch_errors = []
-        creationflags = 0
-        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            creationflags |= subprocess.DETACHED_PROCESS
-
-        for command in self._video_downloader_launch_commands():
-            log_file = None
-            try:
-                EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG.parent.mkdir(parents=True, exist_ok=True)
-                log_file = EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG.open("a", encoding="utf-8")
-                log_file.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {' '.join(command)}\n")
-                log_file.flush()
-                process = subprocess.Popen(
-                    command,
-                    cwd=str(EXTERNAL_DOUYIN_DOWNLOADER_ROOT),
-                    creationflags=creationflags,
-                    stdout=log_file,
-                    stderr=log_file,
-                )
-                time.sleep(0.8)
-                if process.poll() is not None:
-                    log_file.close()
-                    launch_errors.append(
-                        f"{' '.join(command)} -> 进程立即退出，详见 {EXTERNAL_DOUYIN_DOWNLOADER_LAUNCH_LOG}"
-                    )
-                    continue
-                log_file.close()
-                self._append_log(
-                    f"已启动视频下载界面：{EXTERNAL_DOUYIN_DOWNLOADER_RUNNER} --gui"
-                )
-                return
-            except Exception as exc:
-                launch_errors.append(f"{' '.join(command)} -> {exc}")
-                if log_file is not None and not log_file.closed:
-                    log_file.close()
-
-        message = "无法启动固定视频下载界面。"
-        if launch_errors:
-            message += "\n\n已尝试：\n" + "\n".join(launch_errors[:5])
-        self._show_error_dialog("启动失败", message)
+        ok, message = launch_video_downloader_gui()
+        if ok:
+            self._append_log(message)
+        else:
+            self._show_error_dialog("启动失败", message)
 
     def _start_douyin_non_followed_cache_cleanup(self):
         if self.worker and self.worker.isRunning():
@@ -3591,39 +3506,10 @@ class MainWindow(QMainWindow):
             self._set_task_progress(current=current, label=f"抓取进度：已处理 {current} / {self._progress_total or '?'}")
 
     def _extract_progress_total(self, text):
-        patterns = (
-            r"本轮处理\s*[=：]\s*(\d+)\s*位",
-            r"Douyin followings ready\s*\|\s*rows\s*=\s*(\d+)",
-            r"Douyin analysis start\s*\|.*?cached_followings\s*=\s*(\d+)",
-            r"关注列表准备完成\s*\|.*?本轮处理\s*=\s*(\d+)\s*位",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return int(match.group(1))
-        return None
+        return extract_progress_total(text)
 
     def _extract_progress_current(self, text):
-        paired_patterns = (
-            r"获取B站关注列表\s*\((\d+)\s*/\s*(\d+)\)",
-            r"执行抖音取消关注\s*\((\d+)\s*/\s*(\d+)\)",
-        )
-        for pattern in paired_patterns:
-            match = re.search(pattern, text)
-            if match:
-                return int(match.group(1)), int(match.group(2))
-
-        current_patterns = (
-            r"已处理博主\s*[:：]\s*(\d+)",
-            r"已处理\s*(\d+)\s*位博主",
-            r"已安全保存到本地\s*[:：]\s*已处理\s*(\d+)\s*位博主",
-            r"抓取抖音关注列表\s*\|\s*已获取\s*(\d+)\s*位",
-        )
-        for pattern in current_patterns:
-            match = re.search(pattern, text)
-            if match:
-                return int(match.group(1)), None
-        return None, None
+        return extract_progress_current(text)
 
     def _finish_task_progress(self, ok, message):
         self._progress_running = False
