@@ -14,6 +14,8 @@ from cli.main import download_url
 from config import ConfigLoader
 from core import DouyinAPIClient
 from core.downloader_base import _FilenameTemplateValues, _normalize_filename_template
+from gui_modules.cookie_check import check_douyin_cookie_status
+from gui_modules.cookie_login_sync import sync_douyin_cookies_via_browser
 from gui_modules.data_source import (
     load_sql_video_rows,
     resolve_database_path,
@@ -159,6 +161,18 @@ class HighLikeDownloaderGUI:
 
         self.refresh_button = ttk.Button(controls, text="刷新统计", command=self.refresh_stats)
         self.refresh_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.cookie_check_button = ttk.Button(
+            controls,
+            text="Cookie检测",
+            command=self.check_cookie_status,
+        )
+        self.cookie_check_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.cookie_login_button = ttk.Button(
+            controls,
+            text="登录同步Cookie",
+            command=self.sync_cookie_from_browser_login,
+        )
+        self.cookie_login_button.pack(side=tk.LEFT, padx=(0, 8))
         self.start_button = ttk.Button(controls, text="开始下载", command=self.start_download)
         self.start_button.pack(side=tk.LEFT, padx=(0, 8))
         self.stop_button = ttk.Button(
@@ -691,6 +705,23 @@ class HighLikeDownloaderGUI:
         self._set_busy(True, allow_stop=True, refresh_text="下载中...")
         self._run_worker(self._download_worker)
 
+    def check_cookie_status(self):
+        if self._is_busy():
+            return
+        self._snapshot_inputs()
+        self.status.set("正在检测 Cookie...")
+        self._set_busy(True, allow_stop=False, refresh_text="检测中...")
+        self._run_worker(self._cookie_check_worker)
+
+    def sync_cookie_from_browser_login(self):
+        if self._is_busy():
+            return
+        self._snapshot_inputs()
+        self.status.set("正在打开浏览器，请在抖音页面完成登录...")
+        self._log("正在打开浏览器登录同步 Cookie：请在弹出的抖音页面完成登录，程序会自动写回 config.yml")
+        self._set_busy(True, allow_stop=False, refresh_text="同步中...")
+        self._run_worker(self._cookie_login_sync_worker)
+
     def request_stop(self):
         self.stop_requested.set()
         self.status.set("正在停止，当前视频处理完成后会退出")
@@ -754,6 +785,8 @@ class HighLikeDownloaderGUI:
         else:
             self.refresh_button.configure(state=tk.NORMAL, text="刷新统计", style="TButton")
         self.start_button.configure(state=state)
+        self.cookie_check_button.configure(state=state)
+        self.cookie_login_button.configure(state=state)
         self.reset_button.configure(state=state)
         self.save_filename_button.configure(state=state)
         self.save_settings_button.configure(state=state)
@@ -1135,6 +1168,46 @@ class HighLikeDownloaderGUI:
         finally:
             self.events.put(("idle", None))
 
+    def _cookie_check_worker(self):
+        try:
+            set_console_log_level(50)
+            result = asyncio.run(self._check_cookie_status())
+            self.events.put(("cookie_check", result))
+        except Exception as exc:
+            self.events.put(("error", f"Cookie 检测失败：{exc}"))
+        finally:
+            self.events.put(("idle", None))
+
+    def _cookie_login_sync_worker(self):
+        try:
+            set_console_log_level(50)
+            result = sync_douyin_cookies_via_browser(self.active_config_path)
+            self.events.put(("cookie_login_sync", result))
+        except Exception as exc:
+            self.events.put(("error", f"浏览器登录同步 Cookie 失败：{exc}"))
+        finally:
+            self.events.put(("idle", None))
+
+    async def _check_cookie_status(self):
+        config = ConfigLoader(self.active_config_path)
+        self._apply_runtime_config(config)
+        sample_aweme_id = self._pick_cookie_check_sample_aweme_id(config)
+        return await check_douyin_cookie_status(
+            config,
+            sample_aweme_id=sample_aweme_id,
+        )
+
+    def _pick_cookie_check_sample_aweme_id(self, config: ConfigLoader) -> str:
+        try:
+            rows = self._filter_rows_for_download(self._load_candidate_rows(config), config)
+        except Exception:
+            rows = []
+        for row in rows:
+            aweme_id = str(row.get("aweme_id") or row.get("视频ID") or "").strip()
+            if aweme_id:
+                return aweme_id
+        return ""
+
     async def _collect_stats(self) -> dict[str, Any]:
         config = ConfigLoader(self.active_config_path)
         self._apply_runtime_config(config)
@@ -1211,6 +1284,7 @@ class HighLikeDownloaderGUI:
             success = 0
             failed = 0
             skipped = 0
+            detail_api_hint_logged = False
             for index, row in enumerate(selected_rows, 1):
                 if self.stop_requested.is_set():
                     break
@@ -1234,7 +1308,21 @@ class HighLikeDownloaderGUI:
                     self._remove_failed_record(failed_csv_path, aweme_id)
                 else:
                     failed += 1
-                    self._append_failed_record(failed_csv_path, row)
+                    error_kind = getattr(result, "error_kind", "") if result else ""
+                    error_text = getattr(result, "error", "") if result else ""
+                    if error_text:
+                        self.events.put(("log", f"下载失败：{aweme_id}，{error_text}"))
+                    if error_kind == "detail_api":
+                        if not detail_api_hint_logged:
+                            self.events.put(
+                                (
+                                    "log",
+                                    "提示：当前失败发生在抖音详情直连接口，不是 SQL 链接筛选问题；可开启“启用浏览器兜底”、刷新 Cookie，或打开“下载前抽样检测”提前拦截。",
+                                )
+                            )
+                            detail_api_hint_logged = True
+                    else:
+                        self._append_failed_record(failed_csv_path, row)
 
                 self.events.put(
                     (
@@ -1517,6 +1605,30 @@ class HighLikeDownloaderGUI:
                 self.status.set(
                     f"下载完成：成功 {payload['success']}，失败 {payload['failed']}，跳过 {payload['skipped']}{suffix}"
                 )
+            elif event == "cookie_check":
+                message = payload.to_message()
+                self.status.set(f"Cookie 检测完成：{payload.status_label}")
+                self._log(message)
+                if payload.status == "error":
+                    messagebox.showerror("Cookie 检测", message)
+                elif payload.status == "warning":
+                    messagebox.showwarning("Cookie 检测", message)
+                else:
+                    messagebox.showinfo("Cookie 检测", message)
+            elif event == "cookie_login_sync":
+                message = payload.to_message()
+                if payload.success:
+                    self.status.set("浏览器登录 Cookie 已同步")
+                    self._log(message)
+                    messagebox.showinfo("登录同步 Cookie", message)
+                elif payload.status == "warning":
+                    self.status.set("Cookie 已同步但字段不完整")
+                    self._log(message)
+                    messagebox.showwarning("登录同步 Cookie", message)
+                else:
+                    self.status.set("浏览器登录 Cookie 同步失败")
+                    self._log(message)
+                    messagebox.showerror("登录同步 Cookie", message)
             elif event == "log":
                 self._log(payload)
             elif event == "error":

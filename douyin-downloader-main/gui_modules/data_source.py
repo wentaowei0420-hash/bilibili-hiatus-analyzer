@@ -78,7 +78,7 @@ def _selected_columns(columns: list[str], id_column: str) -> list[str]:
         _pick_column(columns, "duration_seconds", "duration", "时长"),
         _pick_column(columns, "duration_category", "时长分类"),
         _pick_column(columns, "like_count", "digg_count", "点赞"),
-        _pick_column(columns, "final_grade", "video_grade", "等级"),
+        _pick_grade_column(columns),
         _pick_column(columns, "final_score", "分"),
         _pick_column(columns, "download_status"),
         _pick_column(columns, "download_time"),
@@ -139,12 +139,28 @@ def _normalize_row(row: dict[str, Any], id_column: str) -> dict[str, Any]:
 
 
 def _pick_column(columns: list[str], *needles: str) -> str:
+    lowered_columns = {column.lower(): column for column in columns}
+    for needle in needles:
+        if not needle:
+            continue
+        exact = lowered_columns.get(needle.lower())
+        if exact:
+            return exact
+
     lowered_needles = [needle.lower() for needle in needles if needle]
     for column in columns:
         lower = column.lower()
         if any(needle in lower for needle in lowered_needles):
             return column
     return ""
+
+
+def _pick_grade_column(columns: list[str]) -> str:
+    for exact in ("视频最终等级", "视频等级", "final_grade", "video_grade"):
+        column = _pick_column(columns, exact)
+        if column:
+            return column
+    return _pick_column(columns, "final_grade", "video_grade")
 
 
 def _pick_video_id_column(columns: list[str]) -> str:
@@ -169,7 +185,13 @@ def _first_value(row: dict[str, Any], *needles: str) -> Any:
 
 
 def _first_grade(row: dict[str, Any]) -> str:
-    explicit = _first_value(row, "final_grade", "video_grade", "等级")
+    explicit = _first_value(
+        row,
+        "视频最终等级",
+        "视频等级",
+        "final_grade",
+        "video_grade",
+    )
     grade = _normalize_grade(explicit)
     if grade:
         return grade

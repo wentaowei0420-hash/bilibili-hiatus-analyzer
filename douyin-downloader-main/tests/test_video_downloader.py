@@ -203,6 +203,25 @@ def test_fetch_aweme_data_does_not_use_browser_fallback_when_disabled(tmp_path, 
     asyncio.run(api_client.close())
 
 
+def test_video_download_result_exposes_detail_api_failure(tmp_path, monkeypatch):
+    downloader, api_client = _build_downloader(tmp_path)
+    downloader.config.update(browser_fallback={"enabled": False})
+    api_client.last_error = "Empty response body for /aweme/v1/web/aweme/detail/"
+
+    async def _fake_get_video_detail(_aweme_id):
+        return None
+
+    monkeypatch.setattr(api_client, "get_video_detail", _fake_get_video_detail)
+
+    result = asyncio.run(downloader.download({"aweme_id": "6672593134737820942"}))
+
+    assert result.failed == 1
+    assert result.error_kind == "detail_api"
+    assert "Empty response body" in result.error
+
+    asyncio.run(api_client.close())
+
+
 def test_browser_fallback_default_profile_is_separate_from_main_analyzer():
     profile_path = Path(video_module.VideoDownloader._browser_user_data_path({}))
 

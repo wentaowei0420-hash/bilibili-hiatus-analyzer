@@ -30,15 +30,15 @@ class DownloadFilter:
 def normalize_filter_mode(value: Any) -> str:
     text = str(value or "").strip()
     aliases = {
-        FILTER_ALL: LEGACY_FILTER_ALL,
-        FILTER_HIGH_LIKE: LEGACY_FILTER_HIGH_LIKE,
-        FILTER_GRADE: LEGACY_FILTER_GRADE,
+        LEGACY_FILTER_ALL: FILTER_ALL,
+        LEGACY_FILTER_HIGH_LIKE: FILTER_HIGH_LIKE,
+        LEGACY_FILTER_GRADE: FILTER_GRADE,
     }
     text = aliases.get(text, text)
     return (
         text
-        if text in {LEGACY_FILTER_ALL, LEGACY_FILTER_HIGH_LIKE, LEGACY_FILTER_GRADE}
-        else LEGACY_FILTER_HIGH_LIKE
+        if text in {FILTER_ALL, FILTER_HIGH_LIKE, FILTER_GRADE}
+        else FILTER_HIGH_LIKE
     )
 
 
@@ -59,11 +59,11 @@ def row_video_grade(row: dict[str, Any]) -> str:
     for key in (
         "video_grade",
         "final_grade",
+        "视频最终等级",
+        "视频等级",
         "grade",
         "level",
         "等级",
-        "视频等级",
-        "视频最终等级",
         "绛夌骇",
         "瑙嗛绛夌骇",
     ):
@@ -106,9 +106,9 @@ def row_duration_seconds(row: dict[str, Any]) -> int:
 
 def describe_filter(options: DownloadFilter) -> str:
     mode = normalize_filter_mode(options.mode)
-    if mode == LEGACY_FILTER_GRADE:
+    if mode == FILTER_GRADE:
         desc = f"仅下载 {options.grade or 'A'} 级视频"
-    elif mode == LEGACY_FILTER_HIGH_LIKE:
+    elif mode == FILTER_HIGH_LIKE:
         desc = f"仅下载点赞数 >= {options.like_threshold} 的视频"
     else:
         desc = "下载全部候选视频"
@@ -137,11 +137,11 @@ def filter_rows_for_download(
     filtered = list(rows)
     mode = normalize_filter_mode(options.mode)
 
-    if mode == LEGACY_FILTER_GRADE:
+    if mode == FILTER_GRADE:
         filtered = [
             row for row in filtered if row_video_grade(row) == options.grade
         ]
-    elif mode == LEGACY_FILTER_HIGH_LIKE:
+    elif mode == FILTER_HIGH_LIKE:
         filtered = [
             row for row in filtered if row_like_count(row) >= options.like_threshold
         ]

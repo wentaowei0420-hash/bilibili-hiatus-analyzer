@@ -32,8 +32,11 @@ class VideoDownloader(BaseDownloader):
 
         aweme_data = await self._fetch_aweme_data(aweme_id)
         if not aweme_data:
-            logger.error("Failed to get video detail: %s", aweme_id)
+            detail_error = getattr(self.api_client, "last_error", "") or "未返回详情"
+            logger.error("Failed to get video detail: %s (%s)", aweme_id, detail_error)
             result.failed += 1
+            result.error = f"获取视频详情失败：{detail_error}"
+            result.error_kind = "detail_api"
             self._progress_advance_item("failed", str(aweme_id))
             return result
 

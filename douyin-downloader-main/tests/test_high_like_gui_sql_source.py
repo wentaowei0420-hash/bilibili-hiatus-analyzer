@@ -7,6 +7,15 @@ import pytest
 from config import ConfigLoader
 import gui as gui_module
 from gui import HighLikeDownloaderGUI
+from gui_modules.filtering import (
+    FILTER_ALL,
+    FILTER_GRADE,
+    FILTER_HIGH_LIKE,
+    LEGACY_FILTER_ALL,
+    LEGACY_FILTER_GRADE,
+    LEGACY_FILTER_HIGH_LIKE,
+    normalize_filter_mode,
+)
 
 
 def _make_gui_probe(**overrides):
@@ -17,6 +26,15 @@ def _make_gui_probe(**overrides):
     probe.active_min_duration = overrides.get("min_duration", 0)
     probe.active_max_duration = overrides.get("max_duration", 0)
     return probe
+
+
+def test_filter_mode_normalization_keeps_readable_chinese_and_accepts_legacy_mojibake():
+    assert normalize_filter_mode(FILTER_ALL) == FILTER_ALL
+    assert normalize_filter_mode(FILTER_HIGH_LIKE) == FILTER_HIGH_LIKE
+    assert normalize_filter_mode(FILTER_GRADE) == FILTER_GRADE
+    assert normalize_filter_mode(LEGACY_FILTER_ALL) == FILTER_ALL
+    assert normalize_filter_mode(LEGACY_FILTER_HIGH_LIKE) == FILTER_HIGH_LIKE
+    assert normalize_filter_mode(LEGACY_FILTER_GRADE) == FILTER_GRADE
 
 
 def test_sql_source_can_download_grade_video_below_high_like_threshold(tmp_path):
@@ -71,6 +89,56 @@ def test_sql_source_can_download_grade_video_below_high_like_threshold(tmp_path)
     probe.active_filter_mode = "高赞视频"
     high_like_rows = probe._filter_rows_for_download(rows)
     assert [row["aweme_id"] for row in high_like_rows] == ["100000000000000002"]
+
+
+def test_sql_source_uses_video_grade_not_creator_grade(tmp_path):
+    rating_db = tmp_path / "douyin_rating_store.db"
+    export_db = tmp_path / "douyin_export_store.db"
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        f"path: {tmp_path / 'downloads'}\n"
+        f"database_path: {export_db}\n"
+        f"rating_store_db: {rating_db}\n",
+        encoding="utf-8",
+    )
+
+    with sqlite3.connect(rating_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE video_score_current (
+                "UP主姓名" TEXT,
+                "视频标题" TEXT,
+                "视频ID" TEXT PRIMARY KEY,
+                "点赞数" INTEGER,
+                "UP手动等级" TEXT,
+                "UP自动等级" TEXT,
+                "视频最终等级" TEXT,
+                "视频最终分" REAL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO video_score_current (
+                "UP主姓名", "视频标题", "视频ID", "点赞数",
+                "UP手动等级", "UP自动等级", "视频最终等级", "视频最终分"
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("作者A", "视频B", "200000000000000001", 100, "", "D", "B", 80),
+                ("作者B", "视频D", "200000000000000002", 200, "B", "B", "D", 30),
+            ],
+        )
+        conn.commit()
+
+    config = ConfigLoader(str(config_path))
+    probe = _make_gui_probe(mode="指定等级", grade="B", threshold=10000)
+    rows = probe._load_sql_video_rows(config)
+    filtered = probe._filter_rows_for_download(rows)
+
+    assert [row["aweme_id"] for row in filtered] == ["200000000000000001"]
+    assert filtered[0]["video_grade"] == "B"
 
 
 def test_preflight_selected_rows_raises_clear_error_when_detail_api_fails(tmp_path, monkeypatch):
