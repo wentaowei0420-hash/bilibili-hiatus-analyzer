@@ -173,9 +173,9 @@ class DouyinBrowserClient:
         page = self._open_page(self.config.home_url, self.config.page_load_delay)
         self._print_login_persistence_diagnostic("启动检查")
         if page.ele("text=登录", timeout=2) or self._page_has_login_dialog():
-            print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。")
-            input("登录成功并刷新页面后，按回车继续...")
-            self._wait_until_login_dialog_gone()
+            print("⚠️  尚未登录抖音，请先在浏览器中完成扫码登录。程序将自动等待登录完成...")
+            if not self._wait_until_login_dialog_gone():
+                raise DouyinLoginExpiredError("抖音登录未完成，请在浏览器中完成扫码登录后重试。")
             time.sleep(1.0)
             self._print_login_persistence_diagnostic("登录后检查")
         print("✅ 抖音登录状态已确认。")

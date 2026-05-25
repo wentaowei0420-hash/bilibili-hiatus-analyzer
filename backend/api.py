@@ -38,7 +38,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "hiatus-backend", "api_version": "4"}
+    return {"status": "ok", "service": "hiatus-backend", "api_version": "5"}
 
 
 @app.get("/api/capabilities")

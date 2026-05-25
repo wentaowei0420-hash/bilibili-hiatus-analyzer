@@ -16,6 +16,7 @@ from gui_models import RunConfig
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+MIN_BACKEND_API_VERSION = "5"
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ROOT_DIR = Path(__file__).resolve().parent
 BACKEND_AUTOSTART_LOG = ROOT_DIR / "runtime" / "logs" / "backend_gui_autostart.log"
@@ -99,7 +100,7 @@ def _backend_is_compatible(client: "BackendApiClient") -> bool:
     return (
         health.get("status") == "ok"
         and health.get("service") == "hiatus-backend"
-        and str(health.get("api_version") or "") >= "4"
+        and str(health.get("api_version") or "") >= MIN_BACKEND_API_VERSION
     )
 
 

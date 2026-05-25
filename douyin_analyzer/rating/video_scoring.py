@@ -247,13 +247,15 @@ class DouyinVideoScorer:
         return result
 
     def _load_video_rows(self):
+        if self._table_exists("douyin_video_state", self.source_db_path):
+            state_videos = self._load_video_state_rows(active_uids=self._load_active_uids())
+            if state_videos:
+                return state_videos
+
         progress_videos = self._load_progress_video_rows()
         if progress_videos is not None:
             progress_videos = self._merge_liked_state_videos(progress_videos)
             return progress_videos
-
-        if self._table_exists("douyin_video_state", self.source_db_path):
-            return self._load_video_state_rows()
 
         if not self._table_exists("douyin_video_raw", self.source_db_path):
             return []
@@ -266,9 +268,10 @@ class DouyinVideoScorer:
                 videos.append(payload)
         return videos
 
-    def _load_video_state_rows(self, only_liked=False):
+    def _load_video_state_rows(self, only_liked=False, active_uids=None):
         if not self._table_exists("douyin_video_state", self.source_db_path):
             return []
+        active_uids = set(active_uids or [])
         where = "WHERE video_id IS NOT NULL AND TRIM(video_id) != ''"
         with connect_sqlite(self.source_db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -294,13 +297,30 @@ class DouyinVideoScorer:
             video["source_mode"] = raw["source_mode"] or video.get("source_mode", "")
             video["is_available"] = int(raw["is_available"] or 0)
             metadata = video.get("metadata") if isinstance(video.get("metadata"), dict) else {}
-            if only_liked and not (
+            is_liked_cache = (
                 str(video.get("source_mode") or "").strip().lower() == "liked"
                 or metadata.get("liked_cache") is True
-            ):
+            )
+            if only_liked and not is_liked_cache:
+                continue
+            if active_uids and str(video.get("uploader_id") or "").strip() not in active_uids and not is_liked_cache:
                 continue
             videos.append(video)
         return videos
+
+    def _load_active_uids(self):
+        try:
+            from ..cache import CacheStore
+
+            cache_store = CacheStore(self.config)
+            followings = cache_store.load_followings_cache()
+        except Exception:
+            return set()
+        return {
+            str((user or {}).get("sec_uid") or "").strip()
+            for user in (followings or [])
+            if isinstance(user, dict) and str((user or {}).get("sec_uid") or "").strip()
+        }
 
     def _merge_liked_state_videos(self, videos):
         merged = list(videos or [])

@@ -2,7 +2,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtCore import QThread, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
@@ -161,6 +161,17 @@ def _normalize_fetch_order_settings(settings):
         douyin_options=DOUYIN_FETCH_ORDER_OPTIONS,
         direction_options=FETCH_ORDER_DIRECTION_OPTIONS,
     )
+
+
+class VideoDownloaderLaunchThread(QThread):
+    completed = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            ok, message = launch_video_downloader_gui()
+        except Exception as exc:
+            ok, message = False, str(exc)
+        self.completed.emit(ok, message)
 
 
 class RuntimeSettingsDialog(QDialog):
@@ -2574,6 +2585,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.cookie_checker = None
         self.liked_video_cache_worker = None
+        self.video_downloader_launch_worker = None
         self.log_dialog = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
@@ -3330,6 +3342,24 @@ class MainWindow(QMainWindow):
 
     def _open_video_downloader_gui(self):
         ok, message = launch_video_downloader_gui()
+        if ok:
+            self._append_log(message)
+        else:
+            self._show_error_dialog("启动失败", message)
+
+    def _open_video_downloader_gui(self):
+        if (
+            self.video_downloader_launch_worker
+            and self.video_downloader_launch_worker.isRunning()
+        ):
+            return
+        _set_button_busy(self.video_download_button, "启动中...")
+        self.video_downloader_launch_worker = VideoDownloaderLaunchThread(self)
+        self.video_downloader_launch_worker.completed.connect(self._on_video_downloader_gui_opened)
+        self.video_downloader_launch_worker.start()
+
+    def _on_video_downloader_gui_opened(self, ok, message):
+        _restore_button_busy(self.video_download_button)
         if ok:
             self._append_log(message)
         else:

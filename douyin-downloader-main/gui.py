@@ -71,6 +71,8 @@ class HighLikeDownloaderGUI:
         self.active_skip_failed_records = False
         self.active_browser_fallback_enabled = True
         self.active_preflight_sample_enabled = True
+        self.active_reset_db_path: Path | None = None
+        self.active_reset_manifest_paths: list[Path] = []
         self.preview_after_id = None
 
         default_config_path = str(PROJECT_ROOT / "config.yml")
@@ -774,6 +776,65 @@ class HighLikeDownloaderGUI:
             f"清空评分快照下载标记 {cleared_score_flags} 条；本地视频文件未删除。"
         )
         self.refresh_stats()
+
+    def reset_download_records(self):
+        if self._is_busy():
+            return
+
+        self._snapshot_inputs()
+        try:
+            config = ConfigLoader(self.active_config_path)
+            db_path = self._resolve_database_path(config)
+            manifest_paths = self._download_manifest_paths(config)
+        except Exception as exc:
+            messagebox.showerror("重置失败", f"读取配置失败：{exc}")
+            return
+
+        detail_lines = [
+            "将清空 SQLite 中 aweme 表的已下载视频记录。",
+            "将清空当前下载目录下的 download_manifest.jsonl 下载清单。",
+            "将同步清空评分概览快照里的下载状态标记。",
+            "不会删除本地已下载的视频文件。",
+            "",
+            "注意：如果本地视频文件还在，下载器仍会通过文件名识别并跳过已存在视频。",
+            "",
+            f"数据库：{db_path}",
+        ]
+        if manifest_paths:
+            detail_lines.append("下载清单：")
+            detail_lines.extend(str(path) for path in manifest_paths)
+        if not messagebox.askyesno("确认一键重置", "\n".join(detail_lines)):
+            return
+
+        self.active_reset_db_path = db_path
+        self.active_reset_manifest_paths = list(manifest_paths)
+        self.status.set("正在重置下载记录...")
+        self._set_busy(True, allow_stop=False, refresh_text="重置中...")
+        self._run_worker(self._reset_download_records_worker)
+
+    def _reset_download_records_worker(self):
+        try:
+            db_path = self.active_reset_db_path
+            manifest_paths = list(self.active_reset_manifest_paths)
+            deleted = self._clear_aweme_records(db_path) if db_path else 0
+            cleared_manifests = self._clear_download_manifests(manifest_paths)
+            cleared_score_flags = self._clear_video_score_download_flags(db_path) if db_path else 0
+            stats = asyncio.run(self._collect_stats())
+            self.events.put(
+                (
+                    "reset_done",
+                    {
+                        "deleted": deleted,
+                        "cleared_manifests": cleared_manifests,
+                        "cleared_score_flags": cleared_score_flags,
+                        "stats": stats,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.events.put(("error", f"一键重置失败：{exc}"))
+        finally:
+            self.events.put(("idle", None))
 
     def _is_busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
@@ -1604,6 +1665,87 @@ class HighLikeDownloaderGUI:
                 suffix = "，已手动停止" if payload.get("stopped") else ""
                 self.status.set(
                     f"下载完成：成功 {payload['success']}，失败 {payload['failed']}，跳过 {payload['skipped']}{suffix}"
+                )
+            elif event == "cookie_check":
+                message = payload.to_message()
+                self.status.set(f"Cookie 检测完成：{payload.status_label}")
+                self._log(message)
+                if payload.status == "error":
+                    messagebox.showerror("Cookie 检测", message)
+                elif payload.status == "warning":
+                    messagebox.showwarning("Cookie 检测", message)
+                else:
+                    messagebox.showinfo("Cookie 检测", message)
+            elif event == "cookie_login_sync":
+                message = payload.to_message()
+                if payload.success:
+                    self.status.set("浏览器登录 Cookie 已同步")
+                    self._log(message)
+                    messagebox.showinfo("登录同步 Cookie", message)
+                elif payload.status == "warning":
+                    self.status.set("Cookie 已同步但字段不完整")
+                    self._log(message)
+                    messagebox.showwarning("登录同步 Cookie", message)
+                else:
+                    self.status.set("浏览器登录 Cookie 同步失败")
+                    self._log(message)
+                    messagebox.showerror("登录同步 Cookie", message)
+            elif event == "log":
+                self._log(payload)
+            elif event == "error":
+                self.status.set("发生错误")
+                self._log(f"错误：{payload}")
+                messagebox.showerror("运行失败", payload)
+            elif event == "idle":
+                self.downloading_count.set("0")
+                self._set_busy(False)
+
+        self.root.after(150, self._drain_events)
+
+    def _drain_events(self):
+        while True:
+            try:
+                event, payload = self.events.get_nowait()
+            except queue.Empty:
+                break
+
+            if event == "stats":
+                self._apply_stats(payload)
+                self.status.set("统计已刷新")
+            elif event == "batch":
+                self._apply_stats(payload)
+                self.current_batch_count.set(str(payload["batch"]))
+                self.progress.configure(maximum=max(payload["batch"], 1), value=0)
+                self.status.set("开始下载")
+            elif event == "current":
+                self.downloading_count.set("1")
+                self.status.set(payload)
+                self._log(payload)
+            elif event == "progress":
+                self.progress.configure(value=payload["index"])
+                self.success_count.set(str(payload["success"]))
+                self.failed_count.set(str(payload["failed"]))
+                self.skipped_count.set(str(payload["skipped"]))
+                if "completed" in payload:
+                    self.completed_count.set(str(payload["completed"]))
+                self.downloading_count.set("0")
+                self._log(
+                    f"完成处理：{payload['current']}，成功 {payload['success']}，失败 {payload['failed']}，跳过 {payload['skipped']}"
+                )
+            elif event == "done":
+                suffix = "，已手动停止" if payload.get("stopped") else ""
+                self.status.set(
+                    f"下载完成：成功 {payload['success']}，失败 {payload['failed']}，跳过 {payload['skipped']}{suffix}"
+                )
+            elif event == "reset_done":
+                stats = payload.get("stats") or {}
+                self._apply_stats(stats)
+                self.status.set("已清空已下载视频记录")
+                self._log(
+                    f"已清空已下载视频记录：SQLite 删除 {payload.get('deleted', 0)} 条，"
+                    f"清空清单 {payload.get('cleared_manifests', 0)} 个，"
+                    f"清空评分快照下载标记 {payload.get('cleared_score_flags', 0)} 条；"
+                    "本地视频文件未删除。"
                 )
             elif event == "cookie_check":
                 message = payload.to_message()

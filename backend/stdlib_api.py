@@ -38,7 +38,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/health":
-                self._json({"status": "ok", "service": "hiatus-backend", "api_version": "4"})
+                self._json({"status": "ok", "service": "hiatus-backend", "api_version": "5"})
             elif path == "/api/capabilities":
                 self._json(_capabilities())
             elif path == "/api/config/defaults":
