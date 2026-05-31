@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import tian_can_board
+
 
 CREATOR_TABLE = "creator_score_current"
 VIDEO_TABLE = "video_score_current"
@@ -573,6 +575,8 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
 
         if has_creator:
             _ensure_ladder_exclusion_table(conn)
+            creator_columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{CREATOR_TABLE}")')}
+            creator_homepage_expr = 'c."UP主主页链接"' if "UP主主页链接" in creator_columns else "''"
             total, counts = _grade_counts(conn, CREATOR_TABLE, "UP最终等级", has_eligible_filter)
             low_confidence = _confidence_count(
                 conn, CREATOR_TABLE, "评级置信度", ["低", "中"], has_eligible_filter
@@ -632,7 +636,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
                     conn,
                     f"""
                     SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                           c."粉丝数", c."视频数量", c."UP主UID", c."UP主UID", c."UP主UID"
+                           c."粉丝数", c."视频数量", c."UP主UID", c."UP主UID", c."UP主UID", {creator_homepage_expr}
                     FROM creator_score_current AS c
                     {ladder_eligible_join}
                     {ladder_manual_join}
@@ -647,26 +651,10 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
                     params=ladder_params,
                 )
             )
-            low_conditions = [
-                '(c."UP最终等级" IN (\'C\', \'D\') OR c."评级置信度" IN (\'低\', \'中\'))'
-            ]
-            low_params = []
-            if search_uid:
-                low_conditions.insert(0, 'c."UP主UID" = ?')
-                low_params.append(search_uid)
             result["tables"]["creator_low"] = _rows_to_lists(
-                _query_rows(
+                tian_can_board.get_tian_can_rows(
                     conn,
-                    f"""
-                    SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                           c."未更新天数", c."低等级视频比例", c."UP主UID"
-                    FROM creator_score_current AS c
-                    {creator_join}
-                    WHERE {' AND '.join(low_conditions)}
-                    ORDER BY CAST(c."UP最终分" AS REAL) ASC
-                    LIMIT ?
-                    """,
-                    params=low_params,
+                    search_uid=search_uid,
                 )
             )
         else:
@@ -702,6 +690,12 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
             ladder_excluded_count = _active_ladder_exclusion_count(conn)
     if ladder_excluded_count:
         warning_parts.append(f"天梯榜已取消资格UP {ladder_excluded_count} 位")
+    tian_can_hidden_count = 0
+    if db_path.exists():
+        with sqlite3.connect(str(db_path)) as conn:
+            tian_can_hidden_count = tian_can_board.active_tian_can_hidden_count(conn)
+    if tian_can_hidden_count:
+        warning_parts.append(f"天参榜已处理UP {tian_can_hidden_count} 位")
     if stale_creator_count:
         warning_parts.append(f"非 full/已归档UP评分 {stale_creator_count} 位未展示")
     if missing_creator_score_count:
@@ -1062,6 +1056,18 @@ def exclude_creator_from_ladder(uploader_id: str, reason: str = "天梯榜取消
         )
         conn.commit()
     return {"ok": True, "uploader_id": uploader_id}
+
+
+def dismiss_tian_can_creator(uploader_id: str, reason: str = "天参榜取消提示") -> dict[str, Any]:
+    return tian_can_board.dismiss_tian_can_creator(uploader_id, reason)
+
+
+def unfollow_tian_can_creator(
+    uploader_id: str,
+    homepage_url: str,
+    reason: str = "天参榜取消关注",
+) -> dict[str, Any]:
+    return tian_can_board.unfollow_tian_can_creator(uploader_id, homepage_url, reason)
 
 
 def _is_full_inventory_row(row):

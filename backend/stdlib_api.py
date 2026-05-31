@@ -38,7 +38,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/health":
-                self._json({"status": "ok", "service": "hiatus-backend", "api_version": "5"})
+                self._json({"status": "ok", "service": "hiatus-backend", "api_version": "8"})
             elif path == "/api/capabilities":
                 self._json(_capabilities())
             elif path == "/api/config/defaults":
@@ -101,6 +101,21 @@ class _Handler(BaseHTTPRequestHandler):
                     gui_data.exclude_creator_from_ladder(
                         str(payload.get("uploader_id") or ""),
                         str(payload.get("reason") or "天梯榜取消资格"),
+                    )
+                )
+            elif path == "/api/douyin/tian-can-dismiss":
+                self._json(
+                    gui_data.dismiss_tian_can_creator(
+                        str(payload.get("uploader_id") or ""),
+                        str(payload.get("reason") or "天参榜取消提示"),
+                    )
+                )
+            elif path == "/api/douyin/tian-can-unfollow":
+                self._json(
+                    gui_data.unfollow_tian_can_creator(
+                        str(payload.get("uploader_id") or ""),
+                        str(payload.get("homepage_url") or ""),
+                        str(payload.get("reason") or "天参榜取消关注"),
                     )
                 )
             elif path == "/api/douyin/status-reset":

@@ -200,17 +200,20 @@ def get_gui_metadata() -> dict[str, object]:
                     ("详情", "uploader_id"),
                     ("设为S级", "uploader_id"),
                     ("取消资格", "uploader_id"),
+                    ("转到主页", "homepage_url"),
                 ]
             ),
             "rating_creator_low": _columns(
                 [
                     ("UP主", "uploader_name"),
-                    ("等级", "final_grade"),
+                    ("等级", "display_grade"),
                     ("分数", "final_score"),
                     ("置信度", "confidence"),
                     ("未更新天数", "inactive_days"),
                     ("低等级比例", "low_grade_ratio"),
-                    ("详情", "uploader_id"),
+                    ("转到主页", "homepage_url"),
+                    ("取消提示", "uploader_id"),
+                    ("取消关注", "unfollow_payload"),
                 ]
             ),
             "rating_archived_creator": _columns(

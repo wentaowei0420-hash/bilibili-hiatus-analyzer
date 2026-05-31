@@ -16,7 +16,7 @@ from gui_models import RunConfig
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
-MIN_BACKEND_API_VERSION = "5"
+MIN_BACKEND_API_VERSION = "8"
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ROOT_DIR = Path(__file__).resolve().parent
 BACKEND_AUTOSTART_LOG = ROOT_DIR / "runtime" / "logs" / "backend_gui_autostart.log"
@@ -190,6 +190,33 @@ class BackendApiClient:
             "POST",
             "/api/douyin/creator-ladder-exclusion",
             json={"uploader_id": uploader_id, "reason": reason},
+        )
+
+    def dismiss_tian_can_creator(
+        self,
+        uploader_id: str,
+        reason: str = "天参榜取消提示",
+    ) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/api/douyin/tian-can-dismiss",
+            json={"uploader_id": uploader_id, "reason": reason},
+        )
+
+    def unfollow_tian_can_creator(
+        self,
+        uploader_id: str,
+        homepage_url: str,
+        reason: str = "天参榜取消关注",
+    ) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/api/douyin/tian-can-unfollow",
+            json={
+                "uploader_id": uploader_id,
+                "homepage_url": homepage_url,
+                "reason": reason,
+            },
         )
 
     def status_reset_candidates(self, threshold: int) -> dict[str, Any]:

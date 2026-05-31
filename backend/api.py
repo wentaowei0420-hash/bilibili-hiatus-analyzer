@@ -38,7 +38,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "hiatus-backend", "api_version": "5"}
+    return {"status": "ok", "service": "hiatus-backend", "api_version": "8"}
 
 
 @app.get("/api/capabilities")
@@ -114,6 +114,23 @@ def douyin_creator_ladder_exclusion(payload: dict[str, object]) -> dict[str, obj
     return gui_data.exclude_creator_from_ladder(
         str(payload.get("uploader_id") or ""),
         str(payload.get("reason") or "天梯榜取消资格"),
+    )
+
+
+@app.post("/api/douyin/tian-can-dismiss")
+def douyin_tian_can_dismiss(payload: dict[str, object]) -> dict[str, object]:
+    return gui_data.dismiss_tian_can_creator(
+        str(payload.get("uploader_id") or ""),
+        str(payload.get("reason") or "天参榜取消提示"),
+    )
+
+
+@app.post("/api/douyin/tian-can-unfollow")
+def douyin_tian_can_unfollow(payload: dict[str, object]) -> dict[str, object]:
+    return gui_data.unfollow_tian_can_creator(
+        str(payload.get("uploader_id") or ""),
+        str(payload.get("homepage_url") or ""),
+        str(payload.get("reason") or "天参榜取消关注"),
     )
 
 

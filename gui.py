@@ -1045,7 +1045,7 @@ class DouyinRatingOverviewDialog(QDialog):
         self.archived_creator_table = self._make_table([label for label, _ in self.ARCHIVED_CREATOR_COLUMNS])
         self.tabs.addTab(self.creator_top_table, "抖音排行表")
         self.tabs.addTab(self.creator_ladder_table, "天梯榜")
-        self.tabs.addTab(self.creator_low_table, "低分/风险UP")
+        self.tabs.addTab(self.creator_low_table, "天参榜")
         self.tabs.addTab(self.archived_creator_table, "归档UP")
         layout.addWidget(self.tabs, stretch=1)
 
@@ -1084,7 +1084,7 @@ class DouyinRatingOverviewDialog(QDialog):
         table.horizontalHeader().setMinimumHeight(42)
         table.horizontalHeader().setMinimumSectionSize(70)
         for column, header in enumerate(headers):
-            if header in {"详情", "设为S级", "取消资格"}:
+            if header in {"详情", "设为S级", "取消资格", "转到主页", "取消提示", "取消关注"}:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
             elif column == len(headers) - 1 or header in {"UP主主页链接", "视频链接", "视频标题", "归档原因"}:
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
@@ -1106,7 +1106,7 @@ class DouyinRatingOverviewDialog(QDialog):
     def _sort_value(header_text, value):
         text = "" if value is None else str(value).strip()
         if header_text == "等级":
-            return {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}.get(text.upper(), 0)
+            return {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1, "F": 0}.get(text.upper(), 0)
         if header_text == "置信度":
             return {"很高": 5, "高": 4, "中": 3, "低": 2, "很低": 1}.get(text, 0)
         if header_text in {
@@ -1179,6 +1179,43 @@ class DouyinRatingOverviewDialog(QDialog):
                     item.setData(SORT_ROLE, uid.lower())
                     table.setItem(row_index, column_index, item)
                     continue
+                if header_text == "转到主页":
+                    url = str(value or "").strip()
+                    button = QPushButton("转到主页")
+                    button.setEnabled(bool(url))
+                    button.setProperty("homepage_url", url)
+                    button.clicked.connect(self._open_creator_homepage_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("转到主页")
+                    item.setToolTip(url)
+                    item.setData(SORT_ROLE, url.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
+                if header_text == "取消提示":
+                    uid = str(value or "").strip()
+                    button = QPushButton("取消提示")
+                    button.setEnabled(bool(uid))
+                    button.setProperty("uploader_id", uid)
+                    button.clicked.connect(self._dismiss_tian_can_creator_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("取消提示")
+                    item.setData(SORT_ROLE, uid.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
+                if header_text == "取消关注":
+                    payload = str(value or "").strip()
+                    uid, homepage_url = self._parse_tian_can_unfollow_payload(payload)
+                    button = QPushButton("取消关注")
+                    button.setEnabled(bool(uid and homepage_url))
+                    button.setProperty("uploader_id", uid)
+                    button.setProperty("homepage_url", homepage_url)
+                    button.clicked.connect(self._unfollow_tian_can_creator_from_button)
+                    table.setCellWidget(row_index, column_index, button)
+                    item = SortableTableWidgetItem("取消关注")
+                    item.setToolTip(homepage_url)
+                    item.setData(SORT_ROLE, uid.lower())
+                    table.setItem(row_index, column_index, item)
+                    continue
                 text = self._fmt(value)
                 item = SortableTableWidgetItem(text)
                 item.setToolTip(text)
@@ -1202,6 +1239,20 @@ class DouyinRatingOverviewDialog(QDialog):
         uid = str(button.property("uploader_id") or "").strip() if button else ""
         if uid:
             self._show_creator_detail(uid)
+
+    def _open_creator_homepage_from_button(self):
+        button = self.sender()
+        url = str(button.property("homepage_url") or "").strip() if button else ""
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    @staticmethod
+    def _parse_tian_can_unfollow_payload(payload):
+        text = str(payload or "").strip()
+        if "||" not in text:
+            return text, ""
+        uid, homepage_url = text.split("||", 1)
+        return str(uid or "").strip(), str(homepage_url or "").strip()
 
     def _open_link_item(self, item):
         url = item.data(Qt.UserRole) if item else ""
@@ -1408,6 +1459,55 @@ class DouyinRatingOverviewDialog(QDialog):
             return
         self.refresh_data()
         self.tabs.setCurrentWidget(self.creator_ladder_table)
+
+    def _dismiss_tian_can_creator_from_button(self):
+        button = self.sender()
+        uid = str(button.property("uploader_id") or "").strip() if button else ""
+        if not uid:
+            return
+        if getattr(self, "action_worker", None) and self.action_worker.isRunning():
+            return
+        _set_button_busy(button, "处理中...")
+        self.action_worker_button = button
+        self.action_worker = ApiCallThread("dismiss_tian_can_creator", uid, parent=self)
+        self.action_worker.completed.connect(self._on_dismiss_tian_can_creator_done)
+        self.action_worker.start()
+
+    def _on_dismiss_tian_can_creator_done(self, ok, _data, error):
+        _restore_button_busy(getattr(self, "action_worker_button", None))
+        if not ok:
+            QMessageBox.warning(self, "取消提示失败", f"取消提示失败：{error}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_low_table)
+
+    def _unfollow_tian_can_creator_from_button(self):
+        button = self.sender()
+        uid = str(button.property("uploader_id") or "").strip() if button else ""
+        homepage_url = str(button.property("homepage_url") or "").strip() if button else ""
+        if not uid or not homepage_url:
+            return
+        if getattr(self, "action_worker", None) and self.action_worker.isRunning():
+            return
+        _set_button_busy(button, "处理中...")
+        self.action_worker_button = button
+        self.action_worker = ApiCallThread(
+            "unfollow_tian_can_creator",
+            uid,
+            homepage_url,
+            timeout=180.0,
+            parent=self,
+        )
+        self.action_worker.completed.connect(self._on_unfollow_tian_can_creator_done)
+        self.action_worker.start()
+
+    def _on_unfollow_tian_can_creator_done(self, ok, _data, error):
+        _restore_button_busy(getattr(self, "action_worker_button", None))
+        if not ok:
+            QMessageBox.warning(self, "取消关注失败", f"取消关注失败：{error}")
+            return
+        self.refresh_data()
+        self.tabs.setCurrentWidget(self.creator_low_table)
 
 
 class LikeLineChartWidget(QWidget):
