@@ -114,6 +114,35 @@ def _json_safe(value):
     return value
 
 
+def _build_douyin_mode_stats(active_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    total_followings = len(active_rows)
+    modes: dict[str, dict[str, Any]] = {}
+    for mode in ("verify", "monitor", "full"):
+        column = f"has_{mode}_cache"
+        count = sum(1 for row in active_rows if _is_truthy_text(row.get(column)))
+        modes[mode] = {
+            "count": count,
+            "percent": (count / total_followings * 100) if total_followings else 0,
+        }
+
+    full_count = int((modes.get("full") or {}).get("count") or 0)
+    expired_count = sum(
+        1
+        for row in active_rows
+        if _is_truthy_text(row.get("has_full_cache"))
+        and _is_truthy_text(row.get("progress_cache_due"))
+    )
+    expired_count = min(expired_count, full_count)
+    modes["full"].update(
+        {
+            "valid_count": max(full_count - expired_count, 0),
+            "expired_count": expired_count,
+            "unfetched_count": max(total_followings - full_count, 0),
+        }
+    )
+    return modes
+
+
 def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, Any] | None:
     db_path = Path(config.export_store_db)
     if not db_path.exists():
@@ -140,8 +169,10 @@ def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, 
         if not required_columns.issubset(inventory_columns):
             return None
 
+        progress_due_column = "\u662f\u5426\u5df2\u5230\u671f"
+        progress_due_expr = f'"{progress_due_column}"' if progress_due_column in inventory_columns else "''"
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 "UP主UID" AS uploader_id,
                 "发布视频数量" AS published_video_count,
@@ -150,7 +181,8 @@ def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, 
                 "有进度缓存" AS has_progress_cache,
                 "有verify缓存" AS has_verify_cache,
                 "有monitor缓存" AS has_monitor_cache,
-                "有full缓存" AS has_full_cache
+                "有full缓存" AS has_full_cache,
+                {progress_due_expr} AS progress_cache_due
             FROM cache_inventory_current
             """
         ).fetchall()
@@ -162,15 +194,7 @@ def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, 
             and str(row["uploader_id"] or "").strip()
         ]
         total_followings = len(active_rows)
-
-        modes = {}
-        for mode in ("verify", "monitor", "full"):
-            column = f"has_{mode}_cache"
-            count = sum(1 for row in active_rows if _is_truthy_text(row.get(column)))
-            modes[mode] = {
-                "count": count,
-                "percent": (count / total_followings * 100) if total_followings else 0,
-            }
+        modes = _build_douyin_mode_stats(active_rows)
 
         creator_buckets = [
             ("0~50", 0, 50),
@@ -276,18 +300,7 @@ def _get_douyin_stats_from_cache(high_like_threshold: int = 10000) -> dict[str, 
         if isinstance(followings_payload, dict)
         else ""
     )
-
-    modes = {}
-    for mode in ("verify", "monitor", "full"):
-        flag_key = f"has_{mode}_cache"
-        count = sum(
-            1 for row in active_rows
-            if str((row or {}).get(flag_key, "")).strip() == "是"
-        )
-        modes[mode] = {
-            "count": count,
-            "percent": (count / total_followings * 100) if total_followings else 0,
-        }
+    modes = _build_douyin_mode_stats(active_rows)
 
     creator_buckets = [
         ("0~50", 0, 50),
@@ -636,7 +649,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
                     conn,
                     f"""
                     SELECT c."UP主姓名", c."UP最终等级", c."UP最终分", c."评级置信度",
-                           c."粉丝数", c."视频数量", c."UP主UID", c."UP主UID", c."UP主UID", {creator_homepage_expr}
+                           c."粉丝数", c."视频数量", c."UP主UID", c."UP主UID", {creator_homepage_expr}
                     FROM creator_score_current AS c
                     {ladder_eligible_join}
                     {ladder_manual_join}

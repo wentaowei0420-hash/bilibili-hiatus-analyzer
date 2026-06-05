@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config_defaults import get_config_defaults
 from . import gui_data
+from .douyin_video_count_stats import get_douyin_video_count_stats
 from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
 from .job_manager import JobManager
@@ -88,6 +89,13 @@ def douyin_stats(
     high_like_threshold: int = Query(default=10000, ge=0),
 ) -> dict[str, object]:
     return gui_data.get_douyin_stats(high_like_threshold)
+
+
+@app.get("/api/douyin/video-count-stats")
+def douyin_video_count_stats(
+    min_video_count: int = Query(default=1000, ge=0),
+) -> dict[str, object]:
+    return get_douyin_video_count_stats(min_video_count)
 
 
 @app.get("/api/douyin/rating-overview")

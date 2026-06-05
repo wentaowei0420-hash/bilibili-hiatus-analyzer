@@ -172,6 +172,12 @@ class BackendApiClient:
             f"/api/douyin/stats?{urlencode({'high_like_threshold': int(high_like_threshold)})}",
         )
 
+    def douyin_video_count_stats(self, min_video_count: int) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            f"/api/douyin/video-count-stats?{urlencode({'min_video_count': int(min_video_count)})}",
+        )
+
     def rating_overview(self, search_uid: str = "") -> dict[str, Any]:
         return self.request("GET", f"/api/douyin/rating-overview?{urlencode({'search_uid': search_uid})}")
 

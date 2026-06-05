@@ -197,7 +197,6 @@ def get_gui_metadata() -> dict[str, object]:
                     ("置信度", "confidence"),
                     ("粉丝数", "follower_count"),
                     ("作品数(缓存)", "video_count"),
-                    ("详情", "uploader_id"),
                     ("设为S级", "uploader_id"),
                     ("取消资格", "uploader_id"),
                     ("转到主页", "homepage_url"),

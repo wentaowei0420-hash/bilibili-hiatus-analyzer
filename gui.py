@@ -64,6 +64,7 @@ from gui_backend_client import (
     RatingRefreshThread,
     RunnerThread,
 )
+from gui_douyin_video_count_stats import DouyinVideoCountStatsDialog
 from gui_models import RunConfig
 
 
@@ -449,6 +450,7 @@ class DouyinStatsDialog(QDialog):
             title_label = QLabel(label)
             count_label = QLabel("-")
             percent_label = QLabel("-")
+            count_label.setWordWrap(True)
             count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             percent_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             stats_grid.addWidget(title_label, row_index, 0)
@@ -564,7 +566,6 @@ class DouyinStatsDialog(QDialog):
             return
         _show_douyin_stats_error(self, error)
 
-
 class DouyinStatsDialogV2(QDialog):
     MODE_ROWS = []
     CREATOR_VIDEO_BUCKETS = []
@@ -595,6 +596,7 @@ class DouyinStatsDialogV2(QDialog):
             title_label = QLabel(label)
             count_label = QLabel("-")
             percent_label = QLabel("-")
+            count_label.setWordWrap(True)
             count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             percent_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             stats_grid.addWidget(title_label, row_index, 0)
@@ -674,11 +676,14 @@ class DouyinStatsDialogV2(QDialog):
         layout.addWidget(self.refresh_info_label)
 
         button_row = QHBoxLayout()
+        self.count_stats_button = QPushButton("数量统计")
         self.refresh_button = QPushButton("刷新数据")
         self.close_button = QPushButton("关闭")
+        self.count_stats_button.clicked.connect(self._open_video_count_stats)
         self.refresh_button.clicked.connect(self.refresh_stats)
         self.close_button.clicked.connect(self.accept)
         button_row.addStretch(1)
+        button_row.addWidget(self.count_stats_button)
         button_row.addWidget(self.refresh_button)
         button_row.addWidget(self.close_button)
         layout.addLayout(button_row)
@@ -788,6 +793,10 @@ class DouyinStatsDialogV2(QDialog):
             return
         _show_douyin_stats_error(self, error)
 
+    def _open_video_count_stats(self):
+        dialog = DouyinVideoCountStatsDialog(self)
+        dialog.exec_()
+
 
 SORT_ROLE = Qt.UserRole + 1
 BUSY_BUTTON_STYLE = (
@@ -847,13 +856,49 @@ def _show_douyin_stats_error(dialog, error):
     )
 
 
+def _format_douyin_mode_count_text(mode, captured_count, mode_data):
+    if mode != "full":
+        return str(captured_count)
+    if not any(key in mode_data for key in ("valid_count", "expired_count", "unfetched_count")):
+        return str(captured_count)
+    valid_count = int(mode_data.get("valid_count") or 0)
+    expired_count = int(mode_data.get("expired_count") or 0)
+    unfetched_count = int(mode_data.get("unfetched_count") or 0)
+    return (
+        f"{captured_count}<br>"
+        "<span style='color:#666; font-size:11px;'>"
+        f"\u6709\u6548 {valid_count} / \u8fc7\u671f {expired_count} / "
+        f"\u672a\u6293\u53d6 {unfetched_count}"
+        "</span>"
+    )
+
+
+def _build_douyin_full_mode_summary(data):
+    mode_data = (data.get("modes") or {}).get("full") or {}
+    if not mode_data or not any(
+        key in mode_data for key in ("valid_count", "expired_count", "unfetched_count")
+    ):
+        return ""
+    valid_count = int(mode_data.get("valid_count") or 0)
+    expired_count = int(mode_data.get("expired_count") or 0)
+    unfetched_count = int(mode_data.get("unfetched_count") or 0)
+    return (
+        "\n"
+        f"\u5b8c\u6574\u6a21\u5f0f\u660e\u7ec6\uff1a\u6709\u6548\u535a\u4e3b {valid_count} \u4f4d\uff0c"
+        f"\u6570\u636e\u8fc7\u671f {expired_count} \u4f4d\uff0c"
+        f"\u672a\u6293\u53d6\u535a\u4e3b {unfetched_count} \u4f4d"
+    )
+
+
 def _apply_douyin_stats_dialog(dialog, data):
     total_followings = int(data.get("total_followings") or 0)
     for mode, _ in dialog.MODE_ROWS:
         mode_data = (data.get("modes") or {}).get(mode, {})
         captured_count = int(mode_data.get("count") or 0)
         percent = float(mode_data.get("percent") or 0)
-        dialog.mode_count_labels[mode].setText(str(captured_count))
+        dialog.mode_count_labels[mode].setText(
+            _format_douyin_mode_count_text(mode, captured_count, mode_data)
+        )
         dialog.mode_percent_labels[mode].setText(f"{percent:.2f}%")
 
     cached_video_count = int(data.get("cached_video_count") or 0)
@@ -884,6 +929,7 @@ def _apply_douyin_stats_dialog(dialog, data):
             f"当前关注博主总数：{total_followings} 位\n"
             f"关注列表缓存时间：{data.get('followings_cached_at') or '暂无'}\n"
             f"进度缓存条目：{data.get('progress_count') or 0} 条"
+            f"{_build_douyin_full_mode_summary(data)}"
         )
     else:
         dialog.summary_label.setText(

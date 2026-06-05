@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import gui_data
 from .config_defaults import get_config_defaults
+from .douyin_video_count_stats import get_douyin_video_count_stats
 from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
 from .job_manager import JobManager
@@ -49,6 +50,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(check_bilibili_cookie_status())
             elif path == "/api/douyin/stats":
                 self._json(gui_data.get_douyin_stats(_int_query(query, "high_like_threshold", 10000)))
+            elif path == "/api/douyin/video-count-stats":
+                self._json(get_douyin_video_count_stats(_int_query(query, "min_video_count", 1000)))
             elif path == "/api/douyin/rating-overview":
                 self._json(gui_data.get_rating_overview(_str_query(query, "search_uid", "")))
             elif path.startswith("/api/douyin/creator-detail/"):
