@@ -155,8 +155,6 @@ def _resolve_bilibili_mode(mode: str) -> tuple[str, bool]:
     mapping = {
         "precise_full": ("precise", True),
         "precise_main_only": ("precise", False),
-        "fallback_full": ("fallback", True),
-        "fallback_main_only": ("fallback", False),
     }
     return mapping.get((mode or "precise_full").strip().lower(), ("precise", True))
 

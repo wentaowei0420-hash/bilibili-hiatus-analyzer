@@ -46,6 +46,8 @@ class AnalyzerCacheRepository:
         if existing is None:
             return incoming
         existing.follower_count = max(existing.follower_count, incoming.follower_count)
+        existing.total_view_count = max(existing.total_view_count, incoming.total_view_count)
+        existing.total_favorited = max(existing.total_favorited, incoming.total_favorited)
         existing.published_video_count = max(
             existing.published_video_count,
             incoming.published_video_count,

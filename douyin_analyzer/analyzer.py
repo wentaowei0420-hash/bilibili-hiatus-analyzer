@@ -1357,7 +1357,7 @@ class DouyinHiatusAnalyzer:
 
         if use_followings_cache:
             if not cached_followings:
-                raise RuntimeError("抖音完整模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
+                raise RuntimeError("抖音完整模式需要先运行一次基础模式，生成关注列表缓存和 UP 主页链接。")
             followings = cached_followings
             self.reporter.message(
                 f"♻️  已复用 {len(followings)} 位抖音关注列表缓存，"
@@ -1386,7 +1386,7 @@ class DouyinHiatusAnalyzer:
                     raise
                 if fetch_mode == "counts":
                     self.reporter.message(
-                        "❌ 基础统计模式要求先成功打开浏览器并刷新最新关注列表；"
+                        "❌ 基础模式要求先成功打开浏览器并刷新最新关注列表；"
                         f"本次浏览器启动或页面连接失败，已停止运行: {exc}"
                     )
                     logger.error(
@@ -1518,7 +1518,7 @@ class DouyinHiatusAnalyzer:
 
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
-            self.reporter.message("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
+            self.reporter.message("📇 当前为基础模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
         else:
             self.reporter.message("📚 当前为全量模式：会抓取博主全部作品，并生成完整时长分析。")
         if fetch_mode != "counts":

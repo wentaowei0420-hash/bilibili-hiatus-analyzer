@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config_defaults import get_config_defaults
 from . import gui_data
+from .bilibili_stats import get_bilibili_stats, get_bilibili_video_count_stats
 from .douyin_video_count_stats import get_douyin_video_count_stats
 from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
@@ -77,6 +78,20 @@ def gui_metadata() -> dict[str, object]:
 @app.get("/api/bilibili/cookie-status")
 def bilibili_cookie_status() -> dict[str, object]:
     return check_bilibili_cookie_status()
+
+
+@app.get("/api/bilibili/stats")
+def bilibili_stats(
+    high_like_threshold: int = Query(default=10000, ge=0),
+) -> dict[str, object]:
+    return get_bilibili_stats(high_like_threshold)
+
+
+@app.get("/api/bilibili/video-count-stats")
+def bilibili_video_count_stats(
+    min_video_count: int = Query(default=1000, ge=0),
+) -> dict[str, object]:
+    return get_bilibili_video_count_stats(min_video_count)
 
 
 @app.get("/api/douyin/stats")

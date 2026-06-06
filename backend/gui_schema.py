@@ -96,16 +96,14 @@ def get_gui_metadata() -> dict[str, object]:
         "main_window": {
             "bilibili_modes": _options(
                 [
-                    ("精确模式（主榜 + 视频分析）", "precise_full"),
-                    ("精确模式（仅主榜）", "precise_main_only"),
-                    ("回退模式（主榜 + 视频分析）", "fallback_full"),
-                    ("回退模式（仅主榜）", "fallback_main_only"),
+                    ("基础模式", "precise_main_only"),
+                    ("完整模式", "precise_full"),
                 ]
             ),
             "douyin_modes": _options(
                 [
-                    ("基础统计模式（粉丝数/获赞总数/视频数）", "counts"),
-                    ("完整模式（抓取视频明细）", "full"),
+                    ("基础模式", "counts"),
+                    ("完整模式", "full"),
                 ]
             ),
             "browser_backends": _options(
@@ -138,7 +136,7 @@ def get_gui_metadata() -> dict[str, object]:
         "stats": {
             "modes": _options(
                 [
-                    ("基础统计模式", "counts"),
+                    ("基础模式", "counts"),
                     ("完整模式", "full"),
                 ]
             ),

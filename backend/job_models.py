@@ -101,7 +101,7 @@ class FetchOrderSettings(BaseModel):
 class JobCreateRequest(BaseModel):
     kind: JobKind
     action: AnalysisAction = AnalysisAction.FETCH
-    bilibili_mode: str = "precise_full"
+    bilibili_mode: str = "precise_main_only"
     douyin_fetch_mode: str = "counts"
     douyin_backend: str = "drission"
     douyin_browser_name: str = "edge"

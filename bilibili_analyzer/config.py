@@ -35,6 +35,7 @@ class AnalyzerConfig:
     cookie: str
     followings_api: str
     relation_stat_api: str
+    upstat_api: str
     following_tags_api: str
     space_dynamic_api: str
     space_wbi_arc_search_api: str
@@ -139,6 +140,7 @@ def load_analyzer_config() -> AnalyzerConfig:
         cookie=os.getenv("BILIBILI_COOKIE", ""),
         followings_api="https://api.bilibili.com/x/relation/followings",
         relation_stat_api="https://api.bilibili.com/x/relation/stat",
+        upstat_api="https://api.bilibili.com/x/space/upstat",
         following_tags_api="https://api.bilibili.com/x/relation/tags",
         space_dynamic_api="https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
         space_wbi_arc_search_api="https://api.bilibili.com/x/space/wbi/arc/search",

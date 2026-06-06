@@ -34,6 +34,7 @@ class CreatorProfile:
     uploader_name: str
     homepage: str = ""
     follower_count: int = 0
+    total_view_count: int = 0
     published_video_count: int = 0
     total_favorited: int = 0
     average_like_count: int = 0
@@ -59,6 +60,10 @@ class CreatorProfile:
             ),
             homepage=str(data.get("uploader_homepage") or data.get("homepage") or ""),
             follower_count=_safe_int(data.get("follower_count")),
+            total_view_count=_safe_int(
+                data.get("total_view_count")
+                or data.get("archive_view_count")
+            ),
             published_video_count=_safe_int(
                 data.get("published_video_count")
                 or data.get("aweme_count")
@@ -89,6 +94,8 @@ class VideoEntry:
     duration_seconds: int = 0
     duration_text: str = ""
     like_count: int = 0
+    coin_count: int = 0
+    favorite_count: int = 0
     view_count: int = 0
     url: str = ""
 
@@ -105,6 +112,8 @@ class VideoEntry:
             duration_seconds=_safe_int(data.get("duration_seconds")),
             duration_text=str(data.get("duration_text") or ""),
             like_count=_safe_int(data.get("like_count")),
+            coin_count=_safe_int(data.get("coin_count")),
+            favorite_count=_safe_int(data.get("favorite_count")),
             view_count=_safe_int(data.get("view_count")),
             url=str(data.get("video_url") or data.get("url") or ""),
         )
@@ -128,6 +137,7 @@ class AnalysisResult:
     following_group_names: str = ""
     following_remark: str = ""
     follower_count: int = 0
+    total_view_count: Any = ""
     total_favorited: Any = ""
     published_video_count: int = 0
     average_like_count: int = 0
@@ -158,6 +168,10 @@ class AnalysisResult:
             following_group_names=str(data.get("following_group_names") or ""),
             following_remark=str(data.get("following_remark") or ""),
             follower_count=_safe_int(data.get("follower_count")),
+            total_view_count=data.get(
+                "total_view_count",
+                data.get("archive_view_count", ""),
+            ),
             total_favorited=data.get("total_favorited", ""),
             published_video_count=_safe_int(data.get("published_video_count") or data.get("total_videos")),
             average_like_count=_safe_int(data.get("average_like_count")),
@@ -175,6 +189,10 @@ class AnalysisResult:
         data = asdict(self)
         if not include_platform:
             data.pop("platform", None)
+        if self.total_view_count == "":
+            data.pop("total_view_count", None)
+        if self.total_favorited == "":
+            data.pop("total_favorited", None)
         return data
 
 

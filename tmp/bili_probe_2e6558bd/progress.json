@@ -1,0 +1,28 @@
+{
+  "saved_at": "2026-06-06 21:53:34",
+  "results_by_mid": {
+    "8026753": {
+      "uploader_id": "8026753",
+      "uploader_name": "????",
+      "days_since_update": 1293,
+      "upload_date": "2022-11-21 19:03:14",
+      "uploader_homepage": "https://space.bilibili.com/8026753",
+      "following_group_ids": "359361792",
+      "following_group_names": "????",
+      "following_remark": "",
+      "follower_count": 162434,
+      "total_favorited": "",
+      "published_video_count": 0,
+      "average_like_count": 0,
+      "average_update_interval_days": null,
+      "latest_video_title": "Bingle Bangle-AOA??????",
+      "upload_timestamp": 1669028594,
+      "activity_timestamp": "",
+      "days_since_last_video": 1293,
+      "view_count": 52965,
+      "video_url": "https://www.bilibili.com/video/BV1AG4y1Z7G2",
+      "data_source": "video_api",
+      "cached_at": 1780754014
+    }
+  }
+}

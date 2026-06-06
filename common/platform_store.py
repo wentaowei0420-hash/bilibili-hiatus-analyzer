@@ -32,6 +32,16 @@ def _summary_table(platform):
     return f"{platform}_summary_current"
 
 
+def _ensure_columns(conn, table_name, columns):
+    existing_columns = {
+        str(row[1])
+        for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    }
+    for column_name, column_type in columns:
+        if column_name not in existing_columns:
+            conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_type}')
+
+
 def ensure_platform_schema(db_path, platform):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +76,9 @@ def ensure_platform_schema(db_path, platform):
                 uploader_name TEXT,
                 publish_timestamp INTEGER,
                 like_count INTEGER,
+                coin_count INTEGER,
+                favorite_count INTEGER,
+                view_count INTEGER,
                 duration_seconds INTEGER,
                 source_mode TEXT,
                 first_seen_at TEXT NOT NULL,
@@ -76,6 +89,15 @@ def ensure_platform_schema(db_path, platform):
                 updated_at TEXT NOT NULL
             )
             """
+        )
+        _ensure_columns(
+            conn,
+            _video_state_table(platform),
+            [
+                ("coin_count", "INTEGER"),
+                ("favorite_count", "INTEGER"),
+                ("view_count", "INTEGER"),
+            ],
         )
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{platform}_video_state_uploader" '
@@ -165,6 +187,9 @@ def upsert_video_state_rows(
             uploader_name = str(row.get(uploader_name_column) or row.get("author_name") or "").strip()
             publish_timestamp = _safe_int(row.get("publish_timestamp") or row.get("create_time"))
             like_count = _safe_int(row.get("like_count"), 0)
+            coin_count = _safe_int(row.get("coin_count"), 0)
+            favorite_count = _safe_int(row.get("favorite_count"), 0)
+            view_count = _safe_int(row.get("view_count"), 0)
             duration_seconds = _safe_int(row.get("duration_seconds"))
             metadata = row.get("metadata")
             metadata_json = json.dumps(metadata, ensure_ascii=False) if isinstance(metadata, (dict, list)) else None
@@ -176,6 +201,9 @@ def upsert_video_state_rows(
                     uploader_name,
                     publish_timestamp,
                     like_count,
+                    coin_count,
+                    favorite_count,
+                    view_count,
                     duration_seconds,
                     source_mode,
                     first_seen_at,
@@ -185,12 +213,15 @@ def upsert_video_state_rows(
                     metadata_json,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(video_id) DO UPDATE SET
                     uploader_id=COALESCE(NULLIF(excluded.uploader_id, ''), "{_video_state_table(platform)}".uploader_id),
                     uploader_name=COALESCE(NULLIF(excluded.uploader_name, ''), "{_video_state_table(platform)}".uploader_name),
                     publish_timestamp=COALESCE(excluded.publish_timestamp, "{_video_state_table(platform)}".publish_timestamp),
                     like_count=COALESCE(excluded.like_count, "{_video_state_table(platform)}".like_count),
+                    coin_count=COALESCE(excluded.coin_count, "{_video_state_table(platform)}".coin_count),
+                    favorite_count=COALESCE(excluded.favorite_count, "{_video_state_table(platform)}".favorite_count),
+                    view_count=COALESCE(excluded.view_count, "{_video_state_table(platform)}".view_count),
                     duration_seconds=COALESCE(excluded.duration_seconds, "{_video_state_table(platform)}".duration_seconds),
                     source_mode=CASE
                         WHEN LOWER(COALESCE("{_video_state_table(platform)}".source_mode, '')) = 'full'
@@ -210,6 +241,9 @@ def upsert_video_state_rows(
                     uploader_name,
                     publish_timestamp,
                     like_count,
+                    coin_count,
+                    favorite_count,
+                    view_count,
                     duration_seconds,
                     source_mode,
                     now_text,

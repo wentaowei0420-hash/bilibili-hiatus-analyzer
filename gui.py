@@ -62,7 +62,13 @@ from gui_backend_client import (
     RatingRefreshThread,
     RunnerThread,
 )
+from gui_bilibili_stats import BilibiliStatsDialog
 from gui_douyin_video_count_stats import DouyinVideoCountStatsDialog
+from gui_quick_feature_module import (
+    format_interval_text,
+    load_platform_quick_settings,
+    snapshot_platform_quick_settings,
+)
 from gui_models import RunConfig
 
 
@@ -529,7 +535,7 @@ class DouyinStatsDialog(QDialog):
                 )
             else:
                 self.summary_label.setText(
-                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看模式完成度。"
+                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础模式，再查看模式完成度。"
                 )
 
             self.refresh_info_label.setText(
@@ -750,7 +756,7 @@ class DouyinStatsDialogV2(QDialog):
                 )
             else:
                 self.summary_label.setText(
-                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看统计信息。"
+                    "当前没有可用的抖音关注缓存数据。\n请先运行一次基础模式，再查看统计信息。"
                 )
 
             self.refresh_info_label.setText(
@@ -928,7 +934,7 @@ def _apply_douyin_stats_dialog(dialog, data):
         )
     else:
         dialog.summary_label.setText(
-            "当前没有可用的抖音关注缓存数据。\n请先运行一次基础统计模式，再查看统计信息。"
+            "当前没有可用的抖音关注缓存数据。\n请先运行一次基础模式，再查看统计信息。"
         )
 
     dialog.refresh_info_label.setText(
@@ -2751,9 +2757,13 @@ class MainWindow(QMainWindow):
             self.fetch_order_settings = _load_default_fetch_order_settings()
             self.douyin_full_fetch_retry_on_mismatch = True
             self._config_defaults_error = str(exc)
+        self.bilibili_auto_full_enabled = False
+        self.bilibili_auto_full_next_run_at = None
         self.auto_full_enabled = False
         self.auto_full_next_run_at = None
         self._loading_gui_config = False
+        self.bilibili_auto_full_timer = QTimer(self)
+        self.bilibili_auto_full_timer.timeout.connect(self._on_bilibili_auto_full_timer)
         self.auto_full_timer = QTimer(self)
         self.auto_full_timer.timeout.connect(self._on_auto_full_timer)
         self._progress_current = 0
@@ -2766,6 +2776,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_gui_config()
         self._sync_visible_options()
+        self._sync_bilibili_auto_full_timer()
         self._sync_auto_full_timer()
         if self._gui_metadata_error:
             self._append_log(f"读取后端 GUI 元数据失败：{self._gui_metadata_error}")
@@ -2863,6 +2874,27 @@ class MainWindow(QMainWindow):
         for label, mode in self.BILIBILI_MODE_OPTIONS:
             self.bilibili_mode_combo.addItem(label, mode)
         self.bilibili_mode_combo.setCurrentIndex(0)
+        self.bilibili_uid_fetch_mode_button = QPushButton()
+        self.bilibili_uid_fetch_mode_button.setCheckable(True)
+        self.bilibili_uid_fetch_mode_button.setChecked(False)
+        self.bilibili_uid_fetch_mode_button.setToolTip(
+            "点击切换全抓取/部分抓取。部分抓取只处理排序后的前 N 个 B站 UID。"
+        )
+        self.bilibili_uid_fetch_mode_button.toggled.connect(self._on_bilibili_uid_fetch_mode_toggled)
+        self._sync_bilibili_uid_fetch_mode_button()
+        self.bilibili_uid_limit_spin = QSpinBox()
+        self.bilibili_uid_limit_spin.setRange(1, 100000)
+        self.bilibili_uid_limit_spin.setValue(100)
+        self.bilibili_uid_limit_spin.setToolTip("部分抓取模式下生效；全抓取模式会忽略该数量。")
+        self.bilibili_auto_full_button = QPushButton("自动完整：关闭")
+        self.bilibili_auto_full_button.setToolTip("开启后按左侧间隔自动运行一次 B站完整模式；任务运行中会跳过当次触发。")
+        self.bilibili_auto_full_button.clicked.connect(self._toggle_bilibili_auto_full_mode)
+        self.bilibili_auto_full_interval_spin = QSpinBox()
+        self.bilibili_auto_full_interval_spin.setRange(1, 10080)
+        self.bilibili_auto_full_interval_spin.setValue(DEFAULT_AUTO_FULL_INTERVAL_MINUTES)
+        self.bilibili_auto_full_interval_spin.setSuffix(" 分钟")
+        self.bilibili_auto_full_interval_spin.setToolTip("自动完整模式的触发间隔。修改后会立即保存，并在已开启时重新计算下一次触发时间。")
+        self.bilibili_auto_full_interval_spin.valueChanged.connect(self._on_bilibili_auto_full_interval_changed)
 
         self.douyin_mode_combo = QComboBox()
         for label, mode in self.DOUYIN_MODE_OPTIONS:
@@ -2870,7 +2902,6 @@ class MainWindow(QMainWindow):
         default_douyin_index = self.douyin_mode_combo.findData("counts")
         self.douyin_mode_combo.setCurrentIndex(default_douyin_index if default_douyin_index >= 0 else 0)
         self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
-        add_setting(1, "B站抓取模式", self.bilibili_mode_combo)
 
         self.backend_combo = QComboBox()
         for label, value in self.BROWSER_BACKEND_OPTIONS:
@@ -2939,6 +2970,8 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.video_download_button = QPushButton("视频下载")
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
+        self.bilibili_stats_button = QPushButton("B站统计")
+        self.bilibili_stats_button.clicked.connect(self._open_bilibili_stats)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.douyin_rating_button = QPushButton("抖音评分")
@@ -2965,17 +2998,22 @@ class MainWindow(QMainWindow):
         toolbar_buttons = (
             self.start_button,
             self.stop_button,
-            self.video_download_button,
             self.log_center_button,
-            self.cookie_check_button,
             self.advanced_button,
             self.lock_button,
             self.clear_button,
+        )
+        bilibili_quick_buttons = (
+            self.bilibili_stats_button,
+            self.cookie_check_button,
+            self.bilibili_auto_full_button,
+            self.bilibili_uid_fetch_mode_button,
         )
         douyin_quick_buttons = (
             self.douyin_stats_button,
             self.douyin_rating_button,
             self.rating_overview_button,
+            self.video_download_button,
             self.archive_button,
             self.douyin_status_reset_button,
             self.liked_video_cache_button,
@@ -2983,7 +3021,7 @@ class MainWindow(QMainWindow):
             self.auto_full_button,
             self.uid_fetch_mode_button,
         )
-        for button in toolbar_buttons + douyin_quick_buttons:
+        for button in toolbar_buttons + bilibili_quick_buttons + douyin_quick_buttons:
             button.setMinimumWidth(0)
             button.setMaximumWidth(16777215)
             button.setMinimumHeight(28)
@@ -2992,6 +3030,57 @@ class MainWindow(QMainWindow):
         for index, button in enumerate(toolbar_buttons):
             button_grid.addWidget(button, index // 8, index % 8)
         controls_layout.addLayout(button_grid)
+
+        bilibili_quick_group = QGroupBox("B站快捷操作")
+        bilibili_quick_layout = QVBoxLayout(bilibili_quick_group)
+        bilibili_quick_layout.setContentsMargins(12, 18, 12, 12)
+        bilibili_quick_layout.setSpacing(10)
+        bilibili_settings_grid = QGridLayout()
+        bilibili_settings_grid.setHorizontalSpacing(12)
+        bilibili_settings_grid.setVerticalSpacing(8)
+        bilibili_settings_grid.setColumnMinimumWidth(0, 92)
+        bilibili_settings_grid.setColumnStretch(1, 1)
+        bilibili_mode_label = QLabel("B站抓取模式")
+        bilibili_mode_label.setMinimumHeight(28)
+        self.bilibili_mode_combo.setMinimumWidth(0)
+        self.bilibili_mode_combo.setMaximumWidth(16777215)
+        self.bilibili_mode_combo.setMinimumHeight(28)
+        self.bilibili_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bilibili_settings_grid.addWidget(bilibili_mode_label, 0, 0)
+        bilibili_settings_grid.addWidget(self.bilibili_mode_combo, 0, 1)
+        bilibili_metric_grid = QGridLayout()
+        bilibili_metric_grid.setHorizontalSpacing(10)
+        bilibili_metric_grid.setVerticalSpacing(0)
+        bilibili_metric_items = (
+            ("UID 数量", self.bilibili_uid_limit_spin),
+            ("自动间隔", self.bilibili_auto_full_interval_spin),
+        )
+        for column, (label_text, widget) in enumerate(bilibili_metric_items):
+            label = QLabel(label_text)
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumHeight(28)
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
+            widget.setMinimumHeight(28)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            bilibili_metric_grid.setColumnStretch(column * 2, 0)
+            bilibili_metric_grid.setColumnStretch(column * 2 + 1, 1)
+            bilibili_metric_grid.addWidget(label, 0, column * 2)
+            bilibili_metric_grid.addWidget(widget, 0, column * 2 + 1)
+        bilibili_settings_grid.addLayout(bilibili_metric_grid, 1, 0, 1, 2)
+        bilibili_quick_layout.addLayout(bilibili_settings_grid)
+
+        bilibili_button_grid = QGridLayout()
+        bilibili_button_grid.setHorizontalSpacing(10)
+        bilibili_button_grid.setVerticalSpacing(8)
+        for column in range(8):
+            bilibili_button_grid.setColumnStretch(column, 1)
+        bilibili_button_grid.addWidget(self.bilibili_stats_button, 0, 0)
+        bilibili_button_grid.addWidget(self.cookie_check_button, 0, 1)
+        bilibili_button_grid.addWidget(self.bilibili_auto_full_button, 0, 2)
+        bilibili_button_grid.addWidget(self.bilibili_uid_fetch_mode_button, 0, 3)
+        bilibili_quick_layout.addLayout(bilibili_button_grid)
+        controls_layout.addWidget(bilibili_quick_group)
 
         douyin_quick_group = QGroupBox("抖音快捷操作")
         douyin_quick_layout = QVBoxLayout(douyin_quick_group)
@@ -3069,6 +3158,7 @@ class MainWindow(QMainWindow):
             (self.auto_full_button, 0, 6),
             (self.uid_fetch_mode_button, 0, 7),
             (self.douyin_rating_button, 1, 0),
+            (self.video_download_button, 1, 1),
         )
         for button, row, column in douyin_button_positions:
             douyin_button_grid.addWidget(button, row, column)
@@ -3109,6 +3199,23 @@ class MainWindow(QMainWindow):
         self._sync_uid_fetch_mode_button()
         self._sync_visible_options()
 
+    def _on_bilibili_uid_fetch_mode_toggled(self, _checked):
+        self._sync_bilibili_uid_fetch_mode_button()
+        self._sync_visible_options()
+
+    def _sync_bilibili_uid_fetch_mode_button(self):
+        if not hasattr(self, "bilibili_uid_fetch_mode_button"):
+            return
+        base_style = "font-size: 13px; padding: 3px 8px;"
+        if self.bilibili_uid_fetch_mode_button.isChecked():
+            self.bilibili_uid_fetch_mode_button.setText("部分抓取")
+            self.bilibili_uid_fetch_mode_button.setStyleSheet(
+                f"{base_style} font-weight: 700; color: #1565c0;"
+            )
+        else:
+            self.bilibili_uid_fetch_mode_button.setText("全抓取")
+            self.bilibili_uid_fetch_mode_button.setStyleSheet(base_style)
+
     def _sync_uid_fetch_mode_button(self):
         if not hasattr(self, "uid_fetch_mode_button"):
             return
@@ -3129,7 +3236,11 @@ class MainWindow(QMainWindow):
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
-        self.bilibili_mode_combo.setEnabled(editable and is_bilibili)
+        self.bilibili_mode_combo.setEnabled(editable)
+        self.bilibili_uid_fetch_mode_button.setEnabled(editable)
+        self.bilibili_uid_limit_spin.setEnabled(editable and self.bilibili_uid_fetch_mode_button.isChecked())
+        self.bilibili_auto_full_button.setEnabled(editable)
+        self.bilibili_auto_full_interval_spin.setEnabled(editable)
         self.douyin_mode_combo.setEnabled(editable and is_douyin and platform != "douyin_unfollow")
         self.backend_combo.setEnabled(editable and is_douyin)
         self.douyin_browser_combo.setEnabled(editable and is_douyin)
@@ -3155,15 +3266,22 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, message)
 
     def _collect_config(self):
+        platform = self.platform_combo.currentData()
+        if platform == "bilibili":
+            uid_limit_enabled = self.bilibili_uid_fetch_mode_button.isChecked()
+            uid_limit = self.bilibili_uid_limit_spin.value()
+        else:
+            uid_limit_enabled = self.uid_fetch_mode_button.isChecked()
+            uid_limit = self.uid_limit_spin.value()
         return RunConfig(
-            platform=self.platform_combo.currentData(),
+            platform=platform,
             action=self.action_combo.currentData(),
             bilibili_mode=self.bilibili_mode_combo.currentData(),
             douyin_fetch_mode=self.douyin_mode_combo.currentData(),
             douyin_backend=self.backend_combo.currentData(),
             douyin_browser_name=self.douyin_browser_combo.currentData(),
-            uid_limit_enabled=self.uid_fetch_mode_button.isChecked(),
-            uid_limit=self.uid_limit_spin.value(),
+            uid_limit_enabled=uid_limit_enabled,
+            uid_limit=uid_limit,
             high_like_threshold=self.high_like_spin.value(),
             douyin_full_fetch_retry_on_mismatch=self.full_fetch_retry_button.isChecked(),
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
@@ -3179,7 +3297,7 @@ class MainWindow(QMainWindow):
         return -1
 
     def _snapshot_gui_config(self):
-        return {
+        snapshot = {
             "locked": self.config_locked,
             "platform": self.platform_combo.currentData(),
             "action": self.action_combo.currentData(),
@@ -3187,17 +3305,32 @@ class MainWindow(QMainWindow):
             "douyin_fetch_mode": self.douyin_mode_combo.currentData(),
             "douyin_backend": self.backend_combo.currentData(),
             "douyin_browser_name": self.douyin_browser_combo.currentData(),
-            "uid_limit_enabled": self.uid_fetch_mode_button.isChecked(),
-            "uid_limit": self.uid_limit_spin.value(),
             "high_like_threshold": self.high_like_spin.value(),
             "douyin_full_fetch_retry_on_mismatch": self.full_fetch_retry_button.isChecked(),
             "unfollow_list_path": self.unfollow_list_path,
             "bilibili_runtime_settings": self.bilibili_runtime_settings,
             "douyin_runtime_settings": self.douyin_runtime_settings,
             "fetch_order_settings": self.fetch_order_settings,
-            "auto_full_enabled": self.auto_full_enabled,
-            "auto_full_interval_minutes": self.auto_full_interval_spin.value(),
         }
+        snapshot.update(
+            snapshot_platform_quick_settings(
+                "bilibili",
+                uid_limit_enabled=self.bilibili_uid_fetch_mode_button.isChecked(),
+                uid_limit=self.bilibili_uid_limit_spin.value(),
+                auto_mode_enabled=self.bilibili_auto_full_enabled,
+                auto_interval_minutes=self.bilibili_auto_full_interval_spin.value(),
+            )
+        )
+        snapshot.update(
+            snapshot_platform_quick_settings(
+                "douyin",
+                uid_limit_enabled=self.uid_fetch_mode_button.isChecked(),
+                uid_limit=self.uid_limit_spin.value(),
+                auto_mode_enabled=self.auto_full_enabled,
+                auto_interval_minutes=self.auto_full_interval_spin.value(),
+            )
+        )
+        return snapshot
 
     def _save_gui_config(self):
         save_gui_config(self._snapshot_gui_config())
@@ -3226,17 +3359,35 @@ class MainWindow(QMainWindow):
                 if index >= 0:
                     combo.setCurrentIndex(index)
 
-            self.uid_fetch_mode_button.setChecked(bool(data.get("uid_limit_enabled", False)))
+            bilibili_quick = load_platform_quick_settings(
+                data,
+                "bilibili",
+                default_uid_limit=self.bilibili_uid_limit_spin.value(),
+                default_interval_minutes=self.bilibili_auto_full_interval_spin.value(),
+            )
+            self.bilibili_uid_fetch_mode_button.setChecked(bilibili_quick.uid_limit_enabled)
+            self._sync_bilibili_uid_fetch_mode_button()
+            self.bilibili_uid_limit_spin.setValue(bilibili_quick.uid_limit)
+            douyin_quick = load_platform_quick_settings(
+                data,
+                "douyin",
+                default_uid_limit=self.uid_limit_spin.value(),
+                default_interval_minutes=self.auto_full_interval_spin.value(),
+                legacy_uid_enabled_keys=("uid_limit_enabled",),
+                legacy_uid_value_keys=("uid_limit",),
+                legacy_auto_enabled_keys=("auto_full_enabled",),
+                legacy_auto_interval_keys=("auto_full_interval_minutes",),
+            )
+            self.uid_fetch_mode_button.setChecked(douyin_quick.uid_limit_enabled)
             self._sync_uid_fetch_mode_button()
-            self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
+            self.uid_limit_spin.setValue(douyin_quick.uid_limit)
             self.high_like_spin.setValue(
                 int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
             )
             if "douyin_full_fetch_retry_on_mismatch" in data:
                 self.full_fetch_retry_button.setChecked(bool(data.get("douyin_full_fetch_retry_on_mismatch")))
-            self.auto_full_interval_spin.setValue(
-                int(data.get("auto_full_interval_minutes", self.auto_full_interval_spin.value()) or self.auto_full_interval_spin.value())
-            )
+            self.bilibili_auto_full_interval_spin.setValue(bilibili_quick.auto_interval_minutes)
+            self.auto_full_interval_spin.setValue(douyin_quick.auto_interval_minutes)
             self.unfollow_list_path = data.get("unfollow_list_path") or str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
 
             saved_bilibili = data.get("bilibili_runtime_settings", {}) or {}
@@ -3260,7 +3411,8 @@ class MainWindow(QMainWindow):
             )
 
             self.config_locked = bool(data.get("locked", False))
-            self.auto_full_enabled = bool(data.get("auto_full_enabled", False))
+            self.bilibili_auto_full_enabled = bilibili_quick.auto_mode_enabled
+            self.auto_full_enabled = douyin_quick.auto_mode_enabled
         finally:
             self._loading_gui_config = False
 
@@ -3294,6 +3446,123 @@ class MainWindow(QMainWindow):
             self._append_log(f"配置已锁定，后续将按当前参数运行。配置文件: {GUI_CONFIG_PATH}")
         self._sync_visible_options()
 
+    def _bilibili_auto_full_interval_minutes(self):
+        if not hasattr(self, "bilibili_auto_full_interval_spin"):
+            return DEFAULT_AUTO_FULL_INTERVAL_MINUTES
+        return max(
+            1,
+            int(
+                self.bilibili_auto_full_interval_spin.value()
+                or DEFAULT_AUTO_FULL_INTERVAL_MINUTES
+            ),
+        )
+
+    def _bilibili_auto_full_interval_ms(self):
+        return self._bilibili_auto_full_interval_minutes() * 60 * 1000
+
+    def _bilibili_auto_full_interval_text(self):
+        return format_interval_text(
+            self._bilibili_auto_full_interval_minutes(),
+            DEFAULT_AUTO_FULL_INTERVAL_MINUTES,
+        )
+
+    def _schedule_next_bilibili_auto_full_run(self):
+        self.bilibili_auto_full_timer.setInterval(self._bilibili_auto_full_interval_ms())
+        self.bilibili_auto_full_next_run_at = (
+            datetime.now().timestamp() + self._bilibili_auto_full_interval_minutes() * 60
+        )
+        if self.bilibili_auto_full_timer.isActive():
+            self.bilibili_auto_full_timer.stop()
+        if self.bilibili_auto_full_enabled:
+            self.bilibili_auto_full_timer.start()
+
+    def _on_bilibili_auto_full_interval_changed(self, _value):
+        if self._loading_gui_config:
+            return
+        if self.bilibili_auto_full_enabled:
+            self._schedule_next_bilibili_auto_full_run()
+            self._append_log(
+                f"B站自动完整模式间隔已改为 {self._bilibili_auto_full_interval_text()}，下一次触发时间已重新计算。"
+            )
+        self._save_gui_config()
+        self._sync_bilibili_auto_full_timer()
+
+    def _toggle_bilibili_auto_full_mode(self):
+        self.bilibili_auto_full_enabled = not self.bilibili_auto_full_enabled
+        if self.bilibili_auto_full_enabled:
+            self._schedule_next_bilibili_auto_full_run()
+            self._append_log(
+                f"B站自动完整模式已开启：每 {self._bilibili_auto_full_interval_text()} 按当前 B站参数运行一次。"
+            )
+        else:
+            self.bilibili_auto_full_next_run_at = None
+            self.bilibili_auto_full_timer.stop()
+            self._append_log("B站自动完整模式已关闭。")
+        self._save_gui_config()
+        self._sync_bilibili_auto_full_timer()
+
+    def _sync_bilibili_auto_full_timer(self):
+        if not hasattr(self, "bilibili_auto_full_button"):
+            return
+        if self.bilibili_auto_full_enabled:
+            self.bilibili_auto_full_timer.setInterval(self._bilibili_auto_full_interval_ms())
+            if not self.bilibili_auto_full_timer.isActive():
+                self.bilibili_auto_full_timer.start()
+            if self.bilibili_auto_full_next_run_at is None:
+                self.bilibili_auto_full_next_run_at = (
+                    datetime.now().timestamp() + self._bilibili_auto_full_interval_minutes() * 60
+                )
+            next_time = datetime.fromtimestamp(self.bilibili_auto_full_next_run_at).strftime("%H:%M")
+            self.bilibili_auto_full_button.setText(
+                f"自动完整：开启（{next_time} / {self._bilibili_auto_full_interval_minutes()}分）"
+            )
+            self.bilibili_auto_full_button.setStyleSheet("font-weight: 700; color: #1565c0;")
+        else:
+            self.bilibili_auto_full_timer.stop()
+            self.bilibili_auto_full_button.setText("自动完整：关闭")
+            self.bilibili_auto_full_button.setStyleSheet("")
+
+    def _on_bilibili_auto_full_timer(self):
+        if not self.bilibili_auto_full_enabled:
+            return
+        self.bilibili_auto_full_next_run_at = (
+            datetime.now().timestamp() + self._bilibili_auto_full_interval_minutes() * 60
+        )
+        self._sync_bilibili_auto_full_timer()
+        self._start_bilibili_auto_full_run()
+
+    def _start_bilibili_auto_full_run(self):
+        if self.worker and self.worker.isRunning():
+            self._append_log("B站自动完整触发时已有任务运行，本次跳过。")
+            return
+
+        config = self._collect_config()
+        config.platform = "bilibili"
+        config.action = "fetch"
+        config.bilibili_mode = "precise_full"
+        config.uid_limit_enabled = self.bilibili_uid_fetch_mode_button.isChecked()
+        config.uid_limit = self.bilibili_uid_limit_spin.value()
+        if not self._validate_config(config):
+            self._append_log("B站自动完整触发失败：当前配置校验未通过。")
+            return
+        if self.config_locked:
+            self._save_gui_config()
+
+        self.log_text.clear()
+        self._append_log("B站自动完整定时触发：开始运行 B站完整模式。")
+        self._start_task_progress("B站自动完整已启动，正在等待抓取总数...")
+        self.start_button.setEnabled(False)
+        self.start_button.setText("运行中...")
+        self.liked_video_cache_button.setEnabled(False)
+        self.douyin_rating_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
+        self.worker = RunnerThread(config)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
+
     def _auto_full_interval_minutes(self):
         if not hasattr(self, "auto_full_interval_spin"):
             return DEFAULT_AUTO_FULL_INTERVAL_MINUTES
@@ -3303,15 +3572,10 @@ class MainWindow(QMainWindow):
         return self._auto_full_interval_minutes() * 60 * 1000
 
     def _auto_full_interval_text(self):
-        minutes = self._auto_full_interval_minutes()
-        if minutes % 60 == 0:
-            hours = minutes // 60
-            return f"{hours} 小时"
-        if minutes > 60:
-            hours = minutes // 60
-            rest = minutes % 60
-            return f"{hours} 小时 {rest} 分钟"
-        return f"{minutes} 分钟"
+        return format_interval_text(
+            self._auto_full_interval_minutes(),
+            DEFAULT_AUTO_FULL_INTERVAL_MINUTES,
+        )
 
     def _schedule_next_auto_full_run(self):
         self.auto_full_timer.setInterval(self._auto_full_interval_ms())
@@ -3392,6 +3656,8 @@ class MainWindow(QMainWindow):
         config.platform = "douyin"
         config.action = "fetch"
         config.douyin_fetch_mode = "full"
+        config.uid_limit_enabled = self.uid_fetch_mode_button.isChecked()
+        config.uid_limit = self.uid_limit_spin.value()
         if not self._validate_config(config):
             self._append_log("自动 full 触发失败：当前配置校验未通过。")
             return
@@ -3415,6 +3681,10 @@ class MainWindow(QMainWindow):
 
     def _open_douyin_stats(self):
         dialog = DouyinStatsDialogV2(self, high_like_threshold=self.high_like_spin.value())
+        dialog.exec_()
+
+    def _open_bilibili_stats(self):
+        dialog = BilibiliStatsDialog(self)
         dialog.exec_()
 
     def _start_douyin_rating(self):

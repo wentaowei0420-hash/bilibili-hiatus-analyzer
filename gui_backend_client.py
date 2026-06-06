@@ -179,6 +179,18 @@ class BackendApiClient:
     def gui_metadata(self) -> dict[str, Any]:
         return self.request("GET", "/api/gui/metadata")
 
+    def bilibili_stats(self, high_like_threshold: int) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            f"/api/bilibili/stats?{urlencode({'high_like_threshold': int(high_like_threshold)})}",
+        )
+
+    def bilibili_video_count_stats(self, min_video_count: int) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            f"/api/bilibili/video-count-stats?{urlencode({'min_video_count': int(min_video_count)})}",
+        )
+
     def douyin_stats(self, high_like_threshold: int) -> dict[str, Any]:
         return self.request(
             "GET",

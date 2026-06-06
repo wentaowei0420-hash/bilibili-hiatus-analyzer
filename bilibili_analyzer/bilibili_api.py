@@ -126,6 +126,7 @@ class BilibiliApi:
         return all_followings
 
     def get_uploader_relation_stat(self, mid, uname="UP主"):
+        relation_payload = {}
         try:
             data = self.client.get_json_with_retry(
                 self.config.relation_stat_api,
@@ -134,16 +135,32 @@ class BilibiliApi:
             )
             if data.get("code") != 0:
                 print(f"   ⚠️  {uname} - 获取粉丝统计失败: {data.get('message', '未知错误')}")
-                return {}
-
-            payload = data.get("data", {}) or {}
-            return {
-                "follower_count": parse_view_count(payload.get("follower", 0)),
-                "following_count": parse_view_count(payload.get("following", 0)),
-            }
+            else:
+                relation_payload = data.get("data", {}) or {}
         except Exception as exc:
             print(f"   ⚠️  {uname} - 获取粉丝统计出错: {exc}")
-            return {}
+
+        upstat_payload = {}
+        try:
+            data = self.client.get_json_with_retry(
+                self.config.upstat_api,
+                params={"mid": mid},
+                request_name=f"获取 {uname} 的主页统计",
+            )
+            if data.get("code") != 0:
+                print(f"   ⚠️  {uname} - 获取主页统计失败: {data.get('message', '未知错误')}")
+            else:
+                upstat_payload = data.get("data", {}) or {}
+        except Exception as exc:
+            print(f"   ⚠️  {uname} - 获取主页统计出错: {exc}")
+
+        archive_payload = upstat_payload.get("archive", {}) or {}
+        return {
+            "follower_count": parse_view_count(relation_payload.get("follower", 0)),
+            "following_count": parse_view_count(relation_payload.get("following", 0)),
+            "total_favorited": parse_view_count(upstat_payload.get("likes", 0)),
+            "total_view_count": parse_view_count(archive_payload.get("view", 0)),
+        }
 
     def extract_video_info_from_dynamic_item(self, item, uname, mid):
         if item.get("type") != "DYNAMIC_TYPE_AV":
@@ -209,6 +226,8 @@ class BilibiliApi:
             stat = ((data.get("data") or {}).get("stat") or {})
             return {
                 "like_count": parse_view_count(stat.get("like", 0)),
+                "coin_count": parse_view_count(stat.get("coin", 0)),
+                "favorite_count": parse_view_count(stat.get("favorite", 0)),
                 "view_count": parse_view_count(stat.get("view", 0)),
             }
         except RateLimitExceededError:
@@ -266,6 +285,12 @@ class BilibiliApi:
                             continue
                         videos[index]["like_count"] = stats.get(
                             "like_count", videos[index].get("like_count", 0)
+                        )
+                        videos[index]["coin_count"] = stats.get(
+                            "coin_count", videos[index].get("coin_count", 0)
+                        )
+                        videos[index]["favorite_count"] = stats.get(
+                            "favorite_count", videos[index].get("favorite_count", 0)
                         )
                         videos[index]["view_count"] = stats.get(
                             "view_count", videos[index].get("view_count", 0)
@@ -384,6 +409,10 @@ class BilibiliApi:
                         "duration_seconds": duration_seconds,
                         "duration_category": categorize_duration(duration_seconds),
                         "like_count": like_count,
+                        "coin_count": parse_view_count(video.get("coin", 0)),
+                        "favorite_count": parse_view_count(
+                            video.get("favorite", video.get("favorites", 0))
+                        ),
                         "like_count_fetched": like_count_fetched,
                         "view_count": parse_view_count(video.get("play", 0)),
                         "video_url": jump_url,

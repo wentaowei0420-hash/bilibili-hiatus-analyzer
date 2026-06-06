@@ -140,27 +140,6 @@ class BilibiliHiatusAnalyzer:
             data_source=DataSource.VIDEO_API.value,
         )
 
-    def build_following_result_item(self, following):
-        activity_timestamp = following.get("mtime") or 0
-        days_since = calculate_days_since(activity_timestamp)
-        return AnalysisResult(
-            platform="bilibili",
-            uploader_id=str(following.get("mid") or ""),
-            uploader_name=str(following.get("uname", "未知UP主")),
-            uploader_homepage=build_homepage_url(following.get("mid")),
-            follower_count=self._safe_int(following.get("follower_count"), 0),
-            upload_date=timestamp_to_date(activity_timestamp),
-            days_since_update=days_since,
-            following_group_ids=following.get("group_id_text", ""),
-            following_group_names=following.get("group_name_text", DEFAULT_GROUP_NAME),
-            latest_video_title="未抓取视频详情（回退模式，基于关注列表活跃时间）",
-            activity_timestamp=normalize_timestamp(activity_timestamp),
-            days_since_last_video=days_since,
-            view_count=0,
-            video_url="",
-            data_source=DataSource.FOLLOWINGS_MTIME.value,
-        )
-
     def build_no_video_result_item(self, following):
         return AnalysisResult(
             platform="bilibili",
@@ -168,6 +147,8 @@ class BilibiliHiatusAnalyzer:
             uploader_name=str(following.get("uname", "未知UP主")),
             uploader_homepage=build_homepage_url(following.get("mid")),
             follower_count=self._safe_int(following.get("follower_count"), 0),
+            total_view_count=self._safe_int(following.get("total_view_count"), 0),
+            total_favorited=self._safe_int(following.get("total_favorited"), 0),
             upload_date=UNKNOWN_DATE,
             days_since_update=0,
             following_group_ids=following.get("group_id_text", ""),
@@ -293,6 +274,14 @@ class BilibiliHiatusAnalyzer:
                     following.get("follower_count", result.follower_count),
                     result.follower_count,
                 )
+                result.total_favorited = self._safe_int(
+                    following.get("total_favorited", result.total_favorited),
+                    self._safe_int(result.total_favorited, 0),
+                )
+                result.total_view_count = self._safe_int(
+                    following.get("total_view_count", result.total_view_count),
+                    self._safe_int(result.total_view_count, 0),
+                )
             else:
                 result.following_group_ids = result.following_group_ids or "0"
                 result.following_group_names = result.following_group_names or DEFAULT_GROUP_NAME
@@ -332,6 +321,8 @@ class BilibiliHiatusAnalyzer:
             result_item.following_group_ids = following.get("group_id_text", "")
             result_item.following_group_names = following.get("group_name_text", DEFAULT_GROUP_NAME)
             result_item.follower_count = self._safe_int(following.get("follower_count"), 0)
+            result_item.total_favorited = self._safe_int(following.get("total_favorited"), 0)
+            result_item.total_view_count = self._safe_int(following.get("total_view_count"), 0)
             self.save_precise_result(mid, result_item, results_by_mid, cached_video_results)
             return True
 
@@ -594,6 +585,8 @@ class BilibiliHiatusAnalyzer:
                 following.get("uname", "UP主"),
             )
             following["follower_count"] = relation_stat.get("follower_count", 0)
+            following["total_favorited"] = relation_stat.get("total_favorited", 0)
+            following["total_view_count"] = relation_stat.get("total_view_count", 0)
 
         order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)
@@ -635,10 +628,7 @@ class BilibiliHiatusAnalyzer:
         followings,
     ):
         self.reporter.message("🔍 正在精确抓取每位UP主最后一个视频时间...")
-        if self.config.analysis_mode == "fallback":
-            self.reporter.message("   如遇到无法补抓的UP主，将回退到关注列表活跃时间。")
-        else:
-            self.reporter.message("   当前为精确模式：仅接受视频动态时间作为最终结果。")
+        self.reporter.message("   当前为精确模式：仅接受视频动态时间作为最终结果。")
         self.reporter.message()
 
         failed_followings = []
@@ -696,15 +686,6 @@ class BilibiliHiatusAnalyzer:
             )
         return failed_followings
 
-    def _apply_fallback_results(self, failed_followings, results_by_mid):
-        if self.config.analysis_mode != "fallback" or not failed_followings:
-            return
-        self.reporter.message(f"\n↩️  仍有 {len(failed_followings)} 位UP主未完成精确抓取，回退到关注列表活跃时间。")
-        for following in failed_followings:
-            mid = str(following.get("mid"))
-            if mid not in results_by_mid:
-                results_by_mid[mid] = self.build_following_result_item(following)
-
     def _save_partial_results(self, results_by_mid, followings):
         duration_progress = self.cache_repository.load_duration_progress()
         results = self.enrich_results_with_profile_and_counts(
@@ -723,7 +704,7 @@ class BilibiliHiatusAnalyzer:
             self.reporter.message("\n❌ 未能获取到任何视频数据")
             return None
 
-        if self.config.analysis_mode == "precise" and failed_followings:
+        if failed_followings:
             self.reporter.message(f"\n⚠️  仍有 {len(failed_followings)} 位UP主因频率限制未获取成功。")
             self.reporter.message("   下次运行会自动复用已保存进度，继续补抓剩余UP主。")
 
@@ -756,7 +737,6 @@ class BilibiliHiatusAnalyzer:
             cached_video_results,
             followings,
         )
-        self._apply_fallback_results(failed_followings, results_by_mid)
 
         results = self._enrich_sort_and_export_results(
             list(results_by_mid.values()),
