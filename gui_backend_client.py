@@ -404,7 +404,7 @@ class BilibiliCookieCheckThread(QThread):
 
     def run(self) -> None:
         try:
-            result = BackendApiClient().check_bilibili_cookie()
+            result = BackendApiClient(timeout=120.0).check_bilibili_cookie()
             self.checked.emit(bool(result.get("ok")), str(result.get("message") or ""))
         except Exception as exc:
             self.checked.emit(False, f"检测失败：{exc}")

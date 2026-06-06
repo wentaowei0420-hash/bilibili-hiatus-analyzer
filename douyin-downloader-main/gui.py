@@ -43,6 +43,7 @@ from gui_modules.filtering import (
     row_video_grade,
     safe_int,
 )
+from gui_modules.file_organizer import organize_download_directory
 from storage import Database
 from utils.logger import set_console_log_level
 from utils.validators import sanitize_filename
@@ -194,6 +195,12 @@ class HighLikeDownloaderGUI:
             command=self.reset_download_records,
         )
         self.reset_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.organize_button = ttk.Button(
+            controls,
+            text="整理",
+            command=self.organize_download_files,
+        )
+        self.organize_button.pack(side=tk.LEFT, padx=(0, 8))
         self.save_settings_button = ttk.Button(
             controls,
             text="保存当前设置",
@@ -728,6 +735,29 @@ class HighLikeDownloaderGUI:
         self._set_busy(True, allow_stop=False, refresh_text="同步中...")
         self._run_worker(self._cookie_login_sync_worker)
 
+    def organize_download_files(self):
+        if self._is_busy():
+            return
+        self._snapshot_inputs()
+        download_dir = self._resolve_download_path(self.active_download_path)
+        if not messagebox.askyesno(
+            "确认整理",
+            "\n".join(
+                [
+                    "将按文件名前缀等级整理当前下载目录。",
+                    "例如 B_开头的文件会移动到 B级 文件夹。",
+                    "同时会递归删除该目录下的 .webp 文件。",
+                    "",
+                    f"目录：{download_dir}",
+                ]
+            ),
+        ):
+            return
+        self.status.set("正在整理下载目录...")
+        self._log(f"开始整理下载目录：{download_dir}")
+        self._set_busy(True, allow_stop=False, refresh_text="整理中...")
+        self._run_worker(self._organize_download_files_worker)
+
     def request_stop(self):
         self.stop_requested.set()
         self.status.set("正在停止，当前视频处理完成后会退出")
@@ -853,6 +883,7 @@ class HighLikeDownloaderGUI:
         self.cookie_check_button.configure(state=state)
         self.cookie_login_button.configure(state=state)
         self.reset_button.configure(state=state)
+        self.organize_button.configure(state=state)
         self.save_filename_button.configure(state=state)
         self.save_settings_button.configure(state=state)
         self.filter_mode_combo.configure(state=tk.DISABLED if busy else "readonly")
@@ -1250,6 +1281,15 @@ class HighLikeDownloaderGUI:
             self.events.put(("cookie_login_sync", result))
         except Exception as exc:
             self.events.put(("error", f"浏览器登录同步 Cookie 失败：{exc}"))
+        finally:
+            self.events.put(("idle", None))
+
+    def _organize_download_files_worker(self):
+        try:
+            result = organize_download_directory(self._resolve_download_path(self.active_download_path))
+            self.events.put(("organize_done", result))
+        except Exception as exc:
+            self.events.put(("error", f"整理下载目录失败：{exc}"))
         finally:
             self.events.put(("idle", None))
 
@@ -1784,6 +1824,11 @@ class HighLikeDownloaderGUI:
                     f"清空评分快照下载标记 {payload.get('cleared_score_flags', 0)} 条；"
                     "本地视频文件未删除。"
                 )
+            elif event == "organize_done":
+                message = payload.to_message()
+                self.status.set("下载目录整理完成")
+                self._log(message)
+                messagebox.showinfo("整理完成", message)
             elif event == "cookie_check":
                 message = payload.to_message()
                 self.status.set(f"Cookie 检测完成：{payload.status_label}")
