@@ -19,12 +19,6 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DOUYIN_UNFOLLOW_LIST = (
     ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
 )
-DEFAULT_BILIBILI_UID_LIST = (
-    ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
-)
-DEFAULT_DOUYIN_UID_LIST = (
-    ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
-)
 
 
 BILIBILI_RUNTIME_FIELDS = {
@@ -271,11 +265,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         return _run_bilibili_main(request, reporter)
     if kind == JobKind.DOUYIN_ANALYSIS:
         return _run_douyin_main(request, reporter)
-    if kind == JobKind.BOTH_ANALYSIS:
-        first = _run_bilibili_main(request, reporter)
-        check_stop()
-        second = _run_douyin_main(request, reporter)
-        return {"bilibili": _json_safe(first), "douyin": _json_safe(second)}
     if kind == JobKind.BILIBILI_UPLOAD:
         from bilibili_analyzer.app import run_feishu_upload
 
@@ -284,34 +273,12 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         from douyin_analyzer.app import run_feishu_upload
 
         return run_feishu_upload()
-    if kind == JobKind.BILIBILI_UID_FETCH:
-        from bilibili_analyzer.app import run_fetch_uid_videos
-
-        return run_fetch_uid_videos(
-            _path_or_default(request.bilibili_uid_list_path, DEFAULT_BILIBILI_UID_LIST),
-            max_targets=request.uid_limit,
-        )
-    if kind == JobKind.DOUYIN_UID_FETCH:
-        from douyin_analyzer.app import run_fetch_uid_videos
-
-        return run_fetch_uid_videos(
-            _path_or_default(request.douyin_uid_list_path, DEFAULT_DOUYIN_UID_LIST),
-            max_targets=request.uid_limit,
-        )
     if kind == JobKind.DOUYIN_UNFOLLOW:
         from douyin_analyzer.app import run_unfollow
 
         return run_unfollow(
             _path_or_default(request.unfollow_list_path, DEFAULT_DOUYIN_UNFOLLOW_LIST)
         )
-    if kind == JobKind.DOUYIN_VIDEO_SCORE:
-        from douyin_analyzer.app import run_score_videos_from_cache
-
-        return run_score_videos_from_cache()
-    if kind == JobKind.DOUYIN_CREATOR_SCORE:
-        from douyin_analyzer.app import run_score_creators_from_cache
-
-        return run_score_creators_from_cache()
     if kind == JobKind.DOUYIN_RATING_REFRESH:
         from douyin_analyzer.app import (
             run_score_creators_from_cache,
@@ -321,12 +288,6 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
         run_score_videos_from_cache()
         output_path = run_score_creators_from_cache(refresh_inventory=False)
         return {"message": f"评分数据已更新：{output_path}", "output_path": output_path}
-    if kind == JobKind.DOUYIN_COMPACT_EXPORT:
-        from douyin_analyzer.app import run_export_compact_tables_from_cache
-
-        return run_export_compact_tables_from_cache(
-            high_like_threshold=request.high_like_threshold
-        )
     if kind == JobKind.DOUYIN_LIKED_VIDEO_CACHE:
         from douyin_analyzer.app import run_cache_liked_videos_as_s
 

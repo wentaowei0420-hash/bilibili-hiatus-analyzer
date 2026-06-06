@@ -17,8 +17,6 @@ class RunConfig:
     uid_limit: int
     high_like_threshold: int
     unfollow_list_path: Path
-    bilibili_uid_list_path: Path
-    douyin_uid_list_path: Path
     bilibili_runtime_settings: dict
     douyin_runtime_settings: dict
     fetch_order_settings: dict

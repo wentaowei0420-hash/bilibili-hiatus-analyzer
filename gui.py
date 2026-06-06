@@ -34,8 +34,6 @@ from PyQt5.QtWidgets import (
 
 from gui_business import (
     DEFAULT_AUTO_FULL_INTERVAL_MINUTES,
-    DEFAULT_BILIBILI_UID_LIST,
-    DEFAULT_DOUYIN_UID_LIST,
     DEFAULT_DOUYIN_UNFOLLOW_LIST,
     GUI_CONFIG_PATH,
     ROOT_DIR,
@@ -308,8 +306,6 @@ class AdvancedSettingsDialog(QDialog):
         path_group = QGroupBox("\u8def\u5f84\u8bbe\u7f6e")
         path_form = QFormLayout(path_group)
         self.unfollow_path_edit = self._path_row(path_form, "\u53d6\u6d88\u5173\u6ce8\u540d\u5355", current_paths["unfollow"])
-        self.bilibili_uid_path_edit = self._path_row(path_form, "B\u7ad9 UID \u540d\u5355", current_paths["bilibili_uid"])
-        self.douyin_uid_path_edit = self._path_row(path_form, "\u6296\u97f3 UID \u540d\u5355", current_paths["douyin_uid"])
         layout.addWidget(path_group)
 
         runtime_group = QGroupBox("\u51b7\u5374\u4e0e\u9650\u6d41\u8bbe\u7f6e")
@@ -409,8 +405,6 @@ class AdvancedSettingsDialog(QDialog):
     def paths(self):
         return {
             "unfollow": self.unfollow_path_edit.text(),
-            "bilibili_uid": self.bilibili_uid_path_edit.text(),
-            "douyin_uid": self.douyin_uid_path_edit.text(),
         }
 
     def bilibili_runtime_settings(self):
@@ -1384,7 +1378,7 @@ class DouyinRatingOverviewDialog(QDialog):
                 self._clear_tables()
                 return
             if not data.get("tables"):
-                self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音视频评分或 UP 主评分。")
+                self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音评分。")
                 self._clear_tables()
                 return
 
@@ -1421,7 +1415,7 @@ class DouyinRatingOverviewDialog(QDialog):
             self._clear_tables()
             return
         if not data.get("tables"):
-            self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音视频评分或 UP 主评分。")
+            self.summary_label.setText(data.get("message") or "未找到评分表，请先运行抖音评分。")
             self._clear_tables()
             return
 
@@ -2737,8 +2731,6 @@ class MainWindow(QMainWindow):
         self.log_dialog = None
         self.config_locked = False
         self.unfollow_list_path = str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
-        self.bilibili_uid_list_path = str(DEFAULT_BILIBILI_UID_LIST)
-        self.douyin_uid_list_path = str(DEFAULT_DOUYIN_UID_LIST)
         try:
             _apply_gui_metadata(_load_backend_gui_metadata())
             self._gui_metadata_error = ""
@@ -2949,6 +2941,8 @@ class MainWindow(QMainWindow):
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
+        self.douyin_rating_button = QPushButton("抖音评分")
+        self.douyin_rating_button.clicked.connect(self._start_douyin_rating)
         self.rating_overview_button = QPushButton("评分概览")
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
         self.archive_button = QPushButton("归档管理")
@@ -2980,6 +2974,7 @@ class MainWindow(QMainWindow):
         )
         douyin_quick_buttons = (
             self.douyin_stats_button,
+            self.douyin_rating_button,
             self.rating_overview_button,
             self.archive_button,
             self.douyin_status_reset_button,
@@ -3064,8 +3059,19 @@ class MainWindow(QMainWindow):
         douyin_button_grid.setVerticalSpacing(8)
         for column in range(8):
             douyin_button_grid.setColumnStretch(column, 1)
-        for index, button in enumerate(douyin_quick_buttons):
-            douyin_button_grid.addWidget(button, index // 8, index % 8)
+        douyin_button_positions = (
+            (self.douyin_stats_button, 0, 0),
+            (self.rating_overview_button, 0, 1),
+            (self.archive_button, 0, 2),
+            (self.douyin_status_reset_button, 0, 3),
+            (self.liked_video_cache_button, 0, 4),
+            (self.full_fetch_retry_button, 0, 5),
+            (self.auto_full_button, 0, 6),
+            (self.uid_fetch_mode_button, 0, 7),
+            (self.douyin_rating_button, 1, 0),
+        )
+        for button, row, column in douyin_button_positions:
+            douyin_button_grid.addWidget(button, row, column)
         douyin_quick_layout.addLayout(douyin_button_grid)
         controls_layout.addWidget(douyin_quick_group)
         layout.addWidget(controls_group)
@@ -3116,10 +3122,10 @@ class MainWindow(QMainWindow):
 
     def _sync_visible_options(self):
         platform = self.platform_combo.currentData()
-        is_normal = platform in {"both", "bilibili", "douyin"}
-        is_bilibili = platform in {"both", "bilibili"}
-        is_douyin = platform in {"both", "douyin", "douyin_unfollow", "douyin_uid"}
-        supports_full_fetch_retry = platform in {"both", "douyin"} and self.douyin_mode_combo.currentData() == "full"
+        is_normal = platform in {"bilibili", "douyin"}
+        is_bilibili = platform == "bilibili"
+        is_douyin = platform in {"douyin", "douyin_unfollow"}
+        supports_full_fetch_retry = platform == "douyin" and self.douyin_mode_combo.currentData() == "full"
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
@@ -3134,6 +3140,7 @@ class MainWindow(QMainWindow):
         self.full_fetch_retry_button.setEnabled(editable and supports_full_fetch_retry)
         self.auto_full_interval_spin.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
+        self.douyin_rating_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
         self.lock_button.setText("解除锁定" if self.config_locked else "锁定配置")
@@ -3160,8 +3167,6 @@ class MainWindow(QMainWindow):
             high_like_threshold=self.high_like_spin.value(),
             douyin_full_fetch_retry_on_mismatch=self.full_fetch_retry_button.isChecked(),
             unfollow_list_path=Path(self.unfollow_list_path).expanduser(),
-            bilibili_uid_list_path=Path(self.bilibili_uid_list_path).expanduser(),
-            douyin_uid_list_path=Path(self.douyin_uid_list_path).expanduser(),
             bilibili_runtime_settings=dict(self.bilibili_runtime_settings),
             douyin_runtime_settings=dict(self.douyin_runtime_settings),
             fetch_order_settings=_normalize_fetch_order_settings(self.fetch_order_settings),
@@ -3187,8 +3192,6 @@ class MainWindow(QMainWindow):
             "high_like_threshold": self.high_like_spin.value(),
             "douyin_full_fetch_retry_on_mismatch": self.full_fetch_retry_button.isChecked(),
             "unfollow_list_path": self.unfollow_list_path,
-            "bilibili_uid_list_path": self.bilibili_uid_list_path,
-            "douyin_uid_list_path": self.douyin_uid_list_path,
             "bilibili_runtime_settings": self.bilibili_runtime_settings,
             "douyin_runtime_settings": self.douyin_runtime_settings,
             "fetch_order_settings": self.fetch_order_settings,
@@ -3235,8 +3238,6 @@ class MainWindow(QMainWindow):
                 int(data.get("auto_full_interval_minutes", self.auto_full_interval_spin.value()) or self.auto_full_interval_spin.value())
             )
             self.unfollow_list_path = data.get("unfollow_list_path") or str(DEFAULT_DOUYIN_UNFOLLOW_LIST)
-            self.bilibili_uid_list_path = data.get("bilibili_uid_list_path") or str(DEFAULT_BILIBILI_UID_LIST)
-            self.douyin_uid_list_path = data.get("douyin_uid_list_path") or str(DEFAULT_DOUYIN_UID_LIST)
 
             saved_bilibili = data.get("bilibili_runtime_settings", {}) or {}
             for name, _env_name, _label, field_type, _minimum, _maximum, _step in BILIBILI_RUNTIME_FIELDS:
@@ -3268,8 +3269,6 @@ class MainWindow(QMainWindow):
             self,
             {
                 "unfollow": self.unfollow_list_path,
-                "bilibili_uid": self.bilibili_uid_list_path,
-                "douyin_uid": self.douyin_uid_list_path,
             },
             dict(self.bilibili_runtime_settings),
             dict(self.douyin_runtime_settings),
@@ -3278,8 +3277,6 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             paths = dialog.paths()
             self.unfollow_list_path = paths["unfollow"]
-            self.bilibili_uid_list_path = paths["bilibili_uid"]
-            self.douyin_uid_list_path = paths["douyin_uid"]
             self.bilibili_runtime_settings = dialog.bilibili_runtime_settings()
             self.douyin_runtime_settings = dialog.douyin_runtime_settings()
             self.fetch_order_settings = dialog.fetch_order_settings()
@@ -3407,6 +3404,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
+        self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -3418,6 +3416,28 @@ class MainWindow(QMainWindow):
     def _open_douyin_stats(self):
         dialog = DouyinStatsDialogV2(self, high_like_threshold=self.high_like_spin.value())
         dialog.exec_()
+
+    def _start_douyin_rating(self):
+        if self.worker and self.worker.isRunning():
+            self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
+            return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
+            return
+
+        self.log_text.clear()
+        self._append_log("开始抖音评分：将依次运行视频评分和 UP 主评分。")
+        self._start_task_progress("抖音评分运行中，正在生成视频评分和 UP 主评分...")
+        self.start_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
+        self.douyin_rating_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("终止运行")
+        self.stop_button.setStyleSheet("")
+        self.worker = RatingRefreshThread(self)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
 
     def _open_rating_overview(self):
         dialog = DouyinRatingOverviewDialog(self)
@@ -3451,6 +3471,7 @@ class MainWindow(QMainWindow):
         self._append_log("\u5f00\u59cb\u7f13\u5b58\u6296\u97f3\u4e3b\u9875\u559c\u6b22\u89c6\u9891\uff0c\u6293\u5230\u7684\u89c6\u9891\u5c06\u7edf\u4e00\u8bbe\u4e3a S \u7ea7\u3002")
         self._start_task_progress("\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u4e2d\uff0c\u6b63\u5728\u6253\u5f00\u6296\u97f3\u4e3b\u9875...")
         _set_button_busy(self.liked_video_cache_button, "\u7f13\u5b58\u4e2d...")
+        self.douyin_rating_button.setEnabled(False)
         self.liked_video_cache_worker = DouyinLikedVideoCacheThread()
         self.liked_video_cache_worker.log_line.connect(self._append_log)
         self.liked_video_cache_worker.done.connect(self._on_liked_video_cache_done)
@@ -3458,6 +3479,7 @@ class MainWindow(QMainWindow):
 
     def _on_liked_video_cache_done(self, ok, message):
         _restore_button_busy(self.liked_video_cache_button)
+        self.douyin_rating_button.setEnabled(not self.config_locked)
         self._append_log(message)
         self._finish_task_progress(ok, message)
         if ok:
@@ -3492,6 +3514,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
+        self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
         self.stop_button.setStyleSheet("")
@@ -3582,10 +3605,6 @@ class MainWindow(QMainWindow):
         required_paths = []
         if config.platform == "douyin_unfollow":
             required_paths.append(config.unfollow_list_path)
-        elif config.platform == "bilibili_uid":
-            required_paths.append(config.bilibili_uid_list_path)
-        elif config.platform == "douyin_uid":
-            required_paths.append(config.douyin_uid_list_path)
 
         missing = [str(path) for path in required_paths if not path.exists()]
         if missing:
@@ -3680,6 +3699,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
         self.liked_video_cache_button.setEnabled(not self.config_locked)
+        self.douyin_rating_button.setEnabled(not self.config_locked)
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):
             self.stop_button.setText("保存完成，可以关闭")

@@ -268,13 +268,7 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
     kind_by_platform = {
         "bilibili": "bilibili_analysis",
         "douyin": "douyin_analysis",
-        "both": "both_analysis",
         "douyin_unfollow": "douyin_unfollow",
-        "bilibili_uid": "bilibili_uid_fetch",
-        "douyin_uid": "douyin_uid_fetch",
-        "douyin_video_score": "douyin_video_score",
-        "douyin_creator_score": "douyin_creator_score",
-        "douyin_compact_export": "douyin_compact_export",
     }
     kind = kind_by_platform.get(config.platform)
     if not kind:
@@ -293,8 +287,6 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
         "uid_limit": config.uid_limit if config.uid_limit_enabled else None,
         "high_like_threshold": config.high_like_threshold,
         "unfollow_list_path": str(config.unfollow_list_path),
-        "bilibili_uid_list_path": str(config.bilibili_uid_list_path),
-        "douyin_uid_list_path": str(config.douyin_uid_list_path),
         "bilibili_runtime_settings": {"values": dict(config.bilibili_runtime_settings or {})},
         "douyin_runtime_settings": {"values": dict(config.douyin_runtime_settings or {})},
         "fetch_order_settings": dict(config.fetch_order_settings or {}),

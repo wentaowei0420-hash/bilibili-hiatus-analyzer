@@ -5,13 +5,11 @@ from bilibili_analyzer.logging_utils import create_summary_panel, create_table, 
 from douyin_analyzer.config import load_analyzer_config as load_douyin_config
 
 
-DOUYIN_FETCH_MODE = "monitor"
-# 可选值: "counts", "verify", "monitor", "delta", "full"
+DOUYIN_FETCH_MODE = "counts"
+# 可选值: "counts", "full"
 
 ROOT_DIR = Path(__file__).resolve().parent
 DOUYIN_UNFOLLOW_LIST_PATH = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
-BILIBILI_UID_FETCH_LIST_PATH = ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
-DOUYIN_UID_FETCH_LIST_PATH = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
 
 
 def get_douyin_runtime_labels():
@@ -39,8 +37,8 @@ def show_platform_menu():
                 f"当前抖音抓取模式: {DOUYIN_FETCH_MODE}",
                 f"当前抖音浏览器后端: {backend_label} [{douyin_config.browser_backend}]",
                 f"当前抖音浏览器目标: {browser_label}",
-                "模式 1/2/3 只同步前面的主数据表。",
-                "模式 5/6 只同步后面的分析表。",
+                "模式 1/2 只同步对应平台的主数据表。",
+                "模式 4 会依次生成抖音视频评分和 UP 主评分。",
             ],
             border_style="cyan",
         )
@@ -55,15 +53,10 @@ def show_platform_menu():
             ("说明", "left"),
         ],
     )
-    table.add_row("1", "B站 + 抖音", "主数据表", "依次执行两个平台的普通流程")
-    table.add_row("2", "仅 B站", "B站数据表", "执行 B站普通流程")
-    table.add_row("3", "仅 抖音", "抖音数据表", "执行抖音普通流程")
-    table.add_row("4", "抖音取消关注", "-", "读取 txt 名单并取消关注")
-    table.add_row("5", "B站 UID 全量抓取", "B站分析表", "按 txt 名单抓指定 UID，并只上传 UID 分析结果")
-    table.add_row("6", "抖音 UID 全量抓取", "抖音分析表", "按 txt 名单抓指定 UID，并只上传 UID 分析结果")
-    table.add_row("7", "抖音视频评分", "视频评分表", "基于本地缓存生成视频评分")
-    table.add_row("8", "抖音UP主评分", "UP主评分表", "基于视频评分和UP主数据生成UP评分")
-    table.add_row("9", "导出抖音精简表", "精简CSV", "导出UP主总表、视频总表、诊断总表")
+    table.add_row("1", "仅 B站", "B站数据表", "执行 B站普通流程")
+    table.add_row("2", "仅 抖音", "抖音数据表", "执行抖音普通流程")
+    table.add_row("3", "抖音取消关注", "-", "读取 txt 名单并取消关注")
+    table.add_row("4", "抖音评分", "评分表", "基于本地缓存依次生成视频评分和UP评分")
     console.print(table)
     console.print()
 
@@ -111,13 +104,13 @@ def show_run_panel(title: str, lines, border_style: str = "green"):
 def prompt_platform_choice():
     show_platform_menu()
     while True:
-        choice = input("请输入平台编号 (1/2/3/4/5/6/7/8/9): ").strip()
-        if choice in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        choice = input("请输入平台编号 (1/2/3/4): ").strip()
+        if choice in {"1", "2", "3", "4"}:
             return choice
         get_console().print(
             create_summary_panel(
                 "输入无效",
-                ["请输入 1、2、3、4、5、6、7、8 或 9。"],
+                ["请输入 1、2、3 或 4。"],
                 border_style="red",
             )
         )
@@ -154,34 +147,6 @@ def prompt_douyin_backend_choice():
             create_summary_panel(
                 "输入无效",
                 ["请输入 1、2，或直接回车保持当前后端。"],
-                border_style="red",
-            )
-        )
-
-
-def prompt_uid_fetch_limit():
-    prompt = "请输入本次要抓取的 UID 数量（输入数字，或输入 all/直接回车抓取全部）: "
-    while True:
-        raw_value = input(prompt).strip().lower()
-        if raw_value in {"", "all", "全部"}:
-            return None
-        try:
-            limit = int(raw_value)
-        except ValueError:
-            get_console().print(
-                create_summary_panel(
-                    "输入无效",
-                    ["请输入正整数，或输入 all/直接回车表示抓取全部。"],
-                    border_style="red",
-                )
-            )
-            continue
-        if limit > 0:
-            return limit
-        get_console().print(
-            create_summary_panel(
-                "输入无效",
-                ["抓取数量必须大于 0。"],
                 border_style="red",
             )
         )
@@ -228,45 +193,23 @@ def run_douyin_unfollow():
     run_unfollow(DOUYIN_UNFOLLOW_LIST_PATH)
 
 
-def run_bilibili_uid_fetch(max_targets=None):
-    from bilibili_analyzer.app import run_fetch_uid_videos
-
-    run_fetch_uid_videos(BILIBILI_UID_FETCH_LIST_PATH, max_targets=max_targets)
-
-
-def run_douyin_uid_fetch(max_targets=None):
-    from douyin_analyzer.app import run_fetch_uid_videos
-
-    run_fetch_uid_videos(DOUYIN_UID_FETCH_LIST_PATH, max_targets=max_targets)
-
-
-def run_douyin_video_score():
+def run_douyin_rating():
     from douyin_analyzer.app import run_score_videos_from_cache
-
-    run_score_videos_from_cache()
-
-
-def run_douyin_creator_score():
     from douyin_analyzer.app import run_score_creators_from_cache
 
+    run_score_videos_from_cache()
     run_score_creators_from_cache()
-
-
-def run_douyin_compact_export():
-    from douyin_analyzer.app import run_export_compact_tables_from_cache
-
-    run_export_compact_tables_from_cache(high_like_threshold=10000)
 
 
 def main():
     platform_choice = prompt_platform_choice()
 
-    if platform_choice in {"1", "3", "4", "6"}:
+    if platform_choice in {"2", "3"}:
         apply_douyin_runtime_backend(prompt_douyin_backend_choice())
 
     _, backend_label, browser_label = get_douyin_runtime_labels()
 
-    if platform_choice == "4":
+    if platform_choice == "3":
         show_run_panel(
             "执行抖音取消关注",
             [
@@ -280,77 +223,14 @@ def main():
         run_douyin_unfollow()
         return
 
-    if platform_choice == "5":
-        uid_fetch_limit = prompt_uid_fetch_limit()
-        show_run_panel(
-            "执行 B站 UID 全量抓取",
-            [
-                f"名单文件: {BILIBILI_UID_FETCH_LIST_PATH}",
-                f"本次抓取数量: {'全部' if uid_fetch_limit is None else uid_fetch_limit}",
-                "该模式会在本地生成 UID 视频明细和分析结果。",
-                "抓取结束后，只同步 B站分析表。",
-            ],
-            border_style="yellow",
-        )
-        run_bilibili_uid_fetch(max_targets=uid_fetch_limit)
-        return
-
-    if platform_choice == "6":
-        uid_fetch_limit = prompt_uid_fetch_limit()
-        show_run_panel(
-            "执行抖音 UID 全量抓取",
-            [
-                f"名单文件: {DOUYIN_UID_FETCH_LIST_PATH}",
-                f"本次抓取数量: {'全部' if uid_fetch_limit is None else uid_fetch_limit}",
-                f"浏览器后端: {backend_label}",
-                f"浏览器目标: {browser_label}",
-                "该模式会在本地生成 UID 视频明细和分析结果。",
-                "抓取结束后，只同步抖音分析表。",
-            ],
-            border_style="yellow",
-        )
-        run_douyin_uid_fetch(max_targets=uid_fetch_limit)
-        return
-
-    if platform_choice == "7":
-        show_run_panel("抖音视频评分", ["数据来源: 本地 SQLite 缓存", "输出: douyin_video_scores.csv / video_score_current"])
-        run_douyin_video_score()
-        return
-
-    if platform_choice == "8":
-        show_run_panel("抖音UP主评分", ["数据来源: 本地 SQLite 缓存与视频评分表", "若缺少视频评分，会先自动生成视频评分。"])
-        run_douyin_creator_score()
-        return
-
-    if platform_choice == "9":
-        show_run_panel("导出抖音精简表", ["输出: UP主总表、视频总表、诊断总表", "高赞标记已合并到视频总表。"])
-        run_douyin_compact_export()
+    if platform_choice == "4":
+        show_run_panel("抖音评分", ["数据来源: 本地 SQLite 缓存", "将依次生成视频评分和 UP 主评分。"])
+        run_douyin_rating()
         return
 
     action_choice = prompt_action_choice()
 
     if platform_choice == "1":
-        if action_choice == "3":
-            show_run_panel("上传本地 B站 主数据表", ["不重新抓取，只同步前面的 B站数据表。"])
-            run_bilibili(action_choice)
-            show_run_panel("上传本地 抖音 主数据表", ["不重新抓取，只同步前面的抖音数据表。"])
-            run_douyin(action_choice)
-        else:
-            show_run_panel("执行 B站", ["普通模式。若启用上传，只同步前面的 B站数据表。"])
-            run_bilibili(action_choice)
-            show_run_panel(
-                "执行抖音",
-                [
-                    f"普通模式，当前抓取模式: {DOUYIN_FETCH_MODE}",
-                    f"浏览器后端: {backend_label}",
-                    f"浏览器目标: {browser_label}",
-                    "若启用上传，只同步前面的抖音数据表。",
-                ],
-            )
-            run_douyin(action_choice)
-        return
-
-    if platform_choice == "2":
         if action_choice == "3":
             show_run_panel("上传本地 B站 主数据表", ["不重新抓取，只同步 B站数据表。"])
         else:
@@ -358,9 +238,9 @@ def main():
         run_bilibili(action_choice)
         return
 
-    if action_choice == "3":
+    if platform_choice == "2" and action_choice == "3":
         show_run_panel("上传本地 抖音 主数据表", ["不重新抓取，只同步抖音数据表。"])
-    else:
+    elif platform_choice == "2":
         show_run_panel(
             "执行抖音",
             [
@@ -370,7 +250,8 @@ def main():
                 "若启用上传，只同步抖音数据表。",
             ],
         )
-    run_douyin(action_choice)
+    if platform_choice == "2":
+        run_douyin(action_choice)
 
 
 if __name__ == "__main__":

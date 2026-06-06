@@ -192,14 +192,8 @@ def _capabilities() -> dict[str, object]:
         "job_kinds": [
             "bilibili_analysis",
             "douyin_analysis",
-            "both_analysis",
-            "bilibili_uid_fetch",
-            "douyin_uid_fetch",
             "douyin_unfollow",
-            "douyin_video_score",
-            "douyin_creator_score",
             "douyin_rating_refresh",
-            "douyin_compact_export",
             "douyin_liked_video_cache",
         ],
     }

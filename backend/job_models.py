@@ -64,16 +64,10 @@ except ImportError:
 class JobKind(str, Enum):
     BILIBILI_ANALYSIS = "bilibili_analysis"
     DOUYIN_ANALYSIS = "douyin_analysis"
-    BOTH_ANALYSIS = "both_analysis"
     BILIBILI_UPLOAD = "bilibili_upload"
     DOUYIN_UPLOAD = "douyin_upload"
-    BILIBILI_UID_FETCH = "bilibili_uid_fetch"
-    DOUYIN_UID_FETCH = "douyin_uid_fetch"
     DOUYIN_UNFOLLOW = "douyin_unfollow"
-    DOUYIN_VIDEO_SCORE = "douyin_video_score"
-    DOUYIN_CREATOR_SCORE = "douyin_creator_score"
     DOUYIN_RATING_REFRESH = "douyin_rating_refresh"
-    DOUYIN_COMPACT_EXPORT = "douyin_compact_export"
     DOUYIN_LIKED_VIDEO_CACHE = "douyin_liked_video_cache"
 
 
@@ -116,8 +110,6 @@ class JobCreateRequest(BaseModel):
     persist_outputs: bool = True
     high_like_threshold: int = Field(default=10000, ge=0)
     unfollow_list_path: Optional[str] = None
-    bilibili_uid_list_path: Optional[str] = None
-    douyin_uid_list_path: Optional[str] = None
     bilibili_runtime_settings: RuntimeSettings = Field(default_factory=RuntimeSettings)
     douyin_runtime_settings: RuntimeSettings = Field(default_factory=RuntimeSettings)
     fetch_order_settings: FetchOrderSettings = Field(default_factory=FetchOrderSettings)

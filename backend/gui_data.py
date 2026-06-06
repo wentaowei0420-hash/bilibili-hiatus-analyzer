@@ -581,7 +581,7 @@ def get_rating_overview(search_uid: str = "") -> dict[str, Any]:
             else 0
         )
         if not has_creator and not has_video:
-            result["message"] = "未找到评分表，请先运行抖音视频评分或 UP 主评分。"
+            result["message"] = "未找到评分表，请先运行抖音评分。"
             return result
 
         if has_creator:

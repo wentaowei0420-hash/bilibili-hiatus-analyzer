@@ -14,8 +14,6 @@ from gui_backend_client import BackendApiClient, ensure_backend_available
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_DOUYIN_UNFOLLOW_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_unfollow_list.txt"
-DEFAULT_BILIBILI_UID_LIST = ROOT_DIR / "data" / "bilibili" / "ops" / "bilibili_uid_fetch_list.txt"
-DEFAULT_DOUYIN_UID_LIST = ROOT_DIR / "data" / "douyin" / "ops" / "douyin_uid_fetch_list.txt"
 GUI_CONFIG_PATH = ROOT_DIR / "data" / "state" / "gui_config.json"
 DEFAULT_DOUYIN_DOWNLOADER_ROOT = ROOT_DIR / "douyin-downloader-main"
 EXTERNAL_DOUYIN_DOWNLOADER_ROOT = Path(
