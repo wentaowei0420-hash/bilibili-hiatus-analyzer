@@ -105,9 +105,6 @@ def get_gui_metadata() -> dict[str, object]:
             "douyin_modes": _options(
                 [
                     ("基础统计模式（粉丝数/获赞总数/视频数）", "counts"),
-                    ("主页校验模式（按基础缓存进主页核对）", "verify"),
-                    ("监控模式（推荐日常使用）", "monitor"),
-                    ("增量模式（只补变化数据）", "delta"),
                     ("完整模式（抓取视频明细）", "full"),
                 ]
             ),
@@ -115,6 +112,12 @@ def get_gui_metadata() -> dict[str, object]:
                 [
                     ("DrissionPage", "drission"),
                     ("Playwright", "playwright"),
+                ]
+            ),
+            "browser_names": _options(
+                [
+                    ("Edge", "edge"),
+                    ("谷歌浏览器", "chrome"),
                 ]
             ),
             "platforms": _options(
@@ -141,8 +144,7 @@ def get_gui_metadata() -> dict[str, object]:
         "stats": {
             "modes": _options(
                 [
-                    ("主页校验模式", "verify"),
-                    ("监控模式", "monitor"),
+                    ("基础统计模式", "counts"),
                     ("完整模式", "full"),
                 ]
             ),

@@ -108,10 +108,10 @@ class JobCreateRequest(BaseModel):
     kind: JobKind
     action: AnalysisAction = AnalysisAction.FETCH
     bilibili_mode: str = "precise_full"
-    douyin_fetch_mode: str = "monitor"
+    douyin_fetch_mode: str = "counts"
     douyin_backend: str = "drission"
+    douyin_browser_name: str = "edge"
     douyin_full_fetch_retry_on_mismatch: bool = True
-    monitor_video_limit: int = Field(default=10, ge=1)
     uid_limit: Optional[int] = Field(default=None, ge=1)
     persist_outputs: bool = True
     high_like_threshold: int = Field(default=10000, ge=0)

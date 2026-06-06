@@ -117,7 +117,7 @@ def _json_safe(value):
 def _build_douyin_mode_stats(active_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     total_followings = len(active_rows)
     modes: dict[str, dict[str, Any]] = {}
-    for mode in ("verify", "monitor", "full"):
+    for mode in ("counts", "full"):
         column = f"has_{mode}_cache"
         count = sum(1 for row in active_rows if _is_truthy_text(row.get(column)))
         modes[mode] = {
@@ -162,8 +162,7 @@ def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, 
             "有关注列表缓存",
             "关注列表缓存时间",
             "有进度缓存",
-            "有verify缓存",
-            "有monitor缓存",
+            "有counts缓存",
             "有full缓存",
         }
         if not required_columns.issubset(inventory_columns):
@@ -179,8 +178,7 @@ def _get_douyin_stats_from_store(config, high_like_threshold: int) -> dict[str, 
                 "有关注列表缓存" AS has_followings_cache,
                 "关注列表缓存时间" AS followings_cached_at,
                 "有进度缓存" AS has_progress_cache,
-                "有verify缓存" AS has_verify_cache,
-                "有monitor缓存" AS has_monitor_cache,
+                "有counts缓存" AS has_counts_cache,
                 "有full缓存" AS has_full_cache,
                 {progress_due_expr} AS progress_cache_due
             FROM cache_inventory_current

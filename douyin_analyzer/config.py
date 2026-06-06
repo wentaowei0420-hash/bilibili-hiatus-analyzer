@@ -182,7 +182,9 @@ def load_analyzer_config(fetch_mode_override=None, recent_video_limit_override=N
     data_dir = root_dir / "data" / "douyin"
     output_dir = data_dir / "output"
     state_dir = data_dir / "state"
-    fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "monitor")).strip().lower()
+    fetch_mode = (fetch_mode_override or os.getenv("DOUYIN_FETCH_MODE", "counts")).strip().lower()
+    if fetch_mode not in {"counts", "full"}:
+        fetch_mode = "counts"
     try:
         recent_video_limit = (
             int(recent_video_limit_override)

@@ -286,10 +286,10 @@ def payload_from_config(config: RunConfig) -> dict[str, Any]:
         "bilibili_mode": config.bilibili_mode,
         "douyin_fetch_mode": config.douyin_fetch_mode,
         "douyin_backend": config.douyin_backend,
+        "douyin_browser_name": config.douyin_browser_name,
         "douyin_full_fetch_retry_on_mismatch": bool(
             config.douyin_full_fetch_retry_on_mismatch
         ),
-        "monitor_video_limit": config.monitor_video_limit,
         "uid_limit": config.uid_limit if config.uid_limit_enabled else None,
         "high_like_threshold": config.high_like_threshold,
         "unfollow_list_path": str(config.unfollow_list_path),

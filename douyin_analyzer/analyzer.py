@@ -106,13 +106,13 @@ class DouyinHiatusAnalyzer:
         return sorted(followings or [], key=sort_key)
 
     def get_fetch_mode(self):
-        if self.config.fetch_mode in {"counts", "verify", "monitor", "delta", "full"}:
+        if self.config.fetch_mode in {"counts", "full"}:
             return self.config.fetch_mode
-        return "monitor"
+        return "counts"
 
     @staticmethod
     def modes_requiring_basic_cache():
-        return {"verify", "monitor", "delta", "full"}
+        return {"full"}
 
     @staticmethod
     def entry_has_full_cache(entry):
@@ -159,7 +159,7 @@ class DouyinHiatusAnalyzer:
             if str(mode or "").strip()
         }
         modes.add("full")
-        if observed_mode in {"counts", "verify", "monitor", "delta"}:
+        if observed_mode == "counts":
             modes.add(observed_mode)
         preserved["cache_modes"] = sorted(modes)
         preserved["last_fetch_mode"] = "full"
@@ -942,11 +942,9 @@ class DouyinHiatusAnalyzer:
             if isinstance(explicit_modes, list):
                 for mode in explicit_modes:
                     mode_text = str(mode or "").strip().lower()
-                    if mode_text and mode_text != "full":
+                    if mode_text == "counts":
                         modes.add(mode_text)
-            if entry.get("latest_video") or entry.get("videos"):
-                modes.add("monitor")
-            return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
+            return {mode for mode in modes if mode in {"counts", "full"}}
 
         explicit_modes = entry.get("cache_modes")
         if isinstance(explicit_modes, list):
@@ -958,13 +956,10 @@ class DouyinHiatusAnalyzer:
         if isinstance(last_fetch_mode, str) and last_fetch_mode.strip():
             modes.add(last_fetch_mode.strip().lower())
 
-        if entry.get("latest_video") or entry.get("videos"):
-            modes.add("monitor")
-
         if self.entry_has_full_cache(entry):
             modes.add("full")
 
-        return {mode for mode in modes if mode in {"counts", "verify", "monitor", "delta", "full"}}
+        return {mode for mode in modes if mode in {"counts", "full"}}
 
     def load_full_status_reset_uids_from_store(self):
         db_path = getattr(self.config, "export_store_db", None)
@@ -1074,9 +1069,6 @@ class DouyinHiatusAnalyzer:
                     "cache_modes": ",".join(cache_modes),
                     "last_fetch_mode": last_fetch_mode,
                     "has_counts_cache": "是" if uid in followings_by_uid else "",
-                    "has_verify_cache": "是" if "verify" in cache_modes else "",
-                    "has_monitor_cache": "是" if "monitor" in cache_modes else "",
-                    "has_delta_cache": "是" if "delta" in cache_modes else "",
                     "has_full_cache": "是" if "full" in cache_modes else "",
                     "has_followings_cache": "是" if uid in followings_by_uid else "",
                     "followings_cache_saved_at": followings_cached_at if uid in followings_by_uid else "",
@@ -1203,7 +1195,7 @@ class DouyinHiatusAnalyzer:
 
     def display_counts_results(self, results):
         table = self.reporter.create_table(
-            "📋 抖音基础监控 Top 10",
+            "📋 抖音基础统计 Top 10",
             [
                 ("排名", "right", "bold"),
                 ("博主", "left"),
@@ -1358,64 +1350,24 @@ class DouyinHiatusAnalyzer:
             len(cached_followings or []),
             self.config.intermediate_upload_interval_users,
         )
-        monitor_refresh_followings = fetch_mode == "monitor"
-        enable_profile_change_refresh = fetch_mode == "monitor"
+        enable_profile_change_refresh = False
         # 关注列表决定“当前仍在关注的博主集合”，因此普通运行也必须优先刷新；
         # 否则用户手动取关后，未过期的旧缓存会让已取关博主持续残留在主表中。
         use_followings_cache = fetch_mode in self.modes_requiring_basic_cache()
 
-        if use_followings_cache and not monitor_refresh_followings:
+        if use_followings_cache:
             if not cached_followings:
-                raise RuntimeError("抖音非基础模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
+                raise RuntimeError("抖音完整模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
             followings = cached_followings
             self.reporter.message(
                 f"♻️  已复用 {len(followings)} 位抖音关注列表缓存，"
-                "本模式不重新滚动关注列表，将直接按缓存主页链接进入主页。"
+                "完整模式不重新滚动关注列表，将直接按缓存主页链接进入主页。"
             )
             logger.info(
                 "Douyin basic followings cache reused | mode={} | cached_rows={}",
                 fetch_mode,
                 len(followings),
             )
-        elif use_followings_cache and monitor_refresh_followings:
-            if not cached_followings:
-                raise RuntimeError("抖音监控模式需要先运行一次基础统计模式，生成关注列表缓存和 UP 主页链接。")
-            try:
-                self.reporter.message(
-                    f"🧭 监控模式将先刷新关注缓存，用于比较最新发布时间 | 本地缓存={len(cached_followings)} 条"
-                )
-                followings = self.browser_client.get_followings()
-                if followings:
-                    self.cache_repository.save_followings(followings)
-                    cached_followings = followings
-                    self.reporter.message(
-                        f"🧭 监控模式关注缓存已刷新 | 已写入缓存={len(followings)} 条 | 后续将据此判断是否需要进主页"
-                    )
-                    logger.info(
-                        "Douyin monitor followings refreshed for publish timestamp compare | rows={}",
-                        len(followings),
-                    )
-                else:
-                    followings = cached_followings
-                    self.reporter.message(
-                        f"⚠️  监控模式未拿到新的关注列表数据，已回退本地缓存继续运行 | 缓存条数={len(followings)}"
-                    )
-                    logger.warning(
-                        "Douyin monitor followings refresh returned empty; fallback cached rows={}",
-                        len(followings),
-                    )
-            except Exception as exc:
-                if self._is_following_integrity_error(exc):
-                    raise
-                followings = cached_followings
-                self.reporter.message(
-                    f"⚠️  监控模式刷新关注缓存失败，已回退本地缓存继续运行 | 缓存条数={len(followings)} | 原因={exc}"
-                )
-                logger.warning(
-                    "Douyin monitor followings refresh failed; fallback cached rows={} | error={}",
-                    len(followings),
-                    exc,
-                )
         else:
             try:
                 self.reporter.message(
@@ -1486,7 +1438,7 @@ class DouyinHiatusAnalyzer:
             if skipped_archived:
                 self.reporter.message(
                     f"🗄️  已跳过 {skipped_archived} 位处于 active 归档状态的长期未更新 UP，"
-                    "本轮不再进入主页校验/监控/全量处理。"
+                    "本轮不再进入完整模式处理。"
                 )
                 logger.info(
                     "Douyin archived creators skipped | skipped={} | remaining={}",
@@ -1567,12 +1519,6 @@ class DouyinHiatusAnalyzer:
         export_duration_analysis = self.should_export_duration_analysis()
         if fetch_mode == "counts":
             self.reporter.message("📇 当前为基础统计模式：只抓取每位博主的粉丝数、获赞总数和发布视频数。")
-        elif fetch_mode == "verify":
-            self.reporter.message("🔎 当前为主页校验模式：复用基础缓存主页链接，逐个进入主页校验获赞总数等主页数据。")
-        elif fetch_mode == "monitor":
-            self.reporter.message(f"🪶 当前为轻量监控模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品。")
-        elif fetch_mode == "delta":
-            self.reporter.message(f"🧩 当前为增量模式：每位博主只抓最近 {self.config.recent_video_limit} 条作品并合并到缓存。")
         else:
             self.reporter.message("📚 当前为全量模式：会抓取博主全部作品，并生成完整时长分析。")
         if fetch_mode != "counts":
@@ -1697,244 +1643,6 @@ class DouyinHiatusAnalyzer:
             )
             return results
 
-        if fetch_mode == "verify":
-            verified_users = []
-            profile_verified_count = 0
-            with self.reporter.progress() as progress_bar:
-                task_id = progress_bar.add_task("校验抖音博主主页数据", total=len(followings))
-                for index, user in enumerate(followings, 1):
-                    uid = user.get("sec_uid")
-                    try:
-                        check_stop()
-                    except OperationCancelled:
-                        self.merge_updated_followings_cache(cached_followings, verified_users)
-                        self.flush_partial_outputs(
-                            results,
-                            all_video_rows,
-                            summary_rows,
-                            progress,
-                            pending_progress_saves,
-                            index - 1,
-                            merge_existing=partial_run,
-                        )
-                        raise
-
-                    if self.failed_profile_key_matches(user, failed_profile_keys):
-                        failed_profile_skip_count += 1
-                        result = self.build_failed_profile_skipped_result_item(user)
-                        results.append(result)
-                        if self.should_export_summary_analysis():
-                            summary_rows.append(self.build_counts_only_summary(user))
-                        self.append_fetch_manifest_record(
-                            user,
-                            "failed_profile_skipped",
-                            result=result,
-                            message="matched_failed_profiles_csv",
-                        )
-                        progress_bar.advance(task_id)
-                        continue
-
-                    entry = progress.get(uid) if isinstance(progress, dict) and uid else None
-                    force_refresh_reason = self.force_refresh_reason_for_mode(
-                        user,
-                        entry,
-                        store_reset_uids,
-                        fetch_mode,
-                    )
-                    refresh_needed, refresh_reason = self.cache_repository.should_refresh_profile(
-                        user,
-                        entry,
-                        return_reason=True,
-                        refresh_on_profile_change=False,
-                        force_refresh_reason=force_refresh_reason,
-                    )
-                    if self.is_zero_video_candidate(user) and not refresh_needed:
-                        refresh_needed = True
-                        refresh_reason = "zero_aweme_count_candidate"
-                    profile_verified = False
-                    if refresh_needed:
-                        if refresh_reason in refresh_reason_counts:
-                            refresh_reason_counts[refresh_reason] += 1
-                        try:
-                            self.browser_client.refresh_user_profile_from_homepage(user)
-                            verified_users.append(dict(user))
-                            profile_verified = True
-                            profile_verified_count += 1
-                            refreshed_user_count += 1
-                        except DouyinRateLimitError as exc:
-                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验触发速率限制: {exc}")
-                            self.record_profile_failure(user, exc, "verify_rate_limit")
-                            self.browser_client.restart(self.config.rate_limit_global_cooldown)
-                        except DouyinServiceError as exc:
-                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验出现服务异常: {exc}")
-                            self.record_profile_failure(user, exc, "verify_service_error")
-                            self.browser_client.restart(self.config.service_error_global_cooldown)
-                        except Exception as exc:
-                            self.reporter.message(f"⚠️  {user.get('nickname', '未知UP主')} 主页校验失败，将保留缓存数据: {exc}")
-                            self.record_profile_failure(user, exc, "verify_profile")
-                    else:
-                        cache_hit_count += 1
-
-                    if profile_verified and self.handle_empty_video_profile(
-                        user,
-                        progress=progress,
-                        cached_followings=cached_followings,
-                        verified_users=verified_users,
-                    ):
-                        self.append_fetch_manifest_record(
-                            user,
-                            "empty_profile_unfollowed",
-                            video_count=0,
-                            latest_video=None,
-                            refresh_reason=refresh_reason,
-                            message="empty_video_profile_confirmed",
-                        )
-                        progress_bar.advance(task_id)
-                        continue
-
-                    summary = self.build_summary_from_cached_entry(user, entry)
-                    if (
-                        profile_verified
-                        and user.get("total_favorited") not in (None, "")
-                        and not self.summary_has_precise_public_like_total(summary)
-                    ):
-                        summary["total_favorited"] = user.get("total_favorited")
-                    result = self.build_result_from_cached_entry(user, entry)
-                    if profile_verified:
-                        result["data_source"] = "douyin_profile_verify"
-                    elif not refresh_needed:
-                        result["data_source"] = "douyin_cache_mark_valid"
-                    verify_videos = entry.get("videos", []) if isinstance(entry, dict) else []
-                    self.append_fetch_manifest_record(
-                        user,
-                        "profile_verified" if profile_verified else "cache_hit",
-                        video_count=len(verify_videos or []),
-                        latest_video=self.get_latest_video_from_entry(entry),
-                        result=result,
-                        refresh_reason=refresh_reason,
-                    )
-                    results.append(result)
-                    if self.should_export_summary_analysis():
-                        summary_rows.append(summary)
-
-                    if uid and profile_verified:
-                        videos = entry.get("videos", []) if isinstance(entry, dict) else []
-                        latest_video = self.get_latest_video_from_entry(entry)
-                        preserve_full_cache = self.should_preserve_full_cache(entry)
-                        if preserve_full_cache:
-                            progress_user = {
-                                key: value
-                                for key, value in user.items()
-                                if not str(key).startswith("_")
-                            }
-                            progress[uid] = self.update_preserved_full_progress_entry(
-                                entry,
-                                "verify",
-                                user=progress_user,
-                                videos=videos,
-                                summary=summary,
-                                latest_video=latest_video,
-                            )
-                        else:
-                            existing_modes = set()
-                            if isinstance(entry, dict) and isinstance(entry.get("cache_modes"), list):
-                                existing_modes = {
-                                    str(mode).strip().lower()
-                                    for mode in entry.get("cache_modes", [])
-                                    if str(mode).strip()
-                                }
-                            existing_modes.add("verify")
-                            progress[uid] = {
-                                "cached_at": int(time.time()),
-                                "user": user,
-                                "videos": videos,
-                                "summary": summary,
-                                "latest_video": latest_video,
-                                "last_fetch_mode": fetch_mode,
-                                "cache_modes": sorted(existing_modes),
-                            }
-                        self.cache_repository.save_video_state_entries(
-                            {uid: progress[uid]},
-                            source_mode="full" if preserve_full_cache else fetch_mode,
-                        )
-                        pending_progress_saves += 1
-
-                    progress_bar.advance(task_id)
-
-                    if pending_progress_saves >= self.config.progress_save_interval_users:
-                        self.cache_repository.save_run_progress(progress)
-                        pending_progress_saves = 0
-
-                    if (
-                        profile_verified
-                        and self.config.refresh_batch_size > 0
-                        and refreshed_user_count % self.config.refresh_batch_size == 0
-                    ):
-                        cooldown = self.config.refresh_batch_cooldown
-                        self.reporter.message(
-                            f"⏸️  已连续主页校验 {refreshed_user_count} 位博主，"
-                            f"批次冷却 {cooldown:.0f} 秒后继续..."
-                        )
-                        self.reporter.wait(cooldown, "抖音主页校验批次冷却中")
-
-                    if (
-                        profile_verified
-                        and self.config.browser_restart_interval_users > 0
-                        and refreshed_user_count % self.config.browser_restart_interval_users == 0
-                    ):
-                        self.reporter.message(
-                            f"🔧 已主页校验 {refreshed_user_count} 位博主，重启浏览器会话以降低后续风控概率..."
-                        )
-                        self.browser_client.restart(5)
-
-                    if (
-                        self.config.intermediate_upload_interval_users > 0
-                        and index % self.config.intermediate_upload_interval_users == 0
-                    ):
-                        self.merge_updated_followings_cache(cached_followings, verified_users)
-                        self.flush_partial_outputs(
-                            results,
-                            all_video_rows,
-                            summary_rows,
-                            progress,
-                            pending_progress_saves,
-                            index,
-                            merge_existing=partial_run,
-                        )
-                        pending_progress_saves = 0
-
-            if pending_progress_saves:
-                self.cache_repository.save_run_progress(progress)
-            self.merge_updated_followings_cache(cached_followings, verified_users)
-
-            self.display_counts_results(results)
-            self.export_service.save_main_results(results, merge_existing=partial_run)
-            if self.should_export_summary_analysis():
-                self.export_service.save_summary_analysis(summary_rows, merge_existing=partial_run)
-            self.export_service.save_cache_inventory(
-                self.build_cache_inventory_rows(
-                    self.cache_repository.load_followings_payload(),
-                    self.cache_repository.load_run_progress(),
-                ),
-            )
-
-            exported = [self.config.output_csv, self.config.cache_inventory_csv]
-            if self.should_export_summary_analysis():
-                exported.append(self.config.video_duration_analysis_csv)
-            logger.info(
-                "Douyin verify finished | followings={} | verified={} | cache_hits={} | results={} | exported={}",
-                len(followings),
-                profile_verified_count,
-                cache_hit_count,
-                len(results),
-                [str(path) for path in exported],
-            )
-            self.reporter.message(
-                f"🗂️  抖音 verify 模式已输出：{self._format_output_summary(exported)}，"
-                f"本轮进主页校验 {profile_verified_count} 位，复用未到期缓存 {cache_hit_count} 位"
-            )
-            return results
-
         with self.reporter.progress() as progress_bar:
             task_id = progress_bar.add_task("分析抖音博主", total=len(followings))
             for index, user in enumerate(followings, 1):
@@ -1995,61 +1703,48 @@ class DouyinHiatusAnalyzer:
                     if refresh_reason in refresh_reason_counts:
                         refresh_reason_counts[refresh_reason] += 1
                     try:
-                        if fetch_mode == "full":
-                            user["_full_fetch_validated"] = False
-                            videos = []
-                            full_fetch_validation_error = None
-                            full_fetch_attempts = 0
-                            max_full_fetch_attempts = (
-                                2 if self.config.full_fetch_retry_on_mismatch else 1
-                            )
-                            for full_fetch_attempts in range(1, max_full_fetch_attempts + 1):
-                                try:
-                                    retry_videos = self.browser_client.get_all_videos_for_user(user)
-                                    videos = self.merge_videos(videos, retry_videos)
-                                    user["_full_fetch_validated"] = True
-                                    full_fetch_validation_error = None
-                                    break
-                                except DouyinFullFetchValidationError as exc:
-                                    videos = self.merge_videos(videos, exc.videos)
-                                    latest_video = self.get_latest_video_from_videos(videos)
-                                    full_fetch_validation_error = exc
+                        user["_full_fetch_validated"] = False
+                        videos = []
+                        full_fetch_validation_error = None
+                        full_fetch_attempts = 0
+                        max_full_fetch_attempts = (
+                            2 if self.config.full_fetch_retry_on_mismatch else 1
+                        )
+                        for full_fetch_attempts in range(1, max_full_fetch_attempts + 1):
+                            try:
+                                retry_videos = self.browser_client.get_all_videos_for_user(user)
+                                videos = self.merge_videos(videos, retry_videos)
+                                user["_full_fetch_validated"] = True
+                                full_fetch_validation_error = None
+                                break
+                            except DouyinFullFetchValidationError as exc:
+                                videos = self.merge_videos(videos, exc.videos)
+                                latest_video = self.get_latest_video_from_videos(videos)
+                                full_fetch_validation_error = exc
+                                self.reporter.message(
+                                    f"⚠️  {user['nickname']} 全量数量校验未通过 "
+                                    f"({exc.actual_count}/{exc.expected_count or '未知'})：{exc}"
+                                )
+                                if full_fetch_attempts < max_full_fetch_attempts:
+                                    next_attempt = full_fetch_attempts + 1
                                     self.reporter.message(
-                                        f"⚠️  {user['nickname']} 全量数量校验未通过 "
-                                        f"({exc.actual_count}/{exc.expected_count or '未知'})：{exc}"
+                                        f"🔁 正在重新进入 {user['nickname']} 主页执行第 {next_attempt} 次全量抓取校验..."
                                     )
-                                    if full_fetch_attempts < max_full_fetch_attempts:
-                                        next_attempt = full_fetch_attempts + 1
-                                        self.reporter.message(
-                                            f"🔁 正在重新进入 {user['nickname']} 主页执行第 {next_attempt} 次全量抓取校验..."
-                                        )
-                                        continue
-                                    user["_full_fetch_validated"] = False
-                                    full_fetch_mismatch_rows.append(
-                                        self.build_full_fetch_mismatch_row(
-                                            user,
-                                            exc,
-                                            full_fetch_attempts,
-                                        )
+                                    continue
+                                user["_full_fetch_validated"] = False
+                                full_fetch_mismatch_rows.append(
+                                    self.build_full_fetch_mismatch_row(
+                                        user,
+                                        exc,
+                                        full_fetch_attempts,
                                     )
-                                    self.reporter.message(
-                                        f"📝 {user['nickname']} 全量抓取校验未通过"
-                                        f"（共尝试 {full_fetch_attempts} 次），"
-                                        f"已记录到 {self.config.full_fetch_mismatch_csv.name}，继续下一个博主。"
-                                    )
-                            latest_video = self.get_latest_video_from_videos(videos)
-                        else:
-                            recent_videos = self.browser_client.get_recent_videos_for_user(
-                                user,
-                                self.config.recent_video_limit,
-                            )
-                            latest_video = recent_videos[0] if recent_videos else None
-                            if fetch_mode == "delta" and entry:
-                                videos = self.merge_videos(entry.get("videos", []), recent_videos)
-                            elif entry and entry.get("videos"):
-                                videos = entry.get("videos", [])
-                            else:
-                                videos = recent_videos
+                                )
+                                self.reporter.message(
+                                    f"📝 {user['nickname']} 全量抓取校验未通过"
+                                    f"（共尝试 {full_fetch_attempts} 次），"
+                                    f"已记录到 {self.config.full_fetch_mismatch_csv.name}，继续下一个博主。"
+                                )
+                        latest_video = self.get_latest_video_from_videos(videos)
                     except DouyinFullModeFrequencyError as exc:
                         self.reporter.message(f"⚠️  {exc}")
                         self.flush_partial_outputs(
@@ -2150,8 +1845,7 @@ class DouyinHiatusAnalyzer:
                             for mode in entry.get("cache_modes", [])
                             if str(mode).strip()
                         }
-                    if fetch_mode in {"monitor", "delta", "full"}:
-                        existing_modes.add(fetch_mode)
+                    existing_modes.add("full")
 
                     progress_user = {
                         key: value

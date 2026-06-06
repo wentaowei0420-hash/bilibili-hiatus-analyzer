@@ -122,6 +122,7 @@ def _apply_gui_metadata(metadata):
     MainWindow.BILIBILI_MODE_OPTIONS = _option_pairs(main_window.get("bilibili_modes"))
     MainWindow.DOUYIN_MODE_OPTIONS = _option_pairs(main_window.get("douyin_modes"))
     MainWindow.BROWSER_BACKEND_OPTIONS = _option_pairs(main_window.get("browser_backends"))
+    MainWindow.DOUYIN_BROWSER_OPTIONS = _option_pairs(main_window.get("browser_names"))
     MainWindow.PLATFORM_OPTIONS = _option_pairs(main_window.get("platforms"))
     MainWindow.ACTION_OPTIONS = _option_pairs(main_window.get("actions"))
     DouyinStatsDialog.MODE_ROWS = [(value, label) for label, value in _option_pairs(stats.get("modes"))]
@@ -2723,6 +2724,7 @@ class MainWindow(QMainWindow):
     BILIBILI_MODE_OPTIONS = []
     DOUYIN_MODE_OPTIONS = []
     BROWSER_BACKEND_OPTIONS = []
+    DOUYIN_BROWSER_OPTIONS = []
     PLATFORM_OPTIONS = []
     ACTION_OPTIONS = []
 
@@ -2873,19 +2875,20 @@ class MainWindow(QMainWindow):
         self.douyin_mode_combo = QComboBox()
         for label, mode in self.DOUYIN_MODE_OPTIONS:
             self.douyin_mode_combo.addItem(label, mode)
-        default_douyin_index = self.douyin_mode_combo.findData("monitor")
+        default_douyin_index = self.douyin_mode_combo.findData("counts")
         self.douyin_mode_combo.setCurrentIndex(default_douyin_index if default_douyin_index >= 0 else 0)
         self.douyin_mode_combo.currentIndexChanged.connect(self._sync_visible_options)
         add_setting(1, "B站抓取模式", self.bilibili_mode_combo)
 
-        self.monitor_video_limit_spin = QSpinBox()
-        self.monitor_video_limit_spin.setRange(1, 500)
-        self.monitor_video_limit_spin.setValue(10)
-        self.monitor_video_limit_spin.setToolTip("监控/增量模式下，每位博主最多抓取最近 N 条视频。基础统计和完整模式会忽略该参数。")
-
         self.backend_combo = QComboBox()
         for label, value in self.BROWSER_BACKEND_OPTIONS:
             self.backend_combo.addItem(label, value)
+
+        self.douyin_browser_combo = QComboBox()
+        for label, value in self.DOUYIN_BROWSER_OPTIONS:
+            self.douyin_browser_combo.addItem(label, value)
+        default_browser_index = self.douyin_browser_combo.findData("edge")
+        self.douyin_browser_combo.setCurrentIndex(default_browser_index if default_browser_index >= 0 else 0)
 
         self.uid_fetch_mode_button = QPushButton()
         self.uid_fetch_mode_button.setCheckable(True)
@@ -3003,23 +3006,40 @@ class MainWindow(QMainWindow):
         douyin_settings_grid.setHorizontalSpacing(12)
         douyin_settings_grid.setVerticalSpacing(8)
         douyin_settings_grid.setColumnMinimumWidth(0, 92)
-        douyin_settings_grid.setColumnMinimumWidth(2, 116)
+        douyin_settings_grid.setColumnMinimumWidth(2, 92)
+        douyin_settings_grid.setColumnMinimumWidth(4, 92)
         douyin_settings_grid.setColumnStretch(1, 1)
         douyin_settings_grid.setColumnStretch(3, 1)
+        douyin_settings_grid.setColumnStretch(5, 1)
 
-        def add_douyin_setting(row, left_label, left_widget, right_label=None, right_widget=None):
-            douyin_settings_grid.addWidget(QLabel(left_label), row, 0)
-            douyin_settings_grid.addWidget(left_widget, row, 1)
-            if right_label is not None and right_widget is not None:
-                douyin_settings_grid.addWidget(QLabel(right_label), row, 2)
-                douyin_settings_grid.addWidget(right_widget, row, 3)
+        def add_douyin_setting(row, *items):
+            for pair_index in range(0, len(items), 2):
+                label_text = items[pair_index]
+                widget = items[pair_index + 1]
+                label_column = pair_index
+                widget_column = pair_index + 1
+                label = QLabel(label_text)
+                label.setMinimumHeight(28)
+                widget.setMinimumWidth(0)
+                widget.setMaximumWidth(16777215)
+                widget.setMinimumHeight(28)
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                douyin_settings_grid.addWidget(label, row, label_column)
+                douyin_settings_grid.addWidget(widget, row, widget_column)
 
-        add_douyin_setting(0, "抖音抓取模式", self.douyin_mode_combo, "抖音浏览器后端", self.backend_combo)
+        add_douyin_setting(
+            0,
+            "抖音抓取模式",
+            self.douyin_mode_combo,
+            "抖音浏览器后端",
+            self.backend_combo,
+            "抖音浏览器",
+            self.douyin_browser_combo,
+        )
         metric_grid = QGridLayout()
         metric_grid.setHorizontalSpacing(10)
         metric_grid.setVerticalSpacing(0)
         metric_items = (
-            ("监控视频数", self.monitor_video_limit_spin),
             ("UID 数量", self.uid_limit_spin),
             ("高赞阈值", self.high_like_spin),
             ("自动间隔", self.auto_full_interval_spin),
@@ -3036,7 +3056,7 @@ class MainWindow(QMainWindow):
             metric_grid.setColumnStretch(column * 2 + 1, 1)
             metric_grid.addWidget(label, 0, column * 2)
             metric_grid.addWidget(widget, 0, column * 2 + 1)
-        douyin_settings_grid.addLayout(metric_grid, 1, 0, 1, 4)
+        douyin_settings_grid.addLayout(metric_grid, 1, 0, 1, 6)
         douyin_quick_layout.addLayout(douyin_settings_grid)
 
         douyin_button_grid = QGridLayout()
@@ -3099,15 +3119,14 @@ class MainWindow(QMainWindow):
         is_normal = platform in {"both", "bilibili", "douyin"}
         is_bilibili = platform in {"both", "bilibili"}
         is_douyin = platform in {"both", "douyin", "douyin_unfollow", "douyin_uid"}
-        is_recent_video_mode = self.douyin_mode_combo.currentData() in {"monitor", "delta"}
         supports_full_fetch_retry = platform in {"both", "douyin"} and self.douyin_mode_combo.currentData() == "full"
 
         editable = not self.config_locked
         self.action_combo.setEnabled(editable and is_normal)
         self.bilibili_mode_combo.setEnabled(editable and is_bilibili)
         self.douyin_mode_combo.setEnabled(editable and is_douyin and platform != "douyin_unfollow")
-        self.monitor_video_limit_spin.setEnabled(editable and is_douyin and is_recent_video_mode)
         self.backend_combo.setEnabled(editable and is_douyin)
+        self.douyin_browser_combo.setEnabled(editable and is_douyin)
         self.platform_combo.setEnabled(editable)
         self.uid_fetch_mode_button.setEnabled(editable)
         self.uid_limit_spin.setEnabled(editable and self.uid_fetch_mode_button.isChecked())
@@ -3135,7 +3154,7 @@ class MainWindow(QMainWindow):
             bilibili_mode=self.bilibili_mode_combo.currentData(),
             douyin_fetch_mode=self.douyin_mode_combo.currentData(),
             douyin_backend=self.backend_combo.currentData(),
-            monitor_video_limit=self.monitor_video_limit_spin.value(),
+            douyin_browser_name=self.douyin_browser_combo.currentData(),
             uid_limit_enabled=self.uid_fetch_mode_button.isChecked(),
             uid_limit=self.uid_limit_spin.value(),
             high_like_threshold=self.high_like_spin.value(),
@@ -3162,7 +3181,7 @@ class MainWindow(QMainWindow):
             "bilibili_mode": self.bilibili_mode_combo.currentData(),
             "douyin_fetch_mode": self.douyin_mode_combo.currentData(),
             "douyin_backend": self.backend_combo.currentData(),
-            "monitor_video_limit": self.monitor_video_limit_spin.value(),
+            "douyin_browser_name": self.douyin_browser_combo.currentData(),
             "uid_limit_enabled": self.uid_fetch_mode_button.isChecked(),
             "uid_limit": self.uid_limit_spin.value(),
             "high_like_threshold": self.high_like_spin.value(),
@@ -3198,6 +3217,7 @@ class MainWindow(QMainWindow):
                 (self.bilibili_mode_combo, "bilibili_mode"),
                 (self.douyin_mode_combo, "douyin_fetch_mode"),
                 (self.backend_combo, "douyin_backend"),
+                (self.douyin_browser_combo, "douyin_browser_name"),
             ):
                 index = self._combo_index_by_data(combo, data.get(key))
                 if index >= 0:
@@ -3206,9 +3226,6 @@ class MainWindow(QMainWindow):
             self.uid_fetch_mode_button.setChecked(bool(data.get("uid_limit_enabled", False)))
             self._sync_uid_fetch_mode_button()
             self.uid_limit_spin.setValue(int(data.get("uid_limit", self.uid_limit_spin.value()) or self.uid_limit_spin.value()))
-            self.monitor_video_limit_spin.setValue(
-                int(data.get("monitor_video_limit", self.monitor_video_limit_spin.value()) or self.monitor_video_limit_spin.value())
-            )
             self.high_like_spin.setValue(
                 int(data.get("high_like_threshold", self.high_like_spin.value()) or self.high_like_spin.value())
             )
@@ -3551,7 +3568,12 @@ class MainWindow(QMainWindow):
                 "界面字段、选项和表格列定义必须从后端 /api/gui/metadata 获取。GUI 已尝试自动启动后端，请检查 runtime/logs/backend_gui_autostart.log。",
             )
             return False
-        if not self.PLATFORM_OPTIONS or not self.ACTION_OPTIONS or not self.DOUYIN_MODE_OPTIONS:
+        if (
+            not self.PLATFORM_OPTIONS
+            or not self.ACTION_OPTIONS
+            or not self.DOUYIN_MODE_OPTIONS
+            or not self.DOUYIN_BROWSER_OPTIONS
+        ):
             self._show_warning_dialog(
                 "GUI 元数据缺失",
                 "后端未返回完整的界面元数据，无法安全启动任务。",

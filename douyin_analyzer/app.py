@@ -405,7 +405,7 @@ def run_analysis(
     setup_logging(config.log_dir, "douyin_app")
     export_outputs = bool(export_outputs or trigger_upload)
 
-    fetch_mode = (config.fetch_mode or "monitor").strip().lower()
+    fetch_mode = (config.fetch_mode or "counts").strip().lower()
     enable_partial_upload = trigger_upload and export_outputs and fetch_mode != "counts"
 
     browser_client = create_douyin_browser_client(config)

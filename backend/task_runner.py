@@ -173,6 +173,7 @@ def _build_runtime_env(request: JobCreateRequest) -> dict[str, str]:
     )
     env = {
         "DOUYIN_BROWSER_BACKEND": (request.douyin_backend or "drission").strip().lower(),
+        "DOUYIN_BROWSER_NAME": (request.douyin_browser_name or "edge").strip().lower(),
         "DOUYIN_FULL_FETCH_RETRY_ON_MISMATCH": (
             "true" if request.douyin_full_fetch_retry_on_mismatch else "false"
         ),
@@ -263,6 +264,7 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
     context.emit(f"Action: {_enum_value(request.action)}")
     context.emit(f"Douyin mode: {request.douyin_fetch_mode}")
     context.emit(f"Douyin backend: {request.douyin_backend}")
+    context.emit(f"Douyin browser: {request.douyin_browser_name}")
     context.emit("-" * 60)
 
     if kind == JobKind.BILIBILI_ANALYSIS:
@@ -372,12 +374,15 @@ def _run_bilibili_main(request: JobCreateRequest, reporter=None) -> Any:
 def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
     from douyin_analyzer.app import run_analysis, run_feishu_upload
 
+    fetch_mode = (request.douyin_fetch_mode or "counts").strip().lower()
+    if fetch_mode not in {"counts", "full"}:
+        raise ValueError(f"Unsupported Douyin fetch mode: {request.douyin_fetch_mode}")
+
     if request.action == AnalysisAction.FETCH:
         result = run_analysis(
             trigger_upload=False,
-            fetch_mode_override=request.douyin_fetch_mode,
+            fetch_mode_override=fetch_mode,
             max_followings=request.uid_limit,
-            recent_video_limit_override=request.monitor_video_limit,
             reporter=reporter,
             export_outputs=request.persist_outputs,
         )
@@ -387,9 +392,8 @@ def _run_douyin_main(request: JobCreateRequest, reporter=None) -> Any:
     if request.action == AnalysisAction.FETCH_UPLOAD:
         result = run_analysis(
             trigger_upload=True,
-            fetch_mode_override=request.douyin_fetch_mode,
+            fetch_mode_override=fetch_mode,
             max_followings=request.uid_limit,
-            recent_video_limit_override=request.monitor_video_limit,
             reporter=reporter,
             export_outputs=True,
         )
