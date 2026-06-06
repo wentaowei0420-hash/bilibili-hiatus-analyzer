@@ -13,6 +13,7 @@ from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
 from .job_manager import JobManager
 from .job_models import JobCreateRequest, JobEventResponse, JobSummary
+from .revision import health_payload
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -39,7 +40,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "hiatus-backend", "api_version": "8"}
+    return health_payload()
 
 
 @app.get("/api/capabilities")

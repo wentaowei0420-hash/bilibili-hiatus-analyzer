@@ -12,15 +12,19 @@ from typing import Any
 from auth import CookieManager
 from cli.main import download_url
 from config import ConfigLoader
+from control import RateLimiter
 from core import DouyinAPIClient
 from core.downloader_base import _FilenameTemplateValues, _normalize_filename_template
 from gui_modules.cookie_check import check_douyin_cookie_status
 from gui_modules.cookie_login_sync import sync_douyin_cookies_via_browser
+from gui_modules.async_cooldown import sleep_for_decision
 from gui_modules.data_source import (
+    delete_sql_video_records,
     load_sql_video_rows,
     resolve_database_path,
     resolve_rating_database_path,
 )
+from gui_modules.detail_failure_cooldown import DetailFailureCooldownPolicy
 from gui_modules.failed_records import (
     append_failed_record,
     load_failed_aweme_ids,
@@ -1291,6 +1295,18 @@ class HighLikeDownloaderGUI:
             "filter_desc": self._describe_filter(),
         }
 
+    def _delete_unavailable_video_link(
+        self, config: ConfigLoader, row: dict[str, Any]
+    ) -> int:
+        aweme_id = str(row.get("aweme_id") or row.get("视频ID") or "").strip()
+        video_url = str(row.get("video_url") or row.get("视频链接") or "").strip()
+        return delete_sql_video_records(
+            config,
+            project_root=PROJECT_ROOT,
+            aweme_id=aweme_id,
+            video_url=video_url,
+        )
+
     def _download_worker(self):
         try:
             set_console_log_level(50)
@@ -1346,6 +1362,10 @@ class HighLikeDownloaderGUI:
             failed = 0
             skipped = 0
             detail_api_hint_logged = False
+            detail_api_cooldown = DetailFailureCooldownPolicy()
+            batch_rate_limiter = RateLimiter(
+                max_per_second=float(config.get("rate_limit", 2) or 2)
+            )
             for index, row in enumerate(selected_rows, 1):
                 if self.stop_requested.is_set():
                     break
@@ -1359,30 +1379,44 @@ class HighLikeDownloaderGUI:
 
                 self.events.put(("current", f"正在下载 {index}/{len(selected_rows)}：{aweme_id}"))
                 config.update(filename_context=self._filename_context_for_row(row, config))
+                await batch_rate_limiter.acquire()
                 result = await download_url(url, config, cookie_manager, database, progress_reporter=None)
+                cooldown_decision = None
                 if result and result.success > 0:
                     success += result.success
                     completed += result.success
+                    detail_api_cooldown.reset()
                     self._remove_failed_record(failed_csv_path, aweme_id)
                 elif result and result.skipped > 0:
                     skipped += result.skipped
                     self._remove_failed_record(failed_csv_path, aweme_id)
                 else:
-                    failed += 1
                     error_kind = getattr(result, "error_kind", "") if result else ""
                     error_text = getattr(result, "error", "") if result else ""
-                    if error_text:
-                        self.events.put(("log", f"下载失败：{aweme_id}，{error_text}"))
-                    if error_kind == "detail_api":
-                        if not detail_api_hint_logged:
-                            self.events.put(
-                                (
-                                    "log",
-                                    "提示：当前失败发生在抖音详情直连接口，不是 SQL 链接筛选问题；可开启“启用浏览器兜底”、刷新 Cookie，或打开“下载前抽样检测”提前拦截。",
-                                )
+                    if error_kind == "video_unavailable":
+                        skipped += 1
+                        deleted = self._delete_unavailable_video_link(config, row)
+                        self._remove_failed_record(failed_csv_path, aweme_id)
+                        self.events.put(
+                            (
+                                "log",
+                                f"视频不存在，已删除候选链接并跳过：{aweme_id}（删除记录 {deleted} 条）",
                             )
-                            detail_api_hint_logged = True
+                        )
                     else:
+                        failed += 1
+                        if error_text:
+                            self.events.put(("log", f"下载失败：{aweme_id}，{error_text}"))
+                        if error_kind == "detail_api":
+                            cooldown_decision = detail_api_cooldown.record_detail_api_failure()
+                            if not detail_api_hint_logged:
+                                self.events.put(
+                                    (
+                                        "log",
+                                        "提示：当前失败发生在抖音详情直连接口，不是 SQL 链接筛选问题；可开启“启用浏览器兜底”、刷新 Cookie，或打开“下载前抽样检测”提前拦截。",
+                                    )
+                                )
+                                detail_api_hint_logged = True
                         self._append_failed_record(failed_csv_path, row)
 
                 self.events.put(
@@ -1398,6 +1432,9 @@ class HighLikeDownloaderGUI:
                         },
                     )
                 )
+                if cooldown_decision and cooldown_decision.should_sleep:
+                    self.events.put(("log", cooldown_decision.message))
+                    await sleep_for_decision(cooldown_decision)
 
             return {
                 "success": success,

@@ -2,7 +2,10 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from core.browser_detail_fallback import get_shared_browser_detail_fallback
+from core.browser_detail_fallback import (
+    BrowserVideoUnavailableError,
+    get_shared_browser_detail_fallback,
+)
 from core.downloader_base import BaseDownloader, DownloadResult
 from utils.logger import setup_logger
 
@@ -30,13 +33,14 @@ class VideoDownloader(BaseDownloader):
 
         await self.rate_limiter.acquire()
 
+        self._last_fetch_error_kind = ""
         aweme_data = await self._fetch_aweme_data(aweme_id)
         if not aweme_data:
             detail_error = getattr(self.api_client, "last_error", "") or "未返回详情"
             logger.error("Failed to get video detail: %s (%s)", aweme_id, detail_error)
             result.failed += 1
             result.error = f"获取视频详情失败：{detail_error}"
-            result.error_kind = "detail_api"
+            result.error_kind = getattr(self, "_last_fetch_error_kind", "") or "detail_api"
             self._progress_advance_item("failed", str(aweme_id))
             return result
 
@@ -69,7 +73,13 @@ class VideoDownloader(BaseDownloader):
             getattr(self.api_client, "last_error", "") or "unknown error",
         )
         self._progress_update_step("浏览器兜底", f"打开视频页补取详情：{aweme_id}")
-        return await asyncio.to_thread(self._fetch_aweme_data_via_browser, aweme_id)
+        try:
+            return await asyncio.to_thread(self._fetch_aweme_data_via_browser, aweme_id)
+        except BrowserVideoUnavailableError:
+            self._last_fetch_error_kind = "video_unavailable"
+            self.api_client.last_error = "浏览器兜底确认视频不存在"
+            logger.warning("Browser fallback confirmed video unavailable: %s", aweme_id)
+            return None
 
     def _browser_fallback_enabled(self) -> bool:
         browser_cfg = self.config.get("browser_fallback", {}) or {}

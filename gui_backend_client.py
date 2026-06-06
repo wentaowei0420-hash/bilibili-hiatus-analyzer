@@ -12,11 +12,12 @@ from urllib.parse import quote, urlencode, urlparse
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from backend.revision import BACKEND_SERVICE, backend_revision
 from gui_models import RunConfig
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
-MIN_BACKEND_API_VERSION = "8"
+MIN_BACKEND_API_VERSION = 9
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ROOT_DIR = Path(__file__).resolve().parent
 BACKEND_AUTOSTART_LOG = ROOT_DIR / "runtime" / "logs" / "backend_gui_autostart.log"
@@ -97,11 +98,23 @@ def _backend_is_compatible(client: "BackendApiClient") -> bool:
         health = client.health()
     except BackendApiError:
         return False
+    return _health_payload_is_compatible(health)
+
+
+def _health_payload_is_compatible(health: dict[str, Any]) -> bool:
     return (
         health.get("status") == "ok"
-        and health.get("service") == "hiatus-backend"
-        and str(health.get("api_version") or "") >= MIN_BACKEND_API_VERSION
+        and health.get("service") == BACKEND_SERVICE
+        and _api_version_at_least(health.get("api_version"), MIN_BACKEND_API_VERSION)
+        and str(health.get("revision") or "") == backend_revision()
     )
+
+
+def _api_version_at_least(version: Any, minimum: int) -> bool:
+    try:
+        return int(version) >= int(minimum)
+    except (TypeError, ValueError):
+        return False
 
 
 def _local_base_url_with_free_port(base_url: str) -> str:

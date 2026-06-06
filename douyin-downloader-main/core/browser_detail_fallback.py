@@ -12,6 +12,10 @@ from utils.logger import setup_logger
 logger = setup_logger("BrowserDetailFallback")
 
 
+class BrowserVideoUnavailableError(RuntimeError):
+    """Raised when the browser page confirms that the target video is gone."""
+
+
 class BrowserDetailFallback:
     def __init__(self):
         self._page = None
@@ -43,6 +47,9 @@ class BrowserDetailFallback:
                     timeout_seconds=max(5, int(timeout_seconds or 25)),
                     page_load_delay=max(0.0, float(page_load_delay or 0)),
                 )
+            except BrowserVideoUnavailableError:
+                logger.warning("Browser detail fallback confirmed video unavailable: %s", aweme_id)
+                raise
             except Exception as exc:
                 logger.warning("Browser detail fallback failed for %s: %s", aweme_id, exc)
                 return None
@@ -101,17 +108,48 @@ class BrowserDetailFallback:
             page.get(f"https://www.douyin.com/video/{aweme_id}")
             if page_load_delay:
                 time.sleep(page_load_delay)
+            if self._page_indicates_video_unavailable(page):
+                raise BrowserVideoUnavailableError(
+                    f"Video unavailable in browser page: {aweme_id}"
+                )
             packets = self._drain_packets(page, timeout=timeout_seconds)
             for packet in packets:
                 detail = self._extract_matching_detail(packet, aweme_id)
                 if detail:
                     return detail
+            if self._page_indicates_video_unavailable(page):
+                raise BrowserVideoUnavailableError(
+                    f"Video unavailable in browser page: {aweme_id}"
+                )
         finally:
             try:
                 page.listen.stop()
             except Exception:
                 pass
         return None
+
+    @staticmethod
+    def _page_indicates_video_unavailable(page) -> bool:
+        markers = (
+            "你要观看的视频不存在",
+            "视频不存在",
+            "作品不存在",
+            "该视频不存在",
+            "视频已删除",
+            "作品已删除",
+        )
+        text_parts = []
+        for attr in ("title", "html"):
+            try:
+                value = getattr(page, attr)
+                if callable(value):
+                    value = value()
+                if value:
+                    text_parts.append(str(value))
+            except Exception:
+                continue
+        text = "\n".join(text_parts)
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _drain_packets(page, *, timeout: int) -> list[Any]:

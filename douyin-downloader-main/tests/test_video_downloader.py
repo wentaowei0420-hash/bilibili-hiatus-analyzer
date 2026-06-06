@@ -10,6 +10,10 @@ from config import ConfigLoader
 from control import QueueManager, RateLimiter, RetryHandler
 import core.video_downloader as video_module
 from core.api_client import DouyinAPIClient
+from core.browser_detail_fallback import (
+    BrowserDetailFallback,
+    BrowserVideoUnavailableError,
+)
 from core.video_downloader import VideoDownloader
 from storage import FileManager
 
@@ -199,6 +203,64 @@ def test_fetch_aweme_data_does_not_use_browser_fallback_when_disabled(tmp_path, 
     detail = asyncio.run(downloader._fetch_aweme_data("123"))
 
     assert detail is None
+
+    asyncio.run(api_client.close())
+
+
+def test_browser_detail_fallback_raises_when_page_says_video_unavailable():
+    class _FakeListen:
+        def start(self, _patterns):
+            return None
+
+        def stop(self):
+            return None
+
+        def steps(self, timeout, gap):
+            return iter(())
+
+    class _FakePage:
+        listen = _FakeListen()
+        title = "在抖音记录美好生活"
+        html = "<main>你要观看的视频不存在</main>"
+
+        def get(self, _url):
+            return None
+
+    fallback = BrowserDetailFallback()
+
+    with pytest.raises(BrowserVideoUnavailableError):
+        fallback._fetch_with_page(
+            _FakePage(),
+            "7627069176804381617",
+            timeout_seconds=5,
+            page_load_delay=0,
+        )
+
+
+def test_video_download_result_exposes_browser_unavailable_failure(tmp_path, monkeypatch):
+    downloader, api_client = _build_downloader(tmp_path)
+    downloader.config.update(browser_fallback={"enabled": True})
+    api_client.last_error = "Empty response body for /aweme/v1/web/aweme/detail/"
+
+    async def _fake_get_video_detail(_aweme_id):
+        return None
+
+    class _UnavailableFallback:
+        def fetch(self, *_args, **_kwargs):
+            raise BrowserVideoUnavailableError("gone")
+
+    monkeypatch.setattr(api_client, "get_video_detail", _fake_get_video_detail)
+    monkeypatch.setattr(
+        video_module,
+        "get_shared_browser_detail_fallback",
+        lambda: _UnavailableFallback(),
+    )
+
+    result = asyncio.run(downloader.download({"aweme_id": "7627069176804381617"}))
+
+    assert result.failed == 1
+    assert result.error_kind == "video_unavailable"
+    assert "视频不存在" in result.error
 
     asyncio.run(api_client.close())
 

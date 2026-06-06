@@ -15,6 +15,7 @@ from .gui_schema import get_gui_metadata
 from .health_checks import check_bilibili_cookie_status
 from .job_manager import JobManager
 from .job_models import JobCreateRequest
+from .revision import health_payload
 
 
 job_manager = JobManager(max_workers=1)
@@ -39,7 +40,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/health":
-                self._json({"status": "ok", "service": "hiatus-backend", "api_version": "8"})
+                self._json(health_payload())
             elif path == "/api/capabilities":
                 self._json(_capabilities())
             elif path == "/api/config/defaults":
