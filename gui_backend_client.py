@@ -194,6 +194,19 @@ class BackendApiClient:
     def bilibili_archive_state(self, threshold: int) -> dict[str, Any]:
         return self.request("GET", f"/api/bilibili/archive?{urlencode({'threshold': int(threshold)})}")
 
+    def bilibili_rating_overview(self, search_uid: str = "") -> dict[str, Any]:
+        return self.request("GET", f"/api/bilibili/rating-overview?{urlencode({'search_uid': search_uid})}")
+
+    def bilibili_creator_detail(self, uploader_id: str) -> dict[str, Any]:
+        return self.request("GET", f"/api/bilibili/creator-detail/{quote(uploader_id, safe='')}")
+
+    def save_bilibili_creator_manual_grade(self, uploader_id: str, grade: str, note: str) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/api/bilibili/creator-manual-grade",
+            json={"uploader_id": uploader_id, "grade": grade, "note": note},
+        )
+
     def archive_bilibili_creators(
         self,
         *,
@@ -328,6 +341,10 @@ def rating_refresh_payload() -> dict[str, Any]:
     return {"kind": "douyin_rating_refresh", "action": "fetch"}
 
 
+def bilibili_rating_refresh_payload() -> dict[str, Any]:
+    return {"kind": "bilibili_rating_refresh", "action": "fetch"}
+
+
 def liked_video_cache_payload() -> dict[str, Any]:
     return {"kind": "douyin_liked_video_cache", "action": "fetch"}
 
@@ -398,6 +415,11 @@ class RunnerThread(BackendJobThread):
 class RatingRefreshThread(BackendJobThread):
     def __init__(self, parent=None):
         super().__init__(payload=rating_refresh_payload(), parent=parent)
+
+
+class BilibiliRatingRefreshThread(BackendJobThread):
+    def __init__(self, parent=None):
+        super().__init__(payload=bilibili_rating_refresh_payload(), parent=parent)
 
 
 class DouyinLikedVideoCacheThread(BackendJobThread):

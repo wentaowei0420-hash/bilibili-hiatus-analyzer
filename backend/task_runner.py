@@ -261,6 +261,15 @@ def _dispatch_job(request: JobCreateRequest, context: TaskContext, reporter) -> 
 
     if kind == JobKind.BILIBILI_ANALYSIS:
         return _run_bilibili_main(request, reporter)
+    if kind == JobKind.BILIBILI_RATING_REFRESH:
+        from bilibili_analyzer.app import (
+            run_score_creators_from_cache,
+            run_score_videos_from_cache,
+        )
+
+        run_score_videos_from_cache()
+        output_path = run_score_creators_from_cache()
+        return {"message": f"B站评分数据已更新：{output_path}", "output_path": output_path}
     if kind == JobKind.DOUYIN_ANALYSIS:
         return _run_douyin_main(request, reporter)
     if kind == JobKind.BILIBILI_UPLOAD:

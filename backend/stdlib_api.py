@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import gui_data
+from . import bilibili_rating, gui_data
 from .bilibili_stats import get_bilibili_stats, get_bilibili_video_count_stats
 from .config_defaults import get_config_defaults
 from .douyin_video_count_stats import get_douyin_video_count_stats
@@ -56,6 +56,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(get_bilibili_video_count_stats(_int_query(query, "min_video_count", 1000)))
             elif path == "/api/bilibili/archive":
                 self._json(gui_data.get_bilibili_archive_state(_int_query(query, "threshold", 100)))
+            elif path == "/api/bilibili/rating-overview":
+                self._json(bilibili_rating.get_rating_overview(_str_query(query, "search_uid", "")))
+            elif path.startswith("/api/bilibili/creator-detail/"):
+                self._json(bilibili_rating.get_creator_detail(unquote(path.rsplit("/", 1)[-1])))
             elif path == "/api/douyin/stats":
                 self._json(gui_data.get_douyin_stats(_int_query(query, "high_like_threshold", 10000)))
             elif path == "/api/douyin/video-count-stats":
@@ -99,6 +103,14 @@ class _Handler(BaseHTTPRequestHandler):
                 job_id = path.split("/")[3]
                 job = job_manager.cancel_job(job_id)
                 self._json(job) if job else self._error(404, "Job not found.")
+            elif path == "/api/bilibili/creator-manual-grade":
+                self._json(
+                    bilibili_rating.save_creator_manual_grade(
+                        str(payload.get("uploader_id") or ""),
+                        str(payload.get("grade") or ""),
+                        str(payload.get("note") or ""),
+                    )
+                )
             elif path == "/api/douyin/creator-manual-grade":
                 self._json(
                     gui_data.save_creator_manual_grade(
@@ -206,6 +218,7 @@ def _capabilities() -> dict[str, object]:
         "queue": {"max_workers": 1},
         "job_kinds": [
             "bilibili_analysis",
+            "bilibili_rating_refresh",
             "douyin_analysis",
             "douyin_unfollow",
             "douyin_rating_refresh",

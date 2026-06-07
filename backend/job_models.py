@@ -63,6 +63,7 @@ except ImportError:
 
 class JobKind(str, Enum):
     BILIBILI_ANALYSIS = "bilibili_analysis"
+    BILIBILI_RATING_REFRESH = "bilibili_rating_refresh"
     DOUYIN_ANALYSIS = "douyin_analysis"
     BILIBILI_UPLOAD = "bilibili_upload"
     DOUYIN_UPLOAD = "douyin_upload"

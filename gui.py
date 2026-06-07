@@ -56,6 +56,7 @@ from gui_business import (
 )
 from gui_backend_client import (
     ApiCallThread,
+    BilibiliRatingRefreshThread,
     BackendApiClient,
     BilibiliCookieCheckThread,
     DouyinLikedVideoCacheThread,
@@ -64,6 +65,7 @@ from gui_backend_client import (
 )
 from gui_bilibili_progress import BilibiliProgressAdapter
 from gui_bilibili_archive import BilibiliArchiveDialog
+from gui_bilibili_rating import BilibiliRatingOverviewDialog
 from gui_bilibili_stats import BilibiliStatsDialog
 from gui_douyin_video_count_stats import DouyinVideoCountStatsDialog
 from gui_quick_feature_module import (
@@ -2979,6 +2981,10 @@ class MainWindow(QMainWindow):
         self.video_download_button.clicked.connect(self._open_video_downloader_gui)
         self.bilibili_stats_button = QPushButton("B站统计")
         self.bilibili_stats_button.clicked.connect(self._open_bilibili_stats)
+        self.bilibili_rating_button = QPushButton("B站评分")
+        self.bilibili_rating_button.clicked.connect(self._start_bilibili_rating)
+        self.bilibili_rating_overview_button = QPushButton("评分概览")
+        self.bilibili_rating_overview_button.clicked.connect(self._open_bilibili_rating_overview)
         self.douyin_stats_button = QPushButton("抖音统计")
         self.douyin_stats_button.clicked.connect(self._open_douyin_stats)
         self.douyin_rating_button = QPushButton("抖音评分")
@@ -3014,6 +3020,8 @@ class MainWindow(QMainWindow):
         )
         bilibili_quick_buttons = (
             self.bilibili_stats_button,
+            self.bilibili_rating_button,
+            self.bilibili_rating_overview_button,
             self.cookie_check_button,
             self.bilibili_archive_button,
             self.bilibili_auto_full_button,
@@ -3086,10 +3094,12 @@ class MainWindow(QMainWindow):
         for column in range(8):
             bilibili_button_grid.setColumnStretch(column, 1)
         bilibili_button_grid.addWidget(self.bilibili_stats_button, 0, 0)
-        bilibili_button_grid.addWidget(self.cookie_check_button, 0, 1)
-        bilibili_button_grid.addWidget(self.bilibili_archive_button, 0, 2)
-        bilibili_button_grid.addWidget(self.bilibili_auto_full_button, 0, 3)
-        bilibili_button_grid.addWidget(self.bilibili_uid_fetch_mode_button, 0, 4)
+        bilibili_button_grid.addWidget(self.bilibili_rating_overview_button, 0, 1)
+        bilibili_button_grid.addWidget(self.cookie_check_button, 0, 2)
+        bilibili_button_grid.addWidget(self.bilibili_archive_button, 0, 3)
+        bilibili_button_grid.addWidget(self.bilibili_auto_full_button, 0, 4)
+        bilibili_button_grid.addWidget(self.bilibili_uid_fetch_mode_button, 0, 5)
+        bilibili_button_grid.addWidget(self.bilibili_rating_button, 1, 0)
         bilibili_quick_layout.addLayout(bilibili_button_grid)
         controls_layout.addWidget(bilibili_quick_group)
 
@@ -3262,6 +3272,8 @@ class MainWindow(QMainWindow):
         self.full_fetch_retry_button.setEnabled(editable and supports_full_fetch_retry)
         self.auto_full_interval_spin.setEnabled(editable)
         self.liked_video_cache_button.setEnabled(editable)
+        self.bilibili_rating_button.setEnabled(editable)
+        self.bilibili_rating_overview_button.setEnabled(True)
         self.douyin_rating_button.setEnabled(editable)
         self.advanced_button.setEnabled(editable)
 
@@ -3569,6 +3581,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
+        self.bilibili_rating_button.setEnabled(False)
         self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -3690,6 +3703,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
+        self.bilibili_rating_button.setEnabled(False)
         self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -3708,6 +3722,29 @@ class MainWindow(QMainWindow):
         dialog = BilibiliStatsDialog(self)
         dialog.exec_()
 
+    def _start_bilibili_rating(self):
+        if self.worker and self.worker.isRunning():
+            self._show_info_dialog("浠诲姟杩愯涓?", "褰撳墠浠诲姟杩樺湪杩愯锛岃绛夊緟瀹屾垚銆?")
+            return
+        if self.liked_video_cache_worker and self.liked_video_cache_worker.isRunning():
+            self._show_info_dialog("\u7f13\u5b58\u8fd0\u884c\u4e2d", "\u559c\u6b22\u89c6\u9891\u7f13\u5b58\u8fd8\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210\u3002")
+            return
+
+        self.log_text.clear()
+        self._append_log("开始 B 站评分：将依次运行视频评分和 UP 主评分。")
+        self._start_task_progress("B站评分运行中，正在生成视频评分和 UP 主评分...")
+        self.start_button.setEnabled(False)
+        self.liked_video_cache_button.setEnabled(False)
+        self.bilibili_rating_button.setEnabled(False)
+        self.douyin_rating_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("缁堟杩愯")
+        self.stop_button.setStyleSheet("")
+        self.worker = BilibiliRatingRefreshThread(self)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
+
     def _start_douyin_rating(self):
         if self.worker and self.worker.isRunning():
             self._show_info_dialog("任务运行中", "当前任务还在运行，请等待完成。")
@@ -3721,6 +3758,7 @@ class MainWindow(QMainWindow):
         self._start_task_progress("抖音评分运行中，正在生成视频评分和 UP 主评分...")
         self.start_button.setEnabled(False)
         self.liked_video_cache_button.setEnabled(False)
+        self.bilibili_rating_button.setEnabled(False)
         self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -3732,6 +3770,10 @@ class MainWindow(QMainWindow):
 
     def _open_rating_overview(self):
         dialog = DouyinRatingOverviewDialog(self)
+        dialog.exec_()
+
+    def _open_bilibili_rating_overview(self):
+        dialog = BilibiliRatingOverviewDialog(self)
         dialog.exec_()
 
     def _open_archive_manager(self):
@@ -3774,6 +3816,7 @@ class MainWindow(QMainWindow):
 
     def _on_liked_video_cache_done(self, ok, message):
         _restore_button_busy(self.liked_video_cache_button)
+        self.bilibili_rating_button.setEnabled(not self.config_locked)
         self.douyin_rating_button.setEnabled(not self.config_locked)
         self._append_log(message)
         self._finish_task_progress(ok, message)
@@ -3813,6 +3856,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
+        self.bilibili_rating_button.setEnabled(False)
         self.douyin_rating_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("终止运行")
@@ -4043,6 +4087,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.start_button.setText("开始运行")
         self.liked_video_cache_button.setEnabled(not self.config_locked)
+        self.bilibili_rating_button.setEnabled(not self.config_locked)
         self.douyin_rating_button.setEnabled(not self.config_locked)
         self.stop_button.setEnabled(False)
         if message.startswith("已终止运行"):

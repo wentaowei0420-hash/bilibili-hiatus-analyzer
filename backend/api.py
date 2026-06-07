@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config_defaults import get_config_defaults
-from . import gui_data
+from . import bilibili_rating, gui_data
 from .bilibili_stats import get_bilibili_stats, get_bilibili_video_count_stats
 from .douyin_video_count_stats import get_douyin_video_count_stats
 from .gui_schema import get_gui_metadata
@@ -54,6 +54,7 @@ def capabilities() -> dict[str, object]:
         },
         "job_kinds": [
             "bilibili_analysis",
+            "bilibili_rating_refresh",
             "douyin_analysis",
             "bilibili_upload",
             "douyin_upload",
@@ -99,6 +100,25 @@ def bilibili_archive(
     threshold: int = Query(default=100, ge=1),
 ) -> dict[str, object]:
     return gui_data.get_bilibili_archive_state(threshold)
+
+
+@app.get("/api/bilibili/rating-overview")
+def bilibili_rating_overview(search_uid: str = "") -> dict[str, object]:
+    return bilibili_rating.get_rating_overview(search_uid)
+
+
+@app.get("/api/bilibili/creator-detail/{uploader_id}")
+def bilibili_creator_detail(uploader_id: str) -> dict[str, object]:
+    return bilibili_rating.get_creator_detail(uploader_id)
+
+
+@app.post("/api/bilibili/creator-manual-grade")
+def bilibili_creator_manual_grade(payload: dict[str, object]) -> dict[str, object]:
+    return bilibili_rating.save_creator_manual_grade(
+        str(payload.get("uploader_id") or ""),
+        str(payload.get("grade") or ""),
+        str(payload.get("note") or ""),
+    )
 
 
 @app.post("/api/bilibili/archive")
