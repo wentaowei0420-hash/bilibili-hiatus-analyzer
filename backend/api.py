@@ -94,6 +94,26 @@ def bilibili_video_count_stats(
     return get_bilibili_video_count_stats(min_video_count)
 
 
+@app.get("/api/bilibili/archive")
+def bilibili_archive(
+    threshold: int = Query(default=100, ge=1),
+) -> dict[str, object]:
+    return gui_data.get_bilibili_archive_state(threshold)
+
+
+@app.post("/api/bilibili/archive")
+def bilibili_archive_apply(payload: dict[str, object]) -> dict[str, object]:
+    threshold = int(payload.get("threshold") or 100)
+    if payload.get("all"):
+        return gui_data.archive_all_bilibili_candidates(threshold)
+    return gui_data.archive_bilibili_creators_by_uid(list(payload.get("uids") or []), threshold)
+
+
+@app.post("/api/bilibili/archive/restore")
+def bilibili_archive_restore(payload: dict[str, object]) -> dict[str, object]:
+    return gui_data.restore_bilibili_archived_creators(list(payload.get("uids") or []))
+
+
 @app.get("/api/douyin/stats")
 def douyin_stats(
     high_like_threshold: int = Query(default=10000, ge=0),

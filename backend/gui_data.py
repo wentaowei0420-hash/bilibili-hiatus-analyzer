@@ -23,6 +23,12 @@ def _load_douyin_config():
     return load_analyzer_config()
 
 
+def _load_bilibili_config():
+    from bilibili_analyzer.config import load_analyzer_config
+
+    return load_analyzer_config()
+
+
 def _rating_db_paths() -> tuple[Path, Path]:
     from douyin_analyzer.rating.store import rating_store_db_path, source_store_db_path
 
@@ -1341,3 +1347,40 @@ def restore_archived_creators(uids: list[str]) -> dict[str, Any]:
 
     db_path = _export_db_path()
     return {"count": restore_creators(db_path, uids)}
+
+
+def get_bilibili_archive_state(threshold: int = 100) -> dict[str, Any]:
+    from bilibili_analyzer.archive import load_archive_candidates, load_archived_creators
+
+    config = _load_bilibili_config()
+    db_path = Path(config.export_store_db)
+    candidates = load_archive_candidates(config, inactive_days_threshold=threshold)
+    archived_rows = load_archived_creators(db_path, active_only=False)
+    return {
+        "db_path": str(db_path),
+        "candidates": candidates,
+        "archived_rows": archived_rows,
+    }
+
+
+def archive_bilibili_creators_by_uid(uids: list[str], threshold: int = 100) -> dict[str, Any]:
+    from bilibili_analyzer.archive import archive_creators
+
+    state = get_bilibili_archive_state(threshold)
+    wanted = {str(uid or "").strip() for uid in (uids or []) if str(uid or "").strip()}
+    rows = [row for row in state["candidates"] if str(row.get("uploader_id") or "") in wanted]
+    return {"count": archive_creators(Path(state["db_path"]), rows)}
+
+
+def archive_all_bilibili_candidates(threshold: int = 100) -> dict[str, Any]:
+    from bilibili_analyzer.archive import archive_creators
+
+    state = get_bilibili_archive_state(threshold)
+    return {"count": archive_creators(Path(state["db_path"]), state["candidates"])}
+
+
+def restore_bilibili_archived_creators(uids: list[str]) -> dict[str, Any]:
+    from bilibili_analyzer.archive import restore_creators
+
+    config = _load_bilibili_config()
+    return {"count": restore_creators(config.export_store_db, uids)}

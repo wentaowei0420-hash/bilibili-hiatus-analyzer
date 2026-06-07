@@ -63,6 +63,7 @@ from gui_backend_client import (
     RunnerThread,
 )
 from gui_bilibili_progress import BilibiliProgressAdapter
+from gui_bilibili_archive import BilibiliArchiveDialog
 from gui_bilibili_stats import BilibiliStatsDialog
 from gui_douyin_video_count_stats import DouyinVideoCountStatsDialog
 from gui_quick_feature_module import (
@@ -141,6 +142,8 @@ def _apply_gui_metadata(metadata):
     DouyinRatingOverviewDialog.ARCHIVED_CREATOR_COLUMNS = _column_pairs(tables.get("rating_archived_creator"))
     CreatorDetailDialog.FACTOR_COLUMNS = _column_pairs(rating.get("factor_columns"))
     DouyinStatusResetDialog.COLUMNS = _column_pairs(tables.get("status_reset"))
+    BilibiliArchiveDialog.CANDIDATE_COLUMNS = _column_pairs(tables.get("bilibili_archive_candidates"))
+    BilibiliArchiveDialog.ARCHIVED_COLUMNS = _column_pairs(tables.get("bilibili_archived"))
     DouyinArchiveDialog.CANDIDATE_COLUMNS = _column_pairs(tables.get("archive_candidates"))
     DouyinArchiveDialog.ARCHIVED_COLUMNS = _column_pairs(tables.get("archived"))
 
@@ -2982,6 +2985,8 @@ class MainWindow(QMainWindow):
         self.douyin_rating_button.clicked.connect(self._start_douyin_rating)
         self.rating_overview_button = QPushButton("评分概览")
         self.rating_overview_button.clicked.connect(self._open_rating_overview)
+        self.bilibili_archive_button = QPushButton("归档管理")
+        self.bilibili_archive_button.clicked.connect(self._open_bilibili_archive_manager)
         self.archive_button = QPushButton("归档管理")
         self.archive_button.clicked.connect(self._open_archive_manager)
         self.douyin_status_reset_button = QPushButton("状态重置")
@@ -3010,6 +3015,7 @@ class MainWindow(QMainWindow):
         bilibili_quick_buttons = (
             self.bilibili_stats_button,
             self.cookie_check_button,
+            self.bilibili_archive_button,
             self.bilibili_auto_full_button,
             self.bilibili_uid_fetch_mode_button,
         )
@@ -3081,8 +3087,9 @@ class MainWindow(QMainWindow):
             bilibili_button_grid.setColumnStretch(column, 1)
         bilibili_button_grid.addWidget(self.bilibili_stats_button, 0, 0)
         bilibili_button_grid.addWidget(self.cookie_check_button, 0, 1)
-        bilibili_button_grid.addWidget(self.bilibili_auto_full_button, 0, 2)
-        bilibili_button_grid.addWidget(self.bilibili_uid_fetch_mode_button, 0, 3)
+        bilibili_button_grid.addWidget(self.bilibili_archive_button, 0, 2)
+        bilibili_button_grid.addWidget(self.bilibili_auto_full_button, 0, 3)
+        bilibili_button_grid.addWidget(self.bilibili_uid_fetch_mode_button, 0, 4)
         bilibili_quick_layout.addLayout(bilibili_button_grid)
         controls_layout.addWidget(bilibili_quick_group)
 
@@ -3729,6 +3736,10 @@ class MainWindow(QMainWindow):
 
     def _open_archive_manager(self):
         dialog = DouyinArchiveDialog(self)
+        dialog.exec_()
+
+    def _open_bilibili_archive_manager(self):
+        dialog = BilibiliArchiveDialog(self)
         dialog.exec_()
 
     def _open_douyin_status_reset(self):

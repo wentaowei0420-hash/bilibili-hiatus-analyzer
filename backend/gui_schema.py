@@ -235,6 +235,32 @@ def get_gui_metadata() -> dict[str, object]:
                     ("UP主主页链接", "homepage_url"),
                 ]
             ),
+            "bilibili_archive_candidates": _columns(
+                [
+                    ("UP主", "uploader_name"),
+                    ("未更新天数", "inactive_days"),
+                    ("最后发布时间", "latest_publish_time"),
+                    ("等级", "final_grade"),
+                    ("粉丝数", "follower_count"),
+                    ("总播放", "total_view_count"),
+                    ("作品数", "published_video_count"),
+                    ("缓存视频数", "cached_video_count"),
+                    ("最近抓取模式", "last_fetch_mode"),
+                    ("UP主主页链接", "homepage_url"),
+                ]
+            ),
+            "bilibili_archived": _columns(
+                [
+                    ("UP主", "uploader_name"),
+                    ("状态", "archive_status"),
+                    ("未更新天数", "inactive_days"),
+                    ("最后发布时间", "latest_publish_time"),
+                    ("等级", "final_grade"),
+                    ("归档时间", "archived_at"),
+                    ("归档原因", "archive_reason"),
+                    ("UP主主页链接", "homepage_url"),
+                ]
+            ),
             "archive_candidates": _columns(
                 [
                     ("UP主", "uploader_name"),

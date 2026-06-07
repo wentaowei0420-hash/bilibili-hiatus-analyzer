@@ -9,6 +9,7 @@ from common.domain_models import AnalysisResult, CreatorProfile, DataSource, Vid
 from common.output_ports import NoopExportService
 from common.repositories import AnalyzerCacheRepository
 from common.runtime_control import OperationCancelled, check_stop
+from .archive import load_active_archived_uids
 from .console_reporter import RichAnalyzerReporter
 from .export_service import BilibiliExportService
 from .http_client import RateLimitExceededError
@@ -178,6 +179,71 @@ class BilibiliHiatusAnalyzer:
     @staticmethod
     def _format_output_summary(paths):
         return "、".join(path.name for path in paths if path)
+
+    @staticmethod
+    def _full_mode_enabled(config):
+        return bool(getattr(config, "enable_video_duration_analysis", False))
+
+    @staticmethod
+    def _following_has_cached_metrics(following):
+        if not isinstance(following, dict):
+            return False
+        return all(
+            key in following and following.get(key) not in (None, "")
+            for key in ("follower_count", "total_favorited", "total_view_count")
+        )
+
+    def _latest_video_info_from_video_rows(self, following, videos):
+        if not videos:
+            return False
+
+        latest_video = max(
+            videos,
+            key=lambda item: normalize_timestamp(
+                item.get("publish_timestamp") or item.get("upload_timestamp")
+            ),
+        )
+        return {
+            "uploader_name": following.get("uname", latest_video.get("uploader_name", "未知UP主")),
+            "uploader_id": following.get("mid", latest_video.get("uploader_id", "")),
+            "video_title": latest_video.get("video_title", "未知标题"),
+            "bvid": latest_video.get("bvid", ""),
+            "upload_timestamp": normalize_timestamp(
+                latest_video.get("publish_timestamp") or latest_video.get("upload_timestamp")
+            ),
+            "like_count": latest_video.get("like_count", 0),
+            "like_count_fetched": latest_video.get("like_count_fetched", False),
+            "view_count": latest_video.get("view_count", 0),
+            "video_url": latest_video.get("video_url", ""),
+        }
+
+    def build_result_from_video_rows(self, following, videos):
+        latest_video_info = self._latest_video_info_from_video_rows(following, videos)
+        if latest_video_info is False:
+            return self.build_no_video_result_item(following)
+        result = self.build_result_item(latest_video_info)
+        result.following_group_ids = following.get("group_id_text", "")
+        result.following_group_names = following.get("group_name_text", DEFAULT_GROUP_NAME)
+        result.follower_count = self._safe_int(following.get("follower_count"), 0)
+        result.total_favorited = self._safe_int(following.get("total_favorited"), 0)
+        result.total_view_count = self._safe_int(following.get("total_view_count"), 0)
+        return result
+
+    def build_result_from_duration_entry(self, following, entry):
+        videos, _summary = self.cache_repository.duration_progress_payload(entry)
+        return self.build_result_from_video_rows(following, videos)
+
+    def _load_cached_followings_for_full_mode(self):
+        cached_followings = self.cache_repository.load_followings()
+        if not cached_followings:
+            return []
+        if not all(self._following_has_cached_metrics(item) for item in cached_followings):
+            return []
+        self.reporter.message(
+            f"♻️  已复用 {len(cached_followings)} 条基础模式关注列表缓存，"
+            "完整模式将直接进入UP主页抓取详情。"
+        )
+        return cached_followings
 
     def populate_duration_summary_defaults(self, summary, videos):
         completed_summary = dict(summary or {})
@@ -393,7 +459,7 @@ class BilibiliHiatusAnalyzer:
         )
         return remaining_followings
 
-    def analyze_video_durations(self, followings):
+    def analyze_video_durations(self, followings, results_by_mid=None, cached_video_results=None):
         if not self.config.enable_video_duration_analysis:
             return {}
 
@@ -486,6 +552,14 @@ class BilibiliHiatusAnalyzer:
                                 summary,
                             )
                         )
+                        if results_by_mid is not None and cached_video_results is not None:
+                            result_item = self.build_result_from_video_rows(following, videos)
+                            self.save_precise_result(
+                                following.get("mid"),
+                                result_item,
+                                results_by_mid,
+                                cached_video_results,
+                            )
                         self.cache_repository.save_duration_progress(duration_progress)
 
                 if not self._check_stop(
@@ -573,34 +647,102 @@ class BilibiliHiatusAnalyzer:
         self.reporter.message()
 
     def _fetch_and_prepare_followings(self):
-        followings = self.api.get_followings_list()
+        followings = []
+        if self._full_mode_enabled(self.config):
+            followings = self._load_cached_followings_for_full_mode()
+
+        if not followings:
+            followings = self.api.get_followings_list()
+            if not followings:
+                self.reporter.message("❌ 无法获取关注列表，程序退出")
+                return [], False
+
+            for following in followings:
+                self._check_stop()
+                relation_stat = self.api.get_uploader_relation_stat(
+                    following.get("mid"),
+                    following.get("uname", "UP主"),
+                )
+                following["follower_count"] = relation_stat.get("follower_count", 0)
+                following["total_favorited"] = relation_stat.get("total_favorited", 0)
+                following["total_view_count"] = relation_stat.get("total_view_count", 0)
+            self.cache_repository.save_followings(followings)
+
         if not followings:
             self.reporter.message("❌ 无法获取关注列表，程序退出")
             return [], False
 
-        for following in followings:
-            self._check_stop()
-            relation_stat = self.api.get_uploader_relation_stat(
-                following.get("mid"),
-                following.get("uname", "UP主"),
-            )
-            following["follower_count"] = relation_stat.get("follower_count", 0)
-            following["total_favorited"] = relation_stat.get("total_favorited", 0)
-            following["total_view_count"] = relation_stat.get("total_view_count", 0)
+        archive_db_path = getattr(self.config, "export_store_db", None)
+        if archive_db_path:
+            try:
+                archived_uids = load_active_archived_uids(archive_db_path)
+            except Exception:
+                archived_uids = set()
+            if archived_uids:
+                before_archive_filter = len(followings)
+                followings = [
+                    following
+                    for following in followings
+                    if str((following or {}).get("mid") or "").strip() not in archived_uids
+                ]
+                skipped_archived = before_archive_filter - len(followings)
+                if skipped_archived:
+                    self.reporter.message(
+                        f"🗄️  已跳过 {skipped_archived} 位处于 active 归档状态的长期未更新 UP，"
+                        "本轮不再进入B站主流程处理。"
+                    )
+                if not followings:
+                    self.reporter.message("🗄️  当前关注列表全部命中 active 归档状态，本轮无需继续处理。")
+                    return [], False
 
         order_field, order_desc, order_label = self.get_following_fetch_order()
         followings = self.sort_followings_by_follower_count(followings)
         total_followings = len(followings)
         partial_run = self.max_followings is not None and self.max_followings < total_followings
         if partial_run:
-            followings = followings[: self.max_followings]
-            self.reporter.message(
-                f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
-                f"本轮仅处理排序靠前的 {len(followings)} 位"
-            )
+            if self.config.enable_video_duration_analysis:
+                due_followings = self._select_due_followings_for_full_partial_run(followings)
+                due_total = len(due_followings)
+                if due_followings:
+                    followings = due_followings[: self.max_followings]
+                    self.reporter.message(
+                        f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                        f"达到完整模式抓取条件={due_total} 位 | "
+                        f"本轮仅处理排序靠前的 {len(followings)} 位过期或无记录UP主"
+                    )
+                else:
+                    followings = followings[: self.max_followings]
+                    self.reporter.message(
+                        f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                        "当前没有过期或无记录UP主，回退处理排序靠前的 "
+                        f"{len(followings)} 位"
+                    )
+            else:
+                followings = followings[: self.max_followings]
+                self.reporter.message(
+                    f"🧩 部分抓取模式已生效 | 全部关注={total_followings} 位 | "
+                    f"本轮仅处理排序靠前的 {len(followings)} 位"
+                )
         direction_label = "从高到低" if order_desc else "从低到高"
         self.reporter.message(f"📊 已按{order_label}{direction_label}排序后开始抓取。")
         return followings, partial_run
+
+    def _select_due_followings_for_full_partial_run(self, followings):
+        cached_video_results = self.cache_repository.load_precise_results()
+        duration_progress = self.cache_repository.load_duration_progress()
+        due_followings = []
+
+        for following in followings:
+            mid = str(following.get("mid"))
+            precise_entry = cached_video_results.get(mid) if isinstance(cached_video_results, dict) else None
+            duration_entry = self.cache_repository.duration_progress_entry(duration_progress, mid)
+            if (
+                self.cache_repository.should_refresh_precise_result(following, precise_entry)
+                or self.cache_repository.should_refresh_duration_result(following, duration_entry)
+            ):
+                due_followings.append(following)
+
+        return due_followings
 
     def _split_cached_and_pending(self, followings):
         cached_video_results = self.cache_repository.load_precise_results()
@@ -619,6 +761,49 @@ class BilibiliHiatusAnalyzer:
             else:
                 pending_followings.append(following)
         return results_by_mid, pending_followings, cached_video_results
+
+    def _prepare_full_mode_cached_results(self, followings):
+        cached_video_results = self.cache_repository.load_precise_results()
+        if cached_video_results:
+            self.reporter.message(f"♻️  已加载 {len(cached_video_results)} 条基础模式结果缓存。")
+
+        duration_progress = self.cache_repository.load_duration_progress()
+        if duration_progress:
+            self.reporter.message(f"♻️  已加载 {len(duration_progress)} 条完整模式详情缓存。")
+
+        results_by_mid = {}
+        fallback_results_by_mid = {}
+        for following in followings:
+            mid = str(following.get("mid"))
+            cached_result = cached_video_results.get(mid) if isinstance(cached_video_results, dict) else None
+            if isinstance(cached_result, dict):
+                refreshed_result = dict(cached_result)
+                self.cache_repository.refresh_result_runtime_fields(refreshed_result)
+                fallback_results_by_mid[mid] = AnalysisResult.from_mapping(
+                    refreshed_result,
+                    platform="bilibili",
+                )
+
+            duration_entry = self.cache_repository.duration_progress_entry(duration_progress, mid)
+            if duration_entry and not self.cache_repository.should_refresh_duration_result(
+                following,
+                duration_entry,
+            ):
+                results_by_mid[mid] = self.build_result_from_duration_entry(following, duration_entry)
+                continue
+
+            if cached_result and not self.cache_repository.should_refresh_precise_result(
+                following,
+                cached_result,
+            ):
+                refreshed_result = dict(cached_result)
+                self.cache_repository.refresh_result_runtime_fields(refreshed_result)
+                results_by_mid[mid] = AnalysisResult.from_mapping(
+                    refreshed_result,
+                    platform="bilibili",
+                )
+
+        return results_by_mid, fallback_results_by_mid, cached_video_results
 
     def _execute_precise_fetch_with_retry(
         self,
@@ -729,6 +914,24 @@ class BilibiliHiatusAnalyzer:
         followings, partial_run = self._fetch_and_prepare_followings()
         if not followings:
             return None
+
+        if self._full_mode_enabled(self.config):
+            results_by_mid, fallback_results_by_mid, cached_video_results = (
+                self._prepare_full_mode_cached_results(followings)
+            )
+            duration_progress = self.analyze_video_durations(
+                followings,
+                results_by_mid,
+                cached_video_results,
+            )
+            for mid, result_item in fallback_results_by_mid.items():
+                results_by_mid.setdefault(mid, result_item)
+            return self._enrich_sort_and_export_results(
+                list(results_by_mid.values()),
+                followings,
+                [],
+                partial_run,
+            )
 
         results_by_mid, pending_followings, cached_video_results = self._split_cached_and_pending(followings)
         failed_followings = self._execute_precise_fetch_with_retry(

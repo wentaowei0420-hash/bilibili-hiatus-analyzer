@@ -42,6 +42,7 @@ class AnalyzerConfig:
     video_view_api: str
     nav_api: str
     output_csv: Path
+    followings_cache_json: Path
     progress_json: Path
     all_videos_csv: Path
     video_duration_analysis_csv: Path
@@ -147,6 +148,7 @@ def load_analyzer_config() -> AnalyzerConfig:
         video_view_api="https://api.bilibili.com/x/web-interface/view",
         nav_api="https://api.bilibili.com/x/web-interface/nav",
         output_csv=output_dir / "bilibili_hiatus_ranking.csv",
+        followings_cache_json=state_dir / "bilibili_followings_cache.json",
         progress_json=state_dir / "bilibili_hiatus_progress.json",
         all_videos_csv=output_dir / "bilibili_all_videos.csv",
         video_duration_analysis_csv=output_dir / "bilibili_video_duration_analysis.csv",

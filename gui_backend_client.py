@@ -191,6 +191,25 @@ class BackendApiClient:
             f"/api/bilibili/video-count-stats?{urlencode({'min_video_count': int(min_video_count)})}",
         )
 
+    def bilibili_archive_state(self, threshold: int) -> dict[str, Any]:
+        return self.request("GET", f"/api/bilibili/archive?{urlencode({'threshold': int(threshold)})}")
+
+    def archive_bilibili_creators(
+        self,
+        *,
+        uids: list[str] | None = None,
+        threshold: int = 100,
+        all_candidates: bool = False,
+    ) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/api/bilibili/archive",
+            json={"uids": uids or [], "threshold": threshold, "all": all_candidates},
+        )
+
+    def restore_bilibili_archived_creators(self, uids: list[str]) -> dict[str, Any]:
+        return self.request("POST", "/api/bilibili/archive/restore", json={"uids": uids})
+
     def douyin_stats(self, high_like_threshold: int) -> dict[str, Any]:
         return self.request(
             "GET",

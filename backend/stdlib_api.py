@@ -54,6 +54,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(get_bilibili_stats(_int_query(query, "high_like_threshold", 10000)))
             elif path == "/api/bilibili/video-count-stats":
                 self._json(get_bilibili_video_count_stats(_int_query(query, "min_video_count", 1000)))
+            elif path == "/api/bilibili/archive":
+                self._json(gui_data.get_bilibili_archive_state(_int_query(query, "threshold", 100)))
             elif path == "/api/douyin/stats":
                 self._json(gui_data.get_douyin_stats(_int_query(query, "high_like_threshold", 10000)))
             elif path == "/api/douyin/video-count-stats":
@@ -129,6 +131,14 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/douyin/status-reset":
                 self._json(gui_data.reset_full_status(list(payload.get("uids") or [])))
+            elif path == "/api/bilibili/archive":
+                threshold = int(payload.get("threshold") or 100)
+                if payload.get("all"):
+                    self._json(gui_data.archive_all_bilibili_candidates(threshold))
+                else:
+                    self._json(gui_data.archive_bilibili_creators_by_uid(list(payload.get("uids") or []), threshold))
+            elif path == "/api/bilibili/archive/restore":
+                self._json(gui_data.restore_bilibili_archived_creators(list(payload.get("uids") or [])))
             elif path == "/api/douyin/archive":
                 threshold = int(payload.get("threshold") or 100)
                 if payload.get("all"):

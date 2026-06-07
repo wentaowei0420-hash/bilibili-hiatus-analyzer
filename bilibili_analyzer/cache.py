@@ -14,6 +14,44 @@ class CacheStore:
     def __init__(self, config):
         self.config = config
 
+    def load_followings_cache_payload(self):
+        try:
+            with self.config.followings_cache_json.open("r", encoding="utf-8") as cache_file:
+                data = json.load(cache_file)
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            print(f"读取B站关注列表缓存失败，将重新抓取: {exc}")
+            return {}
+
+        return data if isinstance(data, dict) else {}
+
+    def load_followings_cache(self):
+        data = self.load_followings_cache_payload()
+        followings = data.get("followings", [])
+        return followings if isinstance(followings, list) else []
+
+    def save_followings_cache(self, followings):
+        payload = {
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cached_at": int(time.time()),
+            "followings": followings or [],
+        }
+        self._write_json(self.config.followings_cache_json, payload, "保存B站关注列表缓存失败")
+        upsert_cache_entries(
+            self.config.export_store_db,
+            "bilibili",
+            {
+                str((item or {}).get("mid") or ""): item
+                for item in (followings or [])
+                if isinstance(item, dict) and str((item or {}).get("mid") or "").strip()
+            },
+            cache_type="followings",
+            source_mode="followings",
+            uploader_id_getter=lambda key, payload: ((payload or {}).get("mid") or key),
+            cached_at_getter=lambda _payload: payload.get("cached_at", ""),
+        )
+
     def load_precise_progress(self):
         try:
             with self.config.progress_json.open("r", encoding="utf-8") as progress_file:
