@@ -315,6 +315,7 @@ def liked_video_cache_payload() -> dict[str, Any]:
 
 class BackendJobThread(QThread):
     log_line = pyqtSignal(str)
+    progress_snapshot = pyqtSignal(object)
     done = pyqtSignal(bool, str)
 
     def __init__(
@@ -355,6 +356,7 @@ class BackendJobThread(QThread):
                     self.log_line.emit(str(line))
 
                 job = client.get_job(self._job_id)
+                self.progress_snapshot.emit(job)
                 status = str(job.get("status") or "")
                 if status in TERMINAL_STATUSES:
                     event_data = client.read_events(self._job_id, offset)

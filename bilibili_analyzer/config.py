@@ -171,9 +171,9 @@ def load_analyzer_config() -> AnalyzerConfig:
         request_delay=int(os.getenv("REQUEST_DELAY", "2")),
         max_request_delay=int(os.getenv("MAX_REQUEST_DELAY", "20")),
         network_retry_limit=int(os.getenv("NETWORK_RETRY_LIMIT", "3")),
-        precise_cache_max_age_hours=int(os.getenv("PRECISE_CACHE_MAX_AGE_HOURS", "72")),
+        precise_cache_max_age_hours=int(os.getenv("PRECISE_CACHE_MAX_AGE_HOURS", "12")),
         video_duration_cache_max_age_hours=int(
-            os.getenv("VIDEO_DURATION_CACHE_MAX_AGE_HOURS", "72")
+            os.getenv("VIDEO_DURATION_CACHE_MAX_AGE_HOURS", "672")
         ),
         video_analysis_start_delay=int(os.getenv("VIDEO_ANALYSIS_START_DELAY", "8")),
         batch_size=int(os.getenv("BATCH_SIZE", "25")),

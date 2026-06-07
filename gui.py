@@ -62,6 +62,7 @@ from gui_backend_client import (
     RatingRefreshThread,
     RunnerThread,
 )
+from gui_bilibili_progress import BilibiliProgressAdapter
 from gui_bilibili_stats import BilibiliStatsDialog
 from gui_douyin_video_count_stats import DouyinVideoCountStatsDialog
 from gui_quick_feature_module import (
@@ -2769,6 +2770,9 @@ class MainWindow(QMainWindow):
         self._progress_current = 0
         self._progress_total = 0
         self._progress_running = False
+        self._progress_platform = ""
+        self._progress_mode = ""
+        self._bilibili_progress = BilibiliProgressAdapter()
         self.setWindowTitle("B站/抖音数据分析系统")
         self.resize(1320, 840)
         self.setMinimumSize(1180, 760)
@@ -3550,7 +3554,11 @@ class MainWindow(QMainWindow):
 
         self.log_text.clear()
         self._append_log("B站自动完整定时触发：开始运行 B站完整模式。")
-        self._start_task_progress("B站自动完整已启动，正在等待抓取总数...")
+        self._start_task_progress(
+            "B站自动完整已启动，正在等待抓取总数...",
+            platform=config.platform,
+            mode=config.bilibili_mode,
+        )
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
@@ -3560,6 +3568,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setStyleSheet("")
         self.worker = RunnerThread(config)
         self.worker.log_line.connect(self._append_log)
+        self.worker.progress_snapshot.connect(self._on_job_progress)
         self.worker.done.connect(self._on_done)
         self.worker.start()
 
@@ -3666,7 +3675,11 @@ class MainWindow(QMainWindow):
 
         self.log_text.clear()
         self._append_log("自动 full 定时触发：开始运行抖音完整模式。")
-        self._start_task_progress("自动 full 已启动，正在等待抓取总数...")
+        self._start_task_progress(
+            "自动 full 已启动，正在等待抓取总数...",
+            platform=config.platform,
+            mode=config.douyin_fetch_mode,
+        )
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
@@ -3676,6 +3689,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setStyleSheet("")
         self.worker = RunnerThread(config)
         self.worker.log_line.connect(self._append_log)
+        self.worker.progress_snapshot.connect(self._on_job_progress)
         self.worker.done.connect(self._on_done)
         self.worker.start()
 
@@ -3780,7 +3794,11 @@ class MainWindow(QMainWindow):
             self._save_gui_config()
 
         self.log_text.clear()
-        self._start_task_progress("任务已启动，正在等待抓取总数...")
+        self._start_task_progress(
+            "任务已启动，正在等待抓取总数...",
+            platform=config.platform,
+            mode=config.bilibili_mode if config.platform == "bilibili" else config.douyin_fetch_mode,
+        )
         self.start_button.setEnabled(False)
         self.start_button.setText("运行中...")
         self.liked_video_cache_button.setEnabled(False)
@@ -3790,6 +3808,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setStyleSheet("")
         self.worker = RunnerThread(config)
         self.worker.log_line.connect(self._append_log)
+        self.worker.progress_snapshot.connect(self._on_job_progress)
         self.worker.done.connect(self._on_done)
         self.worker.start()
 
@@ -3888,10 +3907,14 @@ class MainWindow(QMainWindow):
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _start_task_progress(self, message):
+    def _start_task_progress(self, message, platform="", mode=""):
         self._progress_current = 0
         self._progress_total = 0
         self._progress_running = True
+        self._progress_platform = str(platform or "")
+        self._progress_mode = str(mode or "")
+        if self._progress_platform == "bilibili":
+            self._bilibili_progress.reset()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("运行中")
         self.progress_label.setText(message)
@@ -3922,11 +3945,38 @@ class MainWindow(QMainWindow):
         else:
             self.progress_label.setText(f"抓取进度：已处理 {current_value} / {self._progress_total}")
 
+    def _set_task_progress_exact(self, current=0, total=0, label=None):
+        self._progress_current = max(0, int(current or 0))
+        self._progress_total = max(0, int(total or 0))
+        if self._progress_total <= 0:
+            if self._progress_running:
+                self.progress_bar.setRange(0, 0)
+                self.progress_bar.setFormat("运行中")
+                if label:
+                    self.progress_label.setText(label)
+            return
+
+        current_value = min(self._progress_current, self._progress_total)
+        percent = current_value / self._progress_total * 100
+        self.progress_bar.setRange(0, self._progress_total)
+        self.progress_bar.setValue(current_value)
+        self.progress_bar.setFormat(f"{current_value}/{self._progress_total} ({percent:.1f}%)")
+        if label:
+            self.progress_label.setText(label)
+        else:
+            self.progress_label.setText(f"抓取进度：已处理 {current_value} / {self._progress_total}")
+
     def _update_task_progress_from_log(self, line):
         if not self._progress_running or not line:
             return
 
         text = str(line)
+        if self._progress_platform == "bilibili":
+            update = self._bilibili_progress.update_from_log(text)
+            if update:
+                self._set_task_progress_exact(update.current, update.total, update.label)
+                return
+
         total = self._extract_progress_total(text)
         current, current_total = self._extract_progress_current(text)
         if current_total:
@@ -3942,6 +3992,19 @@ class MainWindow(QMainWindow):
 
     def _extract_progress_current(self, text):
         return extract_progress_current(text)
+
+    def _on_job_progress(self, job):
+        if not self._progress_running or self._progress_platform != "bilibili":
+            return
+        if not isinstance(job, dict):
+            return
+        update = self._bilibili_progress.update_from_job(
+            job.get("message"),
+            job.get("current"),
+            job.get("total"),
+        )
+        if update:
+            self._set_task_progress_exact(update.current, update.total, update.label)
 
     def _finish_task_progress(self, ok, message):
         self._progress_running = False
